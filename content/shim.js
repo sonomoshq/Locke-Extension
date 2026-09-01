@@ -916,11 +916,14 @@
       const timer = setTimeout(() => finish('timeout', null), timeoutMs);
       pending.set(callId, (verdict) => finish('verdict', verdict));
       try {
-        // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration
-        // -- deliberate; see the SAME_WINDOW comment above. targetOrigin filters by
         // the receiving DOCUMENT's origin, not by listener, so every script in this
         // document could read this post whatever we passed; and location.origin throws
         // or is silently dropped in the opaque-origin frames the manifest opts into.
+        // Deliberate: targetOrigin filters by the receiving DOCUMENT origin, not
+        // by listener, so narrowing it hides nothing; and location.origin throws
+        // or is dropped in the opaque-origin frames the manifest opts into. Full
+        // reasoning at the SAME_WINDOW declaration above.
+        // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration
         window.postMessage(
           { type: 'SONOMOS_CAPTURE', callId, requestB64, provider: provider || null },
           SAME_WINDOW

@@ -1,0 +1,35 @@
+# gitleaks configuration.
+#
+# The default rule set, plus one narrow allowlist.
+#
+# Scoped by VALUE, not by path. Allowlisting `tests/publish.test.js` wholesale
+# would mean a real credential pasted into that file goes unreported, and a
+# test file is exactly where someone would paste one "just to check something".
+# Matching the specific placeholder strings keeps the rest of the file scanned.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+Synthetic store credentials in tests/publish.test.js.
+
+The publish tests drive the Chrome Web Store, Edge Add-ons and AMO adapters
+against a fake environment, so the fixture object has to look like a set of
+real credentials. Every value is an obvious placeholder — sequential hex,
+'client-1', 'user:123456:78' — and none has ever been valid anywhere.
+
+gitleaks flags EDGE_API_KEY under generic-api-key, which is the rule doing its
+job: it cannot tell a plausible-looking fixture from the real thing. The
+listed values are exempted individually so that any OTHER secret-shaped string
+in that file, including a real one, still fails the build.
+
+Real store credentials are held as repository secrets and never enter the
+working tree — see scripts/lib/creds.mjs and docs/store/CREDENTIALS.md.
+"""
+regexes = [
+  '''chrome-secret-value-0123456789''',
+  '''chrome-refresh-token-0123456789''',
+  '''edge-api-key-0123456789abcdef''',
+  '''amo-secret-value-0123456789abcdef''',
+]
