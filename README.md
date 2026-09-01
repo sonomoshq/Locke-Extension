@@ -1,12 +1,30 @@
 # Locke Extension
 
+**The browser half of [Locke](https://sonomos.ai/locke) — Sonomos's on-device
+privacy screen for AI apps.**
+
+Before a prompt leaves your browser for ChatGPT, Claude, Gemini, Grok,
+Perplexity or an AI-answering search engine, this extension holds it and asks
+the Locke desktop app whether it contains anything that shouldn't leave your
+machine. The request is sent, sent redacted, or blocked — decided **entirely on
+your device**. Nothing is scanned in a cloud, because nothing goes to one.
+
 *Formerly the Sonomos Desktop Connector.*
 
+[![Quality](https://github.com/sonomoshq/Locke-Extension/actions/workflows/quality.yml/badge.svg)](https://github.com/sonomoshq/Locke-Extension/actions/workflows/quality.yml)
+[![CI](https://github.com/sonomoshq/Locke-Extension/actions/workflows/ci.yml/badge.svg)](https://github.com/sonomoshq/Locke-Extension/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/sonomoshq/Locke-Extension/actions/workflows/codeql.yml/badge.svg)](https://github.com/sonomoshq/Locke-Extension/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/sonomoshq/Locke-Extension/badge)](https://scorecard.dev/viewer/?uri=github.com/sonomoshq/Locke-Extension)
-[![SLSA Level 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev/spec/v1.0/levels#build-l3)
+[![License: PolyForm Strict 1.0.0](https://img.shields.io/badge/license-PolyForm_Strict_1.0.0-blue)](LICENSE)
+[![Zero runtime dependencies](https://img.shields.io/badge/runtime_dependencies-0-brightgreen)](package.json)
 
-Browser extension (Chrome / Edge / Firefox) that **holds AI web-app requests
-until the Locke desktop app has screened them.**
+| | |
+|---|---|
+| 🏠 **Product** | [sonomos.ai/locke](https://sonomos.ai/locke) — what Locke is and how to get it |
+| 📖 **Help & guides** | [support.sonomos.ai](https://support.sonomos.ai) — how the desktop app and this extension work together |
+| 🔒 **Security & trust** | [trust.sonomos.ai](https://trust.sonomos.ai) — security posture, and [`SECURITY.md`](SECURITY.md) for reporting |
+| 💬 **Questions** | [GitHub Discussions](https://github.com/sonomoshq/Locke-Extension/discussions), or [sonomos.ai](https://sonomos.ai) for anything else |
+| 📚 **How it works** | [the wiki](https://github.com/sonomoshq/Locke-Extension/wiki), [`HONEST.md`](HONEST.md) for exactly what is and isn't covered |
 
 > **This source is published for transparency. It is not open source.**
 > The repository is licensed under the **PolyForm Strict License 1.0.0** —
@@ -247,8 +265,42 @@ pipeline has not run yet, not because it cannot; see
 - **All redaction happens in the desktop app.** The extension deliberately does
   none of it.
 
-## Reporting issues
+## Why publish the source of a privacy product?
 
-- Bugs / feature requests: GitHub issues
-- Security: see [SECURITY.md](SECURITY.md) — do **not** file public issues
-  for vulnerabilities
+Because "we don't read your prompts" is a claim, and claims about privacy
+software deserve to be checkable. Publishing the source lets anyone verify the
+properties that matter:
+
+- **No outbound request except loopback.** The extension's only network
+  destination is the Locke desktop app on `127.0.0.1`. This is not a policy —
+  it is enforced by CI on every change (`scripts/audit-payload.mjs` fails the
+  build on any other endpoint), and you can grep the source yourself.
+- **Zero runtime dependencies.** `package.json` declares none, so there is no
+  third-party code in what ships and no supply chain to take on faith.
+- **Reproducible builds.** Two builds of the same commit are byte-identical,
+  verified by CI on every push. The recipe is in
+  [`docs/security/RELEASE-POLICY.md`](docs/security/RELEASE-POLICY.md).
+- **Honest limitations, in writing.** [`HONEST.md`](HONEST.md) documents what
+  the extension does *not* cover — WebSocket traffic, address-bar prompts, and
+  more — rather than letting silence imply completeness.
+
+The publication is one-way by design: the licence permits reading and
+noncommercial verification, not reuse. See [`LICENSE`](LICENSE).
+
+## Getting help
+
+| I want to… | Go to |
+|---|---|
+| Install or use Locke | [support.sonomos.ai](https://support.sonomos.ai) |
+| Understand how the extension and desktop app work together | [support.sonomos.ai](https://support.sonomos.ai), or [the wiki](https://github.com/sonomoshq/Locke-Extension/wiki) |
+| Ask about security posture, compliance, audits | [trust.sonomos.ai](https://trust.sonomos.ai) |
+| Report a bug in this extension | [GitHub issues](https://github.com/sonomoshq/Locke-Extension/issues) |
+| Report a **vulnerability** | [`SECURITY.md`](SECURITY.md) — **not** a public issue |
+| Ask anything else | [GitHub Discussions](https://github.com/sonomoshq/Locke-Extension/discussions), or [sonomos.ai](https://sonomos.ai) |
+| Commercial licensing | `info@sonomos.ai` |
+
+---
+
+<sub>Locke and Sonomos are products of Sonomos, Inc. This repository contains
+the browser extension only; the Locke desktop app is distributed from
+[sonomos.ai/locke](https://sonomos.ai/locke).</sub>
