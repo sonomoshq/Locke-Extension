@@ -21,7 +21,7 @@ your device**. Nothing is scanned in a cloud, because nothing goes to one.
 | | |
 |---|---|
 | 🏠 **Product** | [sonomos.ai/locke](https://sonomos.ai/locke) — what Locke is and how to get it |
-| 📖 **Help & guides** | [support.sonomos.ai](https://support.sonomos.ai) — how the desktop app and this extension work together |
+| 📖 **Help & guides** | [support.sonomos.ai](https://sonomos.ai/support) — how the desktop app and this extension work together |
 | 🔒 **Security & trust** | [trust.sonomos.ai](https://trust.sonomos.ai) — security posture, and [`SECURITY.md`](SECURITY.md) for reporting |
 | 💬 **Questions** | [GitHub Discussions](https://github.com/sonomoshq/Locke-Extension/discussions), or [sonomos.ai](https://sonomos.ai) for anything else |
 | 📚 **How it works** | [the wiki](https://github.com/sonomoshq/Locke-Extension/wiki), [`HONEST.md`](HONEST.md) for exactly what is and isn't covered |
@@ -291,8 +291,8 @@ noncommercial verification, not reuse. See [`LICENSE`](LICENSE).
 
 | I want to… | Go to |
 |---|---|
-| Install or use Locke | [support.sonomos.ai](https://support.sonomos.ai) |
-| Understand how the extension and desktop app work together | [support.sonomos.ai](https://support.sonomos.ai), or [the wiki](https://github.com/sonomoshq/Locke-Extension/wiki) |
+| Install or use Locke | [sonomos.ai/support](https:/sonomos.ai/support) |
+| Understand how the extension and desktop app work together | [sonomos.ai/support](https:/sonomos.ai/support), or [the wiki](https://github.com/sonomoshq/Locke-Extension/wiki) |
 | Ask about security posture, compliance, audits | [trust.sonomos.ai](https://trust.sonomos.ai) |
 | Report a bug in this extension | [GitHub issues](https://github.com/sonomoshq/Locke-Extension/issues) |
 | Report a **vulnerability** | [`SECURITY.md`](SECURITY.md) — **not** a public issue |
