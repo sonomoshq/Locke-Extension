@@ -208,8 +208,8 @@ jobs:
                 if (problems.length) {
                   console.error("TRIPWIRE: non-loopback host permission introduced.");
                   for (const p of problems) console.error("  " + p);
-                  console.error("  The extension's only outbound request is a loopback presence");
-                  console.error("  beacon; page data goes via native messaging, not HTTP.");
+                  console.error("  The only outbound request this extension makes is a loopback");
+                  console.error("  presence beacon; page data goes via native messaging, not HTTP.");
                   console.error("  NOTE: this check asserts LOOPBACK, never a port — the port");
                   console.error("  bound is the CSP connect-src. See SECURITY.md A1, R-01.");
                   process.exit(1);

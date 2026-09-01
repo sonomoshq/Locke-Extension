@@ -45,22 +45,25 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The gitleaks ACTION requires a paid licence key for organisation-owned
+      # repositories. The gitleaks BINARY does not — it is open source, and it
+      # is the thing that actually does the scanning. So this runs the pinned
+      # CLI directly instead of the action wrapper: same scan, same version,
+      # no licence, no secret to manage.
+      #
+      # SECURITY.md A4 pins the version rather than tracking latest.
       - name: Gitleaks
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
-          # SECURITY.md A4 pins the gitleaks BINARY version too, not just
-          # the action: "gitleaks 8.30.1" rather than latest/master.
-          GITLEAKS_VERSION: 8.30.1
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # gitleaks-action requires a licence key for ORGANISATION-owned
-          # repositories (it is free for individual accounts and, from v2.3.x,
-          # for public repos). Set the GITLEAKS_LICENSE secret if the org
-          # owns this repo; leaving it unset on an org repo makes the action
-          # exit with a licence error rather than silently passing.
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
-          GITLEAKS_ENABLE_SUMMARY: "true"
-          # No PR comments: this repo's disclosure policy (SECURITY.md) says
-          # findings go through the private channel, and a bot comment
-          # quoting a matched secret on a public PR is the opposite of that.
-          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL "$url" -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks version
+
+          # Scans git HISTORY, not just the tip — a key three commits back is
+          # exactly what this job exists to find. --redact so a match never
+          # prints the secret itself into a public log.
+          /tmp/gitleaks git . --redact --report-format sarif --report-path gitleaks.sarif
+

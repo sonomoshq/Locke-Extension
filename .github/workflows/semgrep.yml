@@ -49,8 +49,10 @@ jobs:
         with:
           persist-credentials: false
 
-      # Rule packs per CONTRIBUTING.md "Testing": p/javascript, p/browser,
-      # p/secrets. Findings fail the job (`--error`), which is the point of
+      # Rule packs: p/javascript, p/xss, p/security-audit, p/secrets.
+      # NOTE: p/browser does not exist in the registry (HTTP 404) and took the
+      # whole scan down with it — semgrep fails the run on an invalid config
+      # rather than skipping it. Findings fail the job (`--error`), which is the point of
       # listing this as a required check.
       - name: Semgrep scan
         run: |
@@ -60,13 +62,15 @@ jobs:
           # the log and is the pass that gates the build (--error).
           semgrep scan \
             --config p/javascript \
-            --config p/browser \
+            --config p/xss \
+            --config p/security-audit \
             --config p/secrets \
             --metrics=off \
             --sarif --output semgrep.sarif || true
           semgrep scan \
             --config p/javascript \
-            --config p/browser \
+            --config p/xss \
+            --config p/security-audit \
             --config p/secrets \
             --metrics=off \
             --error

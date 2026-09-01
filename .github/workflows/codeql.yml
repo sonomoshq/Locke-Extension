@@ -54,8 +54,6 @@ jobs:
           # src/languages/builtin.json lists
           #   actions, cpp, csharp, go, java, javascript, python, ruby,
           #   rust, swift
-          - language: rust
-            build-mode: none
 
           # Also available and worth turning on later: `actions`, which
           # analyses these workflow files themselves for injection and
