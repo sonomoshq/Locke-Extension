@@ -109,7 +109,7 @@
         // by listener, so narrowing it hides nothing; and location.origin throws
         // or is dropped in the opaque-origin frames the manifest opts into. Full
         // reasoning at the SAME_WINDOW declaration above.
-        // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration
+        // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
         window.postMessage({ type: VERDICT, callId: data.callId, verdict }, SAME_WINDOW);
       } catch { /* page gone — nothing to answer */ }
     };
@@ -199,7 +199,7 @@
         // by listener, so narrowing it hides nothing; and location.origin throws
         // or is dropped in the opaque-origin frames the manifest opts into. Full
         // reasoning at the SAME_WINDOW declaration above.
-        // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration
+        // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
         window.postMessage({ type: CONFIG, config }, SAME_WINDOW);
       } catch { /* page gone */ }
     }).catch(() => { /* the shim's own defaults hold */ });

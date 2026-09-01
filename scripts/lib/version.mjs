@@ -20,6 +20,18 @@ import { root as ROOT } from '../store-build.mjs';
 
 const STORE_VERSION = /^\d+(\.\d+){0,3}$/;
 
+// Escapes every RegExp metacharacter, not just the dot.
+//
+// The call sites below interpolate a version straight into a `new RegExp(...)`
+// and used to escape `.` alone. A version is validated semver by the time it
+// reaches them, so nothing else can appear today and the old form was correct
+// — but only by accident of what the input happens to be, which is a poor
+// reason for a string to be safe. CodeQL flags it as incomplete escaping and
+// is right to.
+export function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /** Read every version site. Missing files are reported, not thrown on. */
 export function readVersions(root = ROOT) {
   const sites = [];
@@ -181,7 +193,7 @@ export function writeVersion(version, { root = ROOT, date } = {}) {
 
   const changelogPath = join(root, 'CHANGELOG.md');
   const changelog = readFileSync(changelogPath, 'utf8');
-  if (!new RegExp(`^##\\s*\\[${version.replace(/\./g, '\\.')}\\]`, 'm').test(changelog)) {
+  if (!new RegExp(`^##\\s*\\[${escapeRegExp(version)}\\]`, 'm').test(changelog)) {
     const stamp = date ?? new Date().toISOString().slice(0, 10);
     // Match the file's existing line endings. Writing bare \n into a CRLF
     // file leaves mixed endings in the one document store reviewers read

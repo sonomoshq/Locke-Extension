@@ -67,6 +67,18 @@ const REQUIRED_ICON_SIZES = [16, 32, 48, 128];
 export const PRIVACY_URL = 'https://sonomos.ai/locke/privacy';
 const WRONG_PRIVACY_URL = /https:\/\/sonomos\.ai\/privacy\b/;
 
+// The privacy-link check used `text.includes(PRIVACY_URL)`, which is satisfied
+// by any string merely CONTAINING the URL — `.../locke/privacy.evil.example`
+// counts, and so does the URL sitting inside a longer, unrelated one. It is a
+// presence check rather than an authorisation boundary, so this was never a
+// hole, but "the page links our privacy policy" deserves to mean that.
+//
+// Requires the URL to end where it should: at a quote, whitespace, `<`, `#`,
+// `?`, a trailing slash, or end of input.
+const PRIVACY_URL_RE = new RegExp(
+  PRIVACY_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + `(?=["'\\s<>#?]|/(?![\\w-])|$)`
+);
+
 export const TARGETS = Object.freeze({
   chromium: Object.freeze({
     // Chrome Web Store AND Edge Add-ons take this artifact unchanged.
@@ -288,7 +300,7 @@ export function validate(target, stagedDir) {
     for (const [pattern, label] of REMOTE_CODE_PATTERNS) {
       if (pattern.test(text)) fail(`${file} contains ${label} — stores treat this as remote/dynamic code`);
     }
-    if (text.includes(PRIVACY_URL)) privacyLinks++;
+    if (PRIVACY_URL_RE.test(text)) privacyLinks++;
     else if (WRONG_PRIVACY_URL.test(text)) {
       fail(`${file} links the company-wide privacy policy, which does not cover the extension — use ${PRIVACY_URL}`);
     }

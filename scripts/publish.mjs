@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 
 import { readManifest, root as ROOT } from './store-build.mjs';
 import { STORES, loadEnv, redact, secretValues } from './lib/creds.mjs';
+import { escapeRegExp } from './lib/version.mjs';
 import { runPreflight } from './preflight.mjs';
 
 // Chrome and Edge consume the identical Chromium artifact — Microsoft's own
@@ -60,7 +61,7 @@ function parseArgs(argv) {
  * survive a review.
  */
 export function releaseNotesFor(version, changelog) {
-  const escaped = version.replace(/\./g, '\\.');
+  const escaped = escapeRegExp(version);
   const heading = new RegExp(`^##\\s*\\[${escaped}\\][^\\n]*$`, 'm').exec(changelog);
   if (!heading) return null;
 
