@@ -13,7 +13,7 @@
 // and a mismatched version is not a cosmetic problem: it is what the store
 // APIs key their "is this actually a new version" rejection on.
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { root as ROOT } from '../store-build.mjs';
@@ -32,6 +32,23 @@ export function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Read a file that may legitimately not exist, without the existsSync-then-read
+// pattern that preceded it.
+//
+// `if (existsSync(p)) readFileSync(p)` asks the filesystem the same question
+// twice and acts on the first answer — the file can vanish in between, and the
+// read then throws the very error the guard was there to avoid. The risk here
+// is small (a local build script, on files in its own repository), but the fix
+// is smaller: attempt the read, and treat "not there" as the answer.
+function readIfPresent(path) {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
 /** Read every version site. Missing files are reported, not thrown on. */
 export function readVersions(root = ROOT) {
   const sites = [];
@@ -45,8 +62,9 @@ export function readVersions(root = ROOT) {
   sites.push({ file: 'package.json', path: pkgPath, version: pkg.version });
 
   const lockPath = join(root, 'package-lock.json');
-  if (existsSync(lockPath)) {
-    const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+  const lockText = readIfPresent(lockPath);
+  if (lockText !== null) {
+    const lock = JSON.parse(lockText);
     sites.push({ file: 'package-lock.json (.version)', path: lockPath, version: lock.version });
     sites.push({ file: 'package-lock.json (.packages[""])', path: lockPath, version: lock.packages?.['']?.version });
   }
@@ -161,8 +179,8 @@ export function writeVersion(version, { root = ROOT, date } = {}) {
   // keeps this off `strict_min_version` and `lockfileVersion`.
   for (const file of ['manifest.json', 'package.json']) {
     const path = join(root, file);
-    if (!existsSync(path)) continue;
-    const before = readFileSync(path, 'utf8');
+    const before = readIfPresent(path);
+    if (before === null) continue;
     const after = before.replace(
       /("version"\s*:\s*")([^"]+)(")/,
       (whole, open, value, close) => (value === current ? `${open}${version}${close}` : whole)
@@ -180,8 +198,9 @@ export function writeVersion(version, { root = ROOT, date } = {}) {
   // mis-installs from or rejects. Reserialising is safe here because npm
   // regenerates this file wholesale anyway.
   const lockPath = join(root, 'package-lock.json');
-  if (existsSync(lockPath)) {
-    const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+  const lockRaw = readIfPresent(lockPath);
+  if (lockRaw !== null) {
+    const lock = JSON.parse(lockRaw);
     let changed = false;
     if (lock.version === current) { lock.version = version; changed = true; }
     if (lock.packages?.['']?.version === current) { lock.packages[''].version = version; changed = true; }

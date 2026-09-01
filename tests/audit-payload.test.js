@@ -17,7 +17,10 @@ test('an exfiltration endpoint is caught', () => {
   const f = auditSource('fetch("https://telemetry.example.com/collect");');
   assert.equal(f.length, 1);
   assert.equal(f[0].kind, 'endpoint');
-  assert.match(f[0].detail, /telemetry\.example\.com/);
+  // Anchored: an unanchored pattern here would also pass on a detail string
+  // that merely CONTAINED the host, which is the same substring-matching
+  // weakness this audit exists to catch elsewhere.
+  assert.match(f[0].detail, /^https:\/\/telemetry\.example\.com\/collect$/);
 });
 
 test('a non-loopback host is caught even when it looks internal', () => {
