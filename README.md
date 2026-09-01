@@ -1,6 +1,6 @@
 # Locke Extension
 
-**The browser half of [Locke](https://sonomos.ai/locke) — Sonomos's on-device
+**The browser piece of [Locke](https://sonomos.ai/locke) — Sonomos's on-device
 privacy screen for AI apps.**
 
 Before a prompt leaves your browser for ChatGPT, Claude, Gemini, Grok,
