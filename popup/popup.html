@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<!-- Copyright © 2026 Sonomos, Inc. All rights reserved. -->
+
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Locke Extension</title>
+  <script src="theme-init.js"></script>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container" aria-live="polite">
+    <div class="popup-card">
+
+      <div class="popup-header">
+        <div class="popup-header-text">
+          <span class="popup-title">LOCKE</span>
+          <span class="popup-subtitle">Browser extension</span>
+        </div>
+      </div>
+
+      <div class="status-section">
+        <div class="status-row">
+          <span class="status-label">Status</span>
+          <span class="status-badge" id="statusBadge" data-status="offline">Checking…</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">Screening</span>
+          <span class="status-value" id="screeningValue" data-screening="unconfirmed">Checking…</span>
+        </div>
+        <p class="status-detail" id="statusDetail">Contacting the Locke desktop app.</p>
+        <p class="status-note" id="screeningNote" hidden></p>
+      </div>
+
+      <div class="popup-disclaimer">
+        <a
+          id="privacyLink"
+          class="popup-link"
+          href="https://sonomos.ai/locke/privacy"
+          target="_blank"
+          rel="noopener noreferrer"
+        >Privacy</a>
+        <span class="popup-disclaimer-sep" aria-hidden="true">·</span>
+        <a
+          id="eulaLink"
+          class="popup-link"
+          href="https://sonomos.ai/eula"
+          target="_blank"
+          rel="noopener noreferrer"
+        >EULA</a>
+      </div>
+
+    </div>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,177 @@
+{
+  "manifest_version": 3,
+  "name": "Locke Extension",
+  "short_name": "Locke",
+  "version": "2.0.0",
+  "description": "Connects your browser to the Locke desktop app so AI website requests are held and scanned on-device before leaving your machine.",
+  "author": "Sonomos, Inc.",
+  "minimum_chrome_version": "120",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Locke Extension — click for connection status",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "scripts": [
+      "background/service-worker.js"
+    ],
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://aistudio.google.com/*",
+        "https://*.aistudio.google.com/*",
+        "https://assistant.kagi.com/*",
+        "https://*.assistant.kagi.com/*",
+        "https://chat.deepseek.com/*",
+        "https://*.chat.deepseek.com/*",
+        "https://chat.mistral.ai/*",
+        "https://*.chat.mistral.ai/*",
+        "https://chat.openai.com/*",
+        "https://*.chat.openai.com/*",
+        "https://chat.qwen.ai/*",
+        "https://*.chat.qwen.ai/*",
+        "https://chatgpt.com/*",
+        "https://*.chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://*.claude.ai/*",
+        "https://claude.com/*",
+        "https://*.claude.com/*",
+        "https://console.anthropic.com/*",
+        "https://*.console.anthropic.com/*",
+        "https://console.x.ai/*",
+        "https://*.console.x.ai/*",
+        "https://copilot.microsoft.com/*",
+        "https://*.copilot.microsoft.com/*",
+        "https://duck.ai/*",
+        "https://*.duck.ai/*",
+        "https://duckduckgo.com/*",
+        "https://*.duckduckgo.com/*",
+        "https://gemini.google.com/*",
+        "https://*.gemini.google.com/*",
+        "https://grok.com/*",
+        "https://*.grok.com/*",
+        "https://kagi.com/*",
+        "https://*.kagi.com/*",
+        "https://meta.ai/*",
+        "https://*.meta.ai/*",
+        "https://perplexity.ai/*",
+        "https://*.perplexity.ai/*",
+        "https://platform.openai.com/*",
+        "https://*.platform.openai.com/*",
+        "https://search.brave.com/*",
+        "https://*.search.brave.com/*",
+        "https://www.bing.com/*",
+        "https://*.www.bing.com/*",
+        "https://www.google.com/*",
+        "https://*.www.google.com/*",
+        "https://you.com/*",
+        "https://*.you.com/*"
+      ],
+      "js": [
+        "content/web-surfaces.generated.js",
+        "content/shim.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN",
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    },
+    {
+      "matches": [
+        "https://aistudio.google.com/*",
+        "https://*.aistudio.google.com/*",
+        "https://assistant.kagi.com/*",
+        "https://*.assistant.kagi.com/*",
+        "https://chat.deepseek.com/*",
+        "https://*.chat.deepseek.com/*",
+        "https://chat.mistral.ai/*",
+        "https://*.chat.mistral.ai/*",
+        "https://chat.openai.com/*",
+        "https://*.chat.openai.com/*",
+        "https://chat.qwen.ai/*",
+        "https://*.chat.qwen.ai/*",
+        "https://chatgpt.com/*",
+        "https://*.chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://*.claude.ai/*",
+        "https://claude.com/*",
+        "https://*.claude.com/*",
+        "https://console.anthropic.com/*",
+        "https://*.console.anthropic.com/*",
+        "https://console.x.ai/*",
+        "https://*.console.x.ai/*",
+        "https://copilot.microsoft.com/*",
+        "https://*.copilot.microsoft.com/*",
+        "https://duck.ai/*",
+        "https://*.duck.ai/*",
+        "https://duckduckgo.com/*",
+        "https://*.duckduckgo.com/*",
+        "https://gemini.google.com/*",
+        "https://*.gemini.google.com/*",
+        "https://grok.com/*",
+        "https://*.grok.com/*",
+        "https://kagi.com/*",
+        "https://*.kagi.com/*",
+        "https://meta.ai/*",
+        "https://*.meta.ai/*",
+        "https://perplexity.ai/*",
+        "https://*.perplexity.ai/*",
+        "https://platform.openai.com/*",
+        "https://*.platform.openai.com/*",
+        "https://search.brave.com/*",
+        "https://*.search.brave.com/*",
+        "https://www.bing.com/*",
+        "https://*.www.bing.com/*",
+        "https://www.google.com/*",
+        "https://*.www.google.com/*",
+        "https://you.com/*",
+        "https://*.you.com/*"
+      ],
+      "js": [
+        "content/content-script.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    }
+  ],
+  "permissions": [
+    "storage",
+    "alarms",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*"
+  ],
+  "storage": {
+    "managed_schema": "managed-schema.json"
+  },
+  "content_security_policy": {
+    "extension_pages": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src http://127.0.0.1:18795; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "desktop-connector@sonomos.ai",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  }
+}

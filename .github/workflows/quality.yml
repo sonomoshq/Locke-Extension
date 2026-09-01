@@ -1,0 +1,292 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  Quality-of-life gates. Cheap, fast, zero-dependency checks that catch
+#  the mistakes this repository is actually prone to.
+#
+#  Everything here runs with no npm install: `package.json` declares no
+#  dependencies and no devDependencies, and CI keeps it that way.
+#
+#  This runs on pull requests as well as pushes, because with automated
+#  publishing from `main` the pull request is the last place a human looks
+#  before something can reach three public stores.
+# ═══════════════════════════════════════════════════════════════════════
+
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "24"
+
+jobs:
+  # ── Generated files must match their source ──────────────────────────
+  #
+  # `content/web-surfaces.generated.js`, `shared/web-surfaces.generated.js`
+  # and `manifest.json`'s content_scripts.matches are produced from
+  # `shared/ai-surfaces.json`. Editing the catalog without re-running the
+  # generator ships an extension whose declared host matches disagree with
+  # the surface list the shim enforces — quietly, and in the direction of
+  # screening less than intended.
+  generated-drift:
+    name: generated-drift
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Regenerate and diff
+        run: |
+          npm run generate
+          if ! git diff --exit-code --stat; then
+            echo "::error::Generated files are stale. Run 'npm run generate' and commit the result."
+            git diff
+            exit 1
+          fi
+          echo "generated files are current"
+
+  # ── Announce permission changes loudly ───────────────────────────────
+  #
+  # This extension's whole proposition is that it sees only what it says it
+  # sees. A change to permissions, host_permissions or the content-script
+  # match list widens what it can read, and it is the single easiest thing
+  # to wave through in review because the diff line looks small.
+  #
+  # This does not fail the build — a permission change can be entirely
+  # legitimate. It makes the change impossible to miss.
+  permission-diff:
+    name: permission-diff
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Compare the declared surface against the base branch
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          node scripts/permission-diff.mjs --base="$BASE" | tee "$RUNNER_TEMP/perm.md"
+          cat "$RUNNER_TEMP/perm.md" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── The package must actually build, and stay a sane size ────────────
+  #
+  # `npm test` exercises the modules; it does not prove the two store zips
+  # can be produced. A broken staging step would otherwise surface for the
+  # first time during a release, which is now an automatic publish.
+  package-smoke:
+    name: package-smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build both store packages
+        run: |
+          npm run package
+          ls -l dist/
+
+      # A zero-dependency extension has no business growing suddenly. A jump
+      # here means something was staged that should not have been — a stray
+      # directory, a vendored file, build output. The cap is deliberately
+      # generous; it is a tripwire, not a budget.
+      - name: Size tripwire
+        run: |
+          cap=$((5 * 1024 * 1024))
+          fail=0
+          for f in dist/*.zip; do
+            size=$(wc -c < "$f")
+            printf '%-52s %8s bytes\n' "$(basename "$f")" "$size"
+            if [ "$size" -gt "$cap" ]; then
+              echo "::error::$(basename "$f") is ${size} bytes, over the ${cap}-byte tripwire. Something unexpected was staged."
+              fail=1
+            fi
+          done
+          exit "$fail"
+
+      # The catalog is excluded from the store zips on purpose
+      # (scripts/store-build.mjs::EXCLUDE). Assert it, rather than trusting
+      # that nobody edited that set.
+      - name: The vendored catalog is not in the shipped payload
+        run: |
+          for f in dist/*.zip; do
+            if unzip -l "$f" | grep -q 'ai-surfaces.json'; then
+              echo "::error::$(basename "$f") contains shared/ai-surfaces.json, which must not ship."
+              exit 1
+            fi
+          done
+          echo "catalog correctly excluded from both zips"
+
+  # ── The privacy claim, enforced ──────────────────────────────────────
+  #
+  # SECURITY.md A1 says the extension makes no outbound request except to
+  # the desktop app on loopback. Enterprise documentation repeats it to
+  # administrators. Until now nothing checked it.
+  #
+  # The payload has no dependencies and no build step, so every endpoint it
+  # can reach is a literal in a file we wrote — which makes this closer to a
+  # proof than a heuristic, and turns a claim into a control.
+  payload-audit:
+    name: payload-audit
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Stage the payload
+        run: npm run package
+
+      # Both targets: the two zips are staged separately and a violation
+      # could exist in only one of them.
+      - name: No off-machine endpoints, no dynamic code (chromium)
+        run: node scripts/audit-payload.mjs --dir=dist/chromium
+
+      - name: No off-machine endpoints, no dynamic code (firefox)
+        run: node scripts/audit-payload.mjs --dir=dist/firefox
+
+  # ── The build is reproducible, demonstrably ──────────────────────────
+  #
+  # RELEASE-POLICY.md claims byte-identical rebuilds from the same source.
+  # That claim is load-bearing for the signing and attestation story, and it
+  # is the kind of thing that quietly stops being true — a timestamp, a
+  # directory-order dependency, a Set that stopped being sorted.
+  #
+  # Building twice and comparing hashes is the cheapest possible proof, and
+  # it fails the moment non-determinism creeps in.
+  reproducible-build:
+    name: reproducible-build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build twice and compare
+        run: |
+          # A fixed epoch, so this tests the builder's determinism rather
+          # than whether two runs happened in the same second.
+          export SOURCE_DATE_EPOCH=1700000000
+
+          npm run package
+          mkdir -p "$RUNNER_TEMP/first"
+          cp dist/*.zip "$RUNNER_TEMP/first/"
+          ( cd "$RUNNER_TEMP/first" && sha256sum *.zip | sort ) > "$RUNNER_TEMP/first.sha"
+
+          rm -rf dist
+          npm run package
+          ( cd dist && sha256sum *.zip | sort ) > "$RUNNER_TEMP/second.sha"
+
+          echo "--- first ---";  cat "$RUNNER_TEMP/first.sha"
+          echo "--- second ---"; cat "$RUNNER_TEMP/second.sha"
+
+          if ! diff -u "$RUNNER_TEMP/first.sha" "$RUNNER_TEMP/second.sha"; then
+            echo "::error::The build is not reproducible. Two builds of the same source produced different bytes, so the reproducible-build claim in docs/security/RELEASE-POLICY.md is currently false."
+            exit 1
+          fi
+          echo "byte-identical across two builds"
+
+  # ── Every third-party action is pinned to a commit ───────────────────
+  #
+  # A tag or branch reference in `uses:` is mutable: whoever controls it can
+  # change what runs in a workflow that holds store credentials and signing
+  # identity. SECURITY.md A4 claims every action is SHA-pinned. This asserts
+  # it rather than trusting review to catch a `@v4`.
+  actions-pinned:
+    name: actions-pinned
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assert every `uses:` is a 40-character SHA
+        run: |
+          bad=0
+          while IFS= read -r line; do
+            ref="${line#*@}"
+            case "$ref" in
+              # 40 hex characters and nothing else.
+              [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+              *) echo "::error::Unpinned action: $line"; bad=1 ;;
+            esac
+          done <<EOT
+          $(grep -rhoE '^\s*(- )?uses: [^ ]+' .github/workflows/ | sed 's/.*uses: //' | grep -v '^\./')
+          EOT
+          if [ "$bad" = "0" ]; then echo "every action is SHA-pinned"; fi
+          exit "$bad"
+
+  # ── Mozilla's own linter, before Mozilla runs it ─────────────────────
+  #
+  # `addons-linter` (via web-ext) is the same linter AMO runs on submission.
+  # With publishing automated from `main`, a policy violation would otherwise
+  # be discovered by a reviewer days after the merge that caused it.
+  #
+  # NOTE ON DEPENDENCIES: this repository ships zero npm dependencies by
+  # design, and `ci.yml::lint-js` enforces that `package.json` stays empty.
+  # `npx` installs web-ext only inside this job, so nothing is added to the
+  # manifest and nothing reaches the payload. The version is pinned.
+  amo-lint:
+    name: amo-lint
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Stage the Firefox payload
+        run: npm run package
+
+      - name: web-ext lint
+        run: npx --yes web-ext@8.3.0 lint --source-dir=dist/firefox --warnings-as-errors

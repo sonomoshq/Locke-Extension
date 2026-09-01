@@ -1,0 +1,57 @@
+{
+  "_comment_about_this_file": [
+    "Managed-policy template for Google Chrome / Chromium / Brave / Arc.",
+    "Drop into one of the platform-specific paths below; values land in",
+    "chrome.storage.managed and override anything the user set in the popup.",
+    "",
+    "Linux:   /etc/opt/chrome/policies/managed/sonomos.json",
+    "         (or /etc/chromium/policies/managed/sonomos.json for Chromium)",
+    "macOS:   converted to a .plist and placed at",
+    "         /Library/Managed Preferences/com.google.Chrome.plist",
+    "         (use `plutil -convert binary1` after `plutil -convert xml1 -`)",
+    "Windows: HKLM\\Software\\Policies\\Google\\Chrome\\3rdparty\\extensions\\",
+    "         <EXTENSION_ID>\\policy (REG_SZ values), or via GPO using the",
+    "         provided ADMX/ADML files in this directory.",
+    "",
+    "Replace <EXTENSION_ID> below with the actual 32-char Chrome extension",
+    "ID. For a Chrome Web Store install, the ID is on the listing page. For",
+    "a self-hosted install, see docs/enterprise/DEPLOYMENT.md for how to",
+    "compute it from the manifest 'key' field."
+  ],
+
+  "ExtensionInstallForcelist": [
+    "<EXTENSION_ID>;https://clients2.google.com/service/update2/crx"
+  ],
+
+  "ExtensionSettings": {
+    "<EXTENSION_ID>": {
+      "installation_mode": "force_installed",
+      "update_url": "https://clients2.google.com/service/update2/crx",
+      "runtime_blocked_hosts": [],
+      "runtime_allowed_hosts": ["*://127.0.0.1/*"],
+      "_comment_about_self_hosted": [
+        "If you're hosting the extension off-store, change update_url to",
+        "your own crx update manifest (an XML file describing the .crx).",
+        "Chrome enterprise docs cover the format."
+      ]
+    }
+  },
+
+  "3rdparty": {
+    "extensions": {
+      "<EXTENSION_ID>": {
+        "_comment": "These map 1:1 onto managed-schema.json. See that file for the authoritative property descriptions.",
+
+        "allowedProviders": [
+          "openai-api", "anthropic-api", "chatgpt", "claude", "gemini"
+        ],
+
+        "telemetryEnabled": true,
+
+        "heartbeatSeconds": 30,
+
+        "lockedSettings": ["allowedProviders"]
+      }
+    }
+  }
+}

@@ -1,0 +1,66 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  The only live trigger in this file is `workflow_dispatch`. The push,
+#  pull_request and schedule triggers are written out below but COMMENTED
+#  OUT.
+#
+#  CONTROL-CATALOG.md splits secret scanning in two: gitleaks covers git
+#  HISTORY (this file), trivy covers the working tree (ci.yml::trivy).
+#  RELEASE-POLICY.md lists "Gitleaks secret scan" as a required status
+#  check on `main`.
+# ═══════════════════════════════════════════════════════════════════════
+
+name: Gitleaks
+
+on:
+  workflow_dispatch:
+  # Enabled on transfer to the public repository: Actions minutes are
+  # free on public repos, which was the only reason these were dormant.
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "41 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitleaks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      # fetch-depth: 0 is mandatory — the entire point of this job is to
+      # scan history, not just the tip commit. A shallow clone would report
+      # a clean tree while a leaked key sits three commits back.
+      - name: Checkout (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          # SECURITY.md A4 pins the gitleaks BINARY version too, not just
+          # the action: "gitleaks 8.30.1" rather than latest/master.
+          GITLEAKS_VERSION: 8.30.1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gitleaks-action requires a licence key for ORGANISATION-owned
+          # repositories (it is free for individual accounts and, from v2.3.x,
+          # for public repos). Set the GITLEAKS_LICENSE secret if the org
+          # owns this repo; leaving it unset on an org repo makes the action
+          # exit with a licence error rather than silently passing.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
+          GITLEAKS_ENABLE_SUMMARY: "true"
+          # No PR comments: this repo's disclosure policy (SECURITY.md) says
+          # findings go through the private channel, and a bot comment
+          # quoting a matched secret on a public PR is the opposite of that.
+          GITLEAKS_ENABLE_COMMENTS: "false"

@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Windows GPO ADMX template for Sonomos Desktop Connector.
+  Pair with the en-US/Sonomos.adml file in this directory.
+
+  Install:
+    1. Copy Sonomos.admx to %SystemRoot%\PolicyDefinitions\
+       (for domain-wide GPO: copy to your Central Store
+        \\<domain>\SYSVOL\<domain>\Policies\PolicyDefinitions\)
+    2. Copy en-US/Sonomos.adml to %SystemRoot%\PolicyDefinitions\en-US\
+
+  Replace <EXTENSION_ID> in this file with the actual 32-char Chrome
+  extension ID before deploying.
+-->
+<policyDefinitions xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   revision="1.0"
+                   schemaVersion="1.0">
+
+  <policyNamespaces>
+    <target prefix="sonomos" namespace="Sonomos.Policies.DesktopConnector"/>
+    <using prefix="windows" namespace="Microsoft.Policies.Windows"/>
+    <using prefix="google" namespace="Google.Policies"/>
+  </policyNamespaces>
+
+  <resources minRequiredRevision="1.0"/>
+
+  <categories>
+    <category name="SonomosDesktop" displayName="$(string.SonomosDesktop)">
+      <parentCategory ref="google:Cat_Google"/>
+    </category>
+  </categories>
+
+  <policies>
+    <policy name="KeystrokeGuardEnabled"
+            class="Both"
+            displayName="$(string.KeystrokeGuard)"
+            explainText="$(string.KeystrokeGuard_Explain)"
+            key="Software\Policies\Google\Chrome\3rdparty\extensions\&lt;EXTENSION_ID&gt;\policy"
+            valueName="keystrokeGuardEnabled">
+      <parentCategory ref="SonomosDesktop"/>
+      <supportedOn ref="windows:SUPPORTED_WindowsVista"/>
+      <enabledValue><decimal value="1"/></enabledValue>
+      <disabledValue><decimal value="0"/></disabledValue>
+    </policy>
+
+    <policy name="TelemetryEnabled"
+            class="Both"
+            displayName="$(string.Telemetry)"
+            explainText="$(string.Telemetry_Explain)"
+            key="Software\Policies\Google\Chrome\3rdparty\extensions\&lt;EXTENSION_ID&gt;\policy"
+            valueName="telemetryEnabled">
+      <parentCategory ref="SonomosDesktop"/>
+      <supportedOn ref="windows:SUPPORTED_WindowsVista"/>
+      <enabledValue><decimal value="1"/></enabledValue>
+      <disabledValue><decimal value="0"/></disabledValue>
+    </policy>
+
+    <policy name="HeartbeatSeconds"
+            class="Both"
+            displayName="$(string.Heartbeat)"
+            explainText="$(string.Heartbeat_Explain)"
+            key="Software\Policies\Google\Chrome\3rdparty\extensions\&lt;EXTENSION_ID&gt;\policy"
+            valueName="heartbeatSeconds">
+      <parentCategory ref="SonomosDesktop"/>
+      <supportedOn ref="windows:SUPPORTED_WindowsVista"/>
+      <elements>
+        <decimal id="Heartbeat_Decimal" valueName="heartbeatSeconds"
+                 minValue="10" maxValue="600" required="true"/>
+      </elements>
+    </policy>
+  </policies>
+</policyDefinitions>

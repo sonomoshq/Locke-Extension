@@ -1,0 +1,82 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  The only live trigger in this file is `workflow_dispatch`. The
+#  schedule, push and branch_protection_rule triggers are written out
+#  below but COMMENTED OUT.
+#
+#  `publish_results` is set to false below: it writes to the public
+#  OpenSSF dataset, so turning it on is a deliberate decision. Several
+#  Scorecard checks (Branch-Protection, Contributors, Packaging) also want
+#  a PAT — see `repo_token` below.
+#
+#  SECURITY.md A5 and CONTROL-CATALOG.md ("Posture monitoring, OpenSSF
+#  Scorecard, weekly") cite this file.
+# ═══════════════════════════════════════════════════════════════════════
+
+name: Scorecard
+
+on:
+  workflow_dispatch:
+  # Enabled on transfer to the public repository: Actions minutes are
+  # free on public repos, which was the only reason these were dormant.
+  schedule:
+    # Weekly, as CONTROL-CATALOG.md promises.
+    - cron: "34 2 * * 2"
+  push:
+    branches: [main]
+  branch_protection_rule:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analysis:
+    name: scorecard
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Needed to upload the SARIF result to code scanning.
+      security-events: write
+      # Needed by the Branch-Protection check and to read workflow runs.
+      actions: read
+      # Needed to publish results to the OpenSSF public dataset (keyless
+      # OIDC). Harmless while publish_results is false.
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run OpenSSF Scorecard
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          # Setting this to true publishes the result to the public OpenSSF
+          # dataset and earns the Scorecard badge that SECURITY.md A5 refers
+          # to as the regression signal.
+          publish_results: false
+          # The Branch-Protection and Webhooks checks need a classic PAT with
+          # `repo` scope stored as SCORECARD_READ_TOKEN. Without it those
+          # checks report "inconclusive" rather than failing the run.
+          repo_token: ${{ secrets.SCORECARD_READ_TOKEN }}
+
+      - name: Upload SARIF artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: scorecard-results
+          path: scorecard-results.sarif
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Code scanning upload, commented out for the same reason as in
+      # codeql.yml: it needs code scanning enabled for the repository.
+      # - name: Upload SARIF to code scanning
+      #   uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+      #   with:
+      #     sarif_file: scorecard-results.sarif

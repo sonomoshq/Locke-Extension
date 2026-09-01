@@ -1,0 +1,36 @@
+# Issue-template chooser configuration.
+#
+# blank_issues_enabled: false forces every reporter through a template, so
+# a security report cannot arrive as a blank public issue by accident.
+# SECURITY.md is unambiguous: "Please do not file public GitHub issues for
+# security vulnerabilities."
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: Report a security vulnerability (PRIVATE — never a public issue)
+    url: https://github.com/sonomoshq/Desktop-Extension/security/advisories/new
+    about: >-
+      Do NOT open a public issue for a security vulnerability. Use GitHub's
+      private security advisory form (linked here), or email
+      security@sonomos.ai. We acknowledge within 48 hours and aim to ship
+      fixes within 30 days for high-severity issues. Full policy, threat
+      model and scope: see SECURITY.md in this repository.
+
+  - name: Security policy, threat model and disclosure terms
+    url: https://github.com/sonomoshq/Desktop-Extension/blob/main/SECURITY.md
+    about: >-
+      What we consider in scope, the A1-A6 threat model, supported
+      versions, and our coordinated-disclosure timeline. Read this before
+      reporting anything security-related.
+
+  - name: Bug bounty scope and safe harbour
+    url: https://github.com/sonomoshq/Desktop-Extension/blob/main/docs/security/BUG-BOUNTY.md
+    about: >-
+      Program scope and safe-harbour terms for security researchers.
+
+  - name: Contributing guide
+    url: https://github.com/sonomoshq/Desktop-Extension/blob/main/CONTRIBUTING.md
+    about: >-
+      Development setup, branch and PR policy, testing, and the
+      documentation expectations for a change.

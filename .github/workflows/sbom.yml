@@ -1,0 +1,99 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  The only live trigger in this file is `workflow_dispatch`. The push and
+#  schedule triggers are written out below but COMMENTED OUT.
+#
+#  docs/security/ASVS-MAPPING.md 14.1.2 and CONTROL-CATALOG.md promise
+#  "CycloneDX + SPDX per release". The filenames below —
+#  `sbom.cyclonedx.json` and `sbom.spdx.json` — are the ones
+#  RELEASE-POLICY.md's artifact table names. release.yml generates the
+#  same two files (identically named) and attaches them to the GitHub
+#  release; this workflow is the standalone/scheduled inventory run.
+# ═══════════════════════════════════════════════════════════════════════
+
+name: SBOM
+
+on:
+  workflow_dispatch:
+  # Enabled on transfer to the public repository: Actions minutes are
+  # free on public repos, which was the only reason these were dormant.
+  push:
+    branches: [main]
+  schedule:
+    # Monthly re-inventory, so the published SBOM does not silently age out
+    # between releases.
+    - cron: "0 6 1 * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sbom-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sbom:
+    name: sbom
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare output directory
+        run: mkdir -p sbom
+
+      # Syft under the hood. What is left for it to find is
+      # package.json/package-lock.json, which yields a root component and
+      # nothing else — the honest answer: the extension has zero JS
+      # dependencies (SECURITY.md A4).
+      - name: CycloneDX SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom/sbom.cyclonedx.json
+          artifact-name: sbom.cyclonedx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: SPDX SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom/sbom.spdx.json
+          artifact-name: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Summarise
+        run: |
+          for f in sbom/sbom.cyclonedx.json sbom/sbom.spdx.json; do
+            if [ ! -s "$f" ]; then
+              echo "::error::$f is missing or empty"
+              exit 1
+            fi
+            echo "$f — $(wc -c < "$f") bytes"
+          done
+          python3 - <<'PY'
+          import json
+          with open("sbom/sbom.cyclonedx.json") as fh:
+              doc = json.load(fh)
+          comps = doc.get("components", [])
+          print(f"CycloneDX {doc.get('specVersion')}: {len(comps)} component(s)")
+          for c in comps[:40]:
+              print(f"  {c.get('type','?'):10} {c.get('name')} {c.get('version','')}")
+          PY
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: |
+            sbom/sbom.cyclonedx.json
+            sbom/sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 90

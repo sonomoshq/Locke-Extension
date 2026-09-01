@@ -1,0 +1,112 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  The only live trigger in this file is `workflow_dispatch`. The push,
+#  pull_request and schedule triggers are written out below but COMMENTED
+#  OUT; enable them together with the required status check below.
+#
+#  Uploading CodeQL results needs GitHub code scanning enabled for the
+#  repository.
+#
+#  docs/security/ASVS-MAPPING.md 12.1.1 and CONTROL-CATALOG.md cite this
+#  file as the CodeQL SAST control; RELEASE-POLICY.md lists "CodeQL SAST"
+#  as a required status check on `main`.
+# ═══════════════════════════════════════════════════════════════════════
+
+name: CodeQL
+
+on:
+  workflow_dispatch:
+  # Enabled on transfer to the public repository: Actions minutes are
+  # free on public repos, which was the only reason these were dormant.
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly re-scan so a newly published query finds old code.
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+      packages: read # CodeQL bundle download
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The extension itself: plain MV3 ES modules plus the zero-dep
+          # scripts under scripts/. `javascript-typescript` is an alias for
+          # the `javascript` CodeQL language and covers both.
+          - language: javascript-typescript
+            build-mode: none
+
+          # RUST IS SUPPORTED. Checked against github/codeql-action v4.37.6:
+          # src/languages/builtin.json lists
+          #   actions, cpp, csharp, go, java, javascript, python, ruby,
+          #   rust, swift
+          - language: rust
+            build-mode: none
+
+          # Also available and worth turning on later: `actions`, which
+          # analyses these workflow files themselves for injection and
+          # over-permissioning. Left off for now so the required-check list
+          # in RELEASE-POLICY.md does not grow before it is agreed.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Detect native host deploy key
+        if: matrix.language == 'rust'
+        id: deploykey
+        env:
+          NATIVE_HOST_DEPLOY_KEY: ${{ secrets.NATIVE_HOST_DEPLOY_KEY }}
+        run: |
+          if [ -n "$NATIVE_HOST_DEPLOY_KEY" ]; then
+            echo "present=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=no" >> "$GITHUB_OUTPUT"
+            echo "::warning::NATIVE_HOST_DEPLOY_KEY is unset; the Rust extractor will not"
+            echo "::warning::be able to resolve the native host's git dependency."
+          fi
+
+      - name: Configure SSH for the native host's git dependency
+        if: matrix.language == 'rust' && steps.deploykey.outputs.present == 'yes'
+        env:
+          NATIVE_HOST_DEPLOY_KEY: ${{ secrets.NATIVE_HOST_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$NATIVE_HOST_DEPLOY_KEY" > ~/.ssh/native_host_deploy_key
+          chmod 600 ~/.ssh/native_host_deploy_key
+          ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts 2>/dev/null
+          {
+            echo "Host github.com"
+            echo "  IdentityFile ~/.ssh/native_host_deploy_key"
+            echo "  IdentitiesOnly yes"
+          } >> ~/.ssh/config
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # CONTRIBUTING.md "Testing" promises the security-extended suite.
+          queries: security-extended
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: /language:${{ matrix.language }}

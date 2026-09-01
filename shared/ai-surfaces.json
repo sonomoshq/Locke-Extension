@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "skip_path_segments": {
+    "segments": [
+      ["event_logging"],
+      ["api", "eval"],
+      ["mcp-registry"],
+      ["telemetry"],
+      ["usage"],
+      ["billing"],
+      ["v1", "models"]
+    ]
+  },
+  "providers": [
+    {
+      "id": "openai", "name": "OpenAI / ChatGPT", "desktop_app": true, "status": "v1",
+      "api_hosts": ["api.openai.com", "chatgpt.com"],
+      "web_hosts": ["chatgpt.com", "chat.openai.com", "platform.openai.com"],
+      "capture_path_allowlist": {
+        "hosts": {
+          "chatgpt.com": [
+            "/backend-api/conversation",
+            "/backend-api/f/conversation",
+            "/backend-anon/conversation",
+            "/backend-anon/f/conversation",
+            "/unauth-mweb/conversation/updates"
+          ]
+        }
+      }
+    },
+    {
+      "id": "anthropic", "name": "Anthropic / Claude", "desktop_app": true, "status": "v1",
+      "api_hosts": ["api.anthropic.com", "claude.ai"],
+      "web_hosts": ["claude.ai", "claude.com", "console.anthropic.com"],
+      "api_scan_paths": {
+        "/v1/messages": [
+          "messages[].content",
+          "messages[].content[].text",
+          "messages[].content[].content",
+          "messages[].content[].content[].text"
+        ]
+      },
+      "capture_path_allowlist": {
+        "hosts": {
+          "claude.ai": [
+            "/api/organizations/*/chat_conversations/*/completion",
+            "/api/organizations/*/chat_conversations/*/retry_completion"
+          ]
+        }
+      }
+    },
+    {
+      "id": "google", "name": "Google Gemini / Vertex / AI Studio", "desktop_app": false, "status": "v1-api,1.x-web",
+      "api_hosts": ["generativelanguage.googleapis.com", "aiplatform.googleapis.com"],
+      "web_hosts": ["gemini.google.com", "aistudio.google.com"],
+      "web_screening": "body"
+    },
+    {
+      "id": "xai", "name": "xAI / Grok", "desktop_app": false, "status": "v1-api,1.x-web",
+      "api_hosts": ["api.x.ai"],
+      "web_hosts": ["grok.com", "console.x.ai"]
+    },
+    {
+      "id": "meta", "name": "Meta AI", "desktop_app": false, "status": "1.x-web-standalone",
+      "api_hosts": [],
+      "web_hosts": ["meta.ai"]
+    },
+    {
+      "id": "deepseek", "name": "DeepSeek", "desktop_app": false, "status": "v1-api,1.x-web",
+      "api_hosts": ["api.deepseek.com"],
+      "web_hosts": ["chat.deepseek.com"]
+    },
+    {
+      "id": "perplexity", "name": "Perplexity", "desktop_app": true, "status": "v1-api,1.x-web",
+      "api_hosts": ["api.perplexity.ai", "www.perplexity.ai"],
+      "web_hosts": ["perplexity.ai"],
+      "capture_path_allowlist": {
+        "hosts": {
+          "www.perplexity.ai": ["/rest/sse/perplexity_ask"]
+        }
+      }
+    },
+    {
+      "id": "mistral", "name": "Mistral / Le Chat", "desktop_app": false, "status": "v1-api,1.x-web",
+      "api_hosts": ["api.mistral.ai"],
+      "web_hosts": ["chat.mistral.ai"]
+    },
+    {
+      "id": "qwen", "name": "Alibaba Qwen", "desktop_app": false, "status": "v1-api,1.x-web",
+      "api_hosts": ["dashscope.aliyuncs.com"],
+      "web_hosts": ["chat.qwen.ai"]
+    },
+    {
+      "id": "microsoft", "name": "Microsoft Copilot", "desktop_app": false, "status": "1.x-web",
+      "api_hosts": [],
+      "web_hosts": ["copilot.microsoft.com"]
+    },
+    {
+      "id": "duckduckgo", "name": "DuckDuckGo Duck.ai", "desktop_app": false, "status": "1.x-web",
+      "api_hosts": [],
+      "web_hosts": ["duck.ai"]
+    },
+    {
+      "id": "kagi", "name": "Kagi Assistant", "desktop_app": false, "status": "1.x-web",
+      "api_hosts": [],
+      "web_hosts": ["assistant.kagi.com"]
+    },
+    {
+      "id": "cohere", "name": "Cohere", "desktop_app": false, "status": "v1",
+      "api_hosts": ["api.cohere.com", "api.cohere.ai"],
+      "web_hosts": []
+    },
+    {
+      "id": "aggregators", "name": "OpenAI-compatible gateways & inference providers", "desktop_app": false, "status": "v1",
+      "api_hosts": [
+        "openrouter.ai", "api.together.xyz", "api.together.ai", "api.groq.com",
+        "api.fireworks.ai", "api-inference.huggingface.co", "api.deepinfra.com",
+        "api.nebius.com", "api.octoai.cloud", "api.endpoints.anyscale.com",
+        "api.runpod.ai", "api.cerebras.ai", "api.sambanova.ai", "api.novita.ai",
+        "api.lepton.ai", "api.lambdalabs.com", "api.replicate.com", "api.ai21.com",
+        "api.minimax.chat"
+      ],
+      "web_hosts": []
+    },
+    {
+      "id": "aws-bedrock", "name": "AWS Bedrock (common regions)", "desktop_app": false, "status": "v1",
+      "api_hosts": [
+        "bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com",
+        "bedrock-runtime.eu-central-1.amazonaws.com", "bedrock-runtime.ap-northeast-1.amazonaws.com"
+      ],
+      "web_hosts": []
+    },
+    {
+      "id": "search", "name": "Web search (navigation-borne queries)", "desktop_app": false, "status": "1.x-web",
+      "api_hosts": [],
+      "web_hosts": ["www.google.com", "www.bing.com", "duckduckgo.com", "kagi.com", "you.com", "search.brave.com"],
+      "web_screening": "none"
+    },
+    {
+      "id": "local", "name": "Local model servers", "desktop_app": false, "status": "v1",
+      "api_hosts": [],
+      "web_hosts": [],
+      "localhost_ports": [11434],
+      "localhost_screening": "explicit-proxy-only"
+    }
+  ]
+}

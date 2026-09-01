@@ -1,0 +1,62 @@
+# GitHub CODEOWNERS — see https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Reviewers listed here are auto-assigned on PRs that touch the
+# matching paths. Branch protection on main requires at least one
+# CODEOWNER approval before merge.
+#
+# This is the operational arm of the two-person release policy
+# (docs/security/RELEASE-POLICY.md): the tagger of a release MUST
+# NOT be the same person who approved the release PR.
+#
+# Membership is maintained on the team, not here — add or remove people
+# at github.com/orgs/sonomoshq/teams/maintainers and every rule below
+# follows. As of 2026-08-12 the team is all five organisation members.
+#
+# NOTE 2026-08-12: this file spent a while doing nothing. It named
+# @sonomos-ai/maintainers — a retired organisation that returns 404 —
+# and then, briefly, a @sonomoshq/maintainers team that did not exist
+# yet. Both failed the same way, which is the part worth remembering: a
+# CODEOWNERS team reference resolves as `@org/team`, not as a URL. It
+# does not follow the redirect that keeps old repository links working,
+# and it requires the team to exist, be visible (not secret), AND hold
+# write access to this repository. When it resolves to nothing the rule
+# is skipped, and the parse error appears only on the repository's
+# CODEOWNERS settings page — never in a pull request. Nothing warns you.
+#
+# The team now exists with push access and all five members. If you ever
+# rename it, make it secret, or drop its repository access, every rule
+# below silently stops applying, and with it the "all CODEOWNER paths
+# reviewed" branch protection RELEASE-POLICY.md leans on. Verify with:
+#
+#   gh api repos/sonomoshq/Locke-Extension/teams
+#
+# which must list `maintainers` with permission `push`.
+
+# Default
+*                              @sonomoshq/maintainers
+
+# Security-relevant paths
+SECURITY.md                    @sonomoshq/maintainers
+manifest.json                  @sonomoshq/maintainers
+managed-schema.json            @sonomoshq/maintainers
+background/service-worker.js   @sonomoshq/maintainers
+content/content-script.js      @sonomoshq/maintainers
+content/shim.js                @sonomoshq/maintainers
+shared/constants.js            @sonomoshq/maintainers
+
+# CI / supply-chain paths
+.github/workflows/             @sonomoshq/maintainers
+
+# Legal docs require the legal reviewer's sign-off (@zgbrenner), tracked
+# separately in TODO.md. Deliberately an individual rather than the team:
+# routing these to everyone would defeat the point. Note the limit —
+# CODEOWNERS can only auto-request a review, never require that a
+# specific person's approval is the one that satisfies the rule, so this
+# is a prompt and not enforcement.
+docs/legal/                    @zgbrenner
+EXPORT_CONTROL_NOTICE.md       @zgbrenner
+
+# Docs that affect downstream IT — security review on changes
+docs/security/                 @sonomoshq/maintainers
+docs/enterprise/               @sonomoshq/maintainers
+docs/architecture/             @sonomoshq/maintainers
