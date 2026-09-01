@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Locke Extension — managed policy",
+  "description": "Enterprise-administrator-controlled settings for the Locke browser extension. Values delivered via chrome.storage.managed (Chrome ExtensionSettings policy / Firefox 3rdparty policy / managed-storage manifest). Where present, managed values override user-local settings.",
+  "type": "object",
+  "properties": {
+    "allowedProviders": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "openai-api", "anthropic-api", "anthropic-claude-api",
+          "gemini-api", "vertex-api", "xai-api",
+          "mistral-api", "cohere-api", "deepseek-api",
+          "openrouter-api", "perplexity-api", "together-api",
+          "groq-api", "fireworks-api", "huggingface-api",
+          "deepinfra-api", "nebius-api", "octoai-api", "anyscale-api",
+          "runpod-api", "cerebras-api", "sambanova-api", "novita-api",
+          "lepton-api", "lambdalabs-api", "replicate-api", "ai21-api",
+          "minimax-api", "qwen-dashscope-api",
+          "bedrock-us-east-1", "bedrock-us-west-2",
+          "bedrock-eu-central-1", "bedrock-ap-northeast-1",
+          "chatgpt", "claude-ai", "gemini", "grok", "perplexity",
+          "google-search", "bing-search", "duckduckgo",
+          "kagi", "you", "brave", "phind"
+        ]
+      },
+      "description": "Whitelist of provider IDs the shim is allowed to operate on. Empty array or unset means all built-in providers are allowed."
+    },
+    "telemetryEnabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Whether shape-only telemetry events (drift signals, mask success/failure counts — never request bodies) are logged to the service-worker console. No data leaves the device regardless."
+    },
+    "heartbeatSeconds": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 600,
+      "default": 30,
+      "description": "How often the extension probes the Locke desktop app for health. Lower = faster failure detection, more CPU. Higher = longer recovery time after the desktop app restarts."
+    },
+    "debugLogging": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether the capture path prints its normal-path decisions (allow / redact / out-of-scope) to the browser console. Warnings for a blocked or unscreened send are printed regardless of this setting. Shape-only either way: host, path, byte counts, media types and decisions — never request bodies or header values."
+    },
+    "enforceTimeoutMs": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 120000,
+      "default": 45000,
+      "description": "How long the page-side shim holds an outbound AI request waiting for the Locke desktop app's verdict before failing closed and blocking it. Must exceed worst-case screening time on the slowest machine it is deployed to, or healthy sends will be blocked."
+    },
+    "lockedSettings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Subset of the property names above that the user is not permitted to override via the popup UI. Names listed here render as read-only in the popup with a 'managed by your organisation' hint."
+    }
+  }
+}

@@ -1,0 +1,455 @@
+/* Copyright © 2026 Sonomos, Inc. All rights reserved. */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html.theme-light body {
+  background-color: #F2F2F2;
+  color: #1A1A1A;
+}
+
+html.theme-dark body {
+  background-color: #1A1A1A;
+  color: #ECECEC;
+}
+
+body {
+  font-family: 'Poppins', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+  width: 320px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.popup-container {
+  padding: 12px;
+}
+
+/* ── Card ─────────────────────────────────────────────────────── */
+
+.popup-card {
+  background: #FFFFFF;
+  border-radius: 14px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06), 0 0 0 1px rgba(0, 0, 0, 0.03);
+  padding: 22px 24px 18px;
+}
+
+html.theme-dark .popup-card {
+  background: #2D2D2D;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+/* ── Header ───────────────────────────────────────────────────── */
+
+.popup-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.popup-header-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.popup-title {
+  display: block;
+  font-family: 'Jost', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+  font-weight: 600;
+  font-size: 1.05rem;
+  letter-spacing: 0.06em;
+  color: #1A1A1A;
+}
+
+html.theme-dark .popup-title { color: #ECECEC; }
+
+.popup-subtitle {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: #888;
+  letter-spacing: 0.02em;
+}
+
+html.theme-dark .popup-subtitle { color: #999; }
+
+/* ── Theme Toggle ─────────────────────────────────────────────── */
+
+.theme-toggle {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: #F0F0F0;
+  color: #555;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
+  line-height: 1;
+  transition: background-color 160ms ease, color 160ms ease, transform 160ms ease;
+  padding: 0;
+}
+
+.theme-toggle:hover {
+  background: #E4E4E4;
+  color: #1A1A1A;
+}
+
+.theme-toggle:focus-visible {
+  outline: 2px solid rgba(92, 214, 160, 0.6);
+  outline-offset: 2px;
+}
+
+.theme-toggle:active {
+  transform: scale(0.94);
+}
+
+html.theme-dark .theme-toggle {
+  background: #3A3A3A;
+  color: #CCC;
+}
+
+html.theme-dark .theme-toggle:hover {
+  background: #4A4A4A;
+  color: #ECECEC;
+}
+
+/* ── Status Rows ──────────────────────────────────────────────── */
+
+.status-section {
+  margin-bottom: 16px;
+}
+
+.status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 9px 0;
+  border-bottom: 1px solid #F0F0F0;
+}
+
+html.theme-dark .status-row { border-bottom-color: #3A3A3A; }
+
+.status-row:last-child {
+  border-bottom: none;
+}
+
+.status-label {
+  font-size: 0.82rem;
+  font-weight: 400;
+  color: #555;
+}
+
+html.theme-dark .status-label { color: #999; }
+
+.status-value {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: #1A1A1A;
+  font-variant-numeric: tabular-nums;
+}
+
+html.theme-dark .status-value { color: #ECECEC; }
+
+.status-detail {
+  margin-top: 8px;
+  padding: 0 2px;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  color: #777;
+}
+
+html.theme-dark .status-detail { color: #999; }
+
+/* Screening value: three states, three colours, and "Active" is the only
+   reassuring one. It is earned only by a real verdict on real traffic inside
+   the freshness window, and never rendered at all while a capture has just
+   failed (shared/screening.js).
+
+   The other two are muted rather than red on purpose. "Not yet confirmed" is
+   the honest "we cannot tell", which now covers three distinct situations —
+   "nothing has been sent yet", "the last send failed and nothing can
+   explain it", and "the last send went out unexamined under your fail-open
+   setting" — while an outage is orange. Which of the three an unconfirmed
+   state means is spelled out in the detail line, because a colour cannot
+   carry that difference and guessing loud would be as wrong as guessing
+   green. */
+.status-value[data-screening="available"] { color: #2DA44E; }
+.status-value[data-screening="unavailable"] { color: #C97040; }
+.status-value[data-screening="unconfirmed"] { color: #888; }
+
+html.theme-dark .status-value[data-screening="available"] { color: #5CD6A0; }
+html.theme-dark .status-value[data-screening="unavailable"] { color: #F0A060; }
+html.theme-dark .status-value[data-screening="unconfirmed"] { color: #999; }
+
+/* The fail-open note. Content went out unscreened because the user asked for
+   that — it is a fact they need, not a fault they committed, so it reads as a
+   quiet footnote rather than a warning. */
+.status-note {
+  margin-top: 6px;
+  padding: 0 2px;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: #8A8A8A;
+}
+
+html.theme-dark .status-note { color: #8A8A8A; }
+
+.status-note[hidden] { display: none; }
+
+/* ── Status Badges ────────────────────────────────────────────── */
+
+.status-badge {
+  font-size: 0.72rem;
+  font-weight: 500;
+  padding: 3px 12px;
+  border-radius: 20px;
+  background: #F0F0F0;
+  color: #888;
+  letter-spacing: 0.01em;
+}
+
+.status-badge[data-status="online"] {
+  background: #DFFBE8;
+  color: #2DA44E;
+}
+
+.status-badge[data-status="offline"] {
+  background: #FFF0E6;
+  color: #C97040;
+}
+
+.status-badge[data-status="error"] {
+  background: #FFF0F0;
+  color: #B04040;
+}
+
+/* The browser half of the install has not run — see popup/copy.js `viewFor`.
+   Amber like "offline": something needs the user, and it is not an error. */
+.status-badge[data-status="setup"] {
+  background: #FFF0E6;
+  color: #C97040;
+}
+
+html.theme-dark .status-badge { background: #3A3A3A; color: #999; }
+html.theme-dark .status-badge[data-status="online"] { background: #1a3a25; color: #5CD6A0; }
+html.theme-dark .status-badge[data-status="offline"] { background: #3d2a1a; color: #F0A060; }
+html.theme-dark .status-badge[data-status="error"] { background: #3b1111; color: #F0A0A0; }
+html.theme-dark .status-badge[data-status="setup"] { background: #3d2a1a; color: #F0A060; }
+
+/* ── Help Body (action needed) ────────────────────────────────── */
+
+.help-body {
+  text-align: center;
+  padding: 6px 0 14px;
+}
+
+.help-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #FFF0E6;
+  color: #C97040;
+  font-size: 1.4rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 14px;
+}
+
+.help-body[data-status="disconnected"] .help-icon {
+  background: #FFF0F0;
+  color: #B04040;
+}
+
+html.theme-dark .help-icon { background: #3d2a1a; color: #F0A060; }
+html.theme-dark .help-body[data-status="disconnected"] .help-icon { background: #3b1111; color: #F0A0A0; }
+
+.help-heading {
+  font-family: 'Jost', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+  font-weight: 600;
+  font-size: 1rem;
+  color: #1A1A1A;
+  margin-bottom: 10px;
+}
+
+html.theme-dark .help-heading { color: #ECECEC; }
+
+.help-steps {
+  text-align: left;
+  list-style: decimal inside;
+  padding: 0 6px;
+  font-size: 0.78rem;
+  color: #6B7280;
+  line-height: 1.55;
+}
+
+html.theme-dark .help-steps { color: #999; }
+
+.help-steps li {
+  padding: 3px 0;
+}
+
+.help-steps code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  background: #F0F0F0;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: #333;
+}
+
+html.theme-dark .help-steps code { background: #3A3A3A; color: #ECECEC; }
+
+/* ── Primary Button ───────────────────────────────────────────── */
+
+.popup-actions {
+  border-top: 1px solid #F0F0F0;
+  padding-top: 14px;
+  margin-bottom: 14px;
+}
+
+html.theme-dark .popup-actions { border-top-color: #3A3A3A; }
+
+.btn-primary {
+  display: block;
+  width: 100%;
+  padding: 10px 16px;
+  font-family: inherit;
+  font-size: 0.84rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: #FFFFFF;
+  background: #1A1A1A;
+  border: 1px solid #1A1A1A;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #2D2D2D;
+  border-color: #2D2D2D;
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: scale(0.99);
+}
+
+.btn-primary:focus-visible {
+  outline: 2px solid rgba(92, 214, 160, 0.6);
+  outline-offset: 2px;
+}
+
+.btn-primary:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+html.theme-dark .btn-primary {
+  background: #ECECEC;
+  color: #1A1A1A;
+  border-color: #ECECEC;
+}
+
+html.theme-dark .btn-primary:hover:not(:disabled) {
+  background: #FFFFFF;
+  border-color: #FFFFFF;
+}
+
+/* ── Disclaimer ───────────────────────────────────────────────── */
+
+.popup-disclaimer {
+  font-size: 10px;
+  color: #B0B0B0;
+  text-align: center;
+  line-height: 1.5;
+  padding: 0 8px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+html.theme-dark .popup-disclaimer { color: #666; }
+
+.popup-disclaimer-sep {
+  margin: 0 6px;
+  opacity: 0.6;
+}
+
+.popup-link {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px dotted currentColor;
+}
+
+.popup-link:hover,
+.popup-link:focus-visible {
+  opacity: 0.85;
+  border-bottom-style: solid;
+  outline: none;
+}
+
+/* Reset button-element styling so an audit-log <button> looks
+   identical to the surrounding <a> links. */
+.popup-link-button {
+  background: none;
+  padding: 0;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+/* Enforcement (page-side masking) toggle */
+.switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.switch-track {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: #C7C7C7;
+  transition: background 0.15s ease;
+  display: inline-block;
+}
+.switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s ease;
+}
+.switch input:checked + .switch-track {
+  background: #2E7D32;
+}
+.switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(14px);
+}
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid #2E7D32;
+  outline-offset: 2px;
+}
+html.theme-dark .switch-track {
+  background: #555;
+}

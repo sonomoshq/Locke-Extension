@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS managed-preferences plist for Chrome.
+  Deploy via your MDM (Jamf, Intune, Kandji, Mosyle, Workspace ONE):
+    Domain: com.google.Chrome
+    Path:   /Library/Managed Preferences/com.google.Chrome.plist
+
+  Replace <EXTENSION_ID> with the actual 32-char Chrome extension ID.
+  See docs/enterprise/DEPLOYMENT.md for how to find / compute it.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>ExtensionInstallForcelist</key>
+  <array>
+    <string>&lt;EXTENSION_ID&gt;;https://clients2.google.com/service/update2/crx</string>
+  </array>
+
+  <key>ExtensionSettings</key>
+  <dict>
+    <key>&lt;EXTENSION_ID&gt;</key>
+    <dict>
+      <key>installation_mode</key>
+      <string>force_installed</string>
+      <key>update_url</key>
+      <string>https://clients2.google.com/service/update2/crx</string>
+      <key>runtime_allowed_hosts</key>
+      <array>
+        <string>*://127.0.0.1/*</string>
+      </array>
+    </dict>
+  </dict>
+
+  <key>3rdparty</key>
+  <dict>
+    <key>extensions</key>
+    <dict>
+      <key>&lt;EXTENSION_ID&gt;</key>
+      <dict>
+        <key>allowedProviders</key>
+        <array>
+          <string>openai-api</string>
+          <string>anthropic-api</string>
+          <string>chatgpt</string>
+          <string>claude</string>
+          <string>gemini</string>
+        </array>
+
+        <key>keystrokeGuardEnabled</key>
+        <true/>
+
+        <key>telemetryEnabled</key>
+        <true/>
+
+        <key>heartbeatSeconds</key>
+        <integer>30</integer>
+
+        <key>lockedSettings</key>
+        <array>
+          <string>allowedProviders</string>
+        </array>
+      </dict>
+    </dict>
+  </dict>
+</dict>
+</plist>

@@ -1,0 +1,83 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  The only live trigger in this file is `workflow_dispatch`. The push,
+#  pull_request and schedule triggers are written out below but COMMENTED
+#  OUT.
+#
+#  CONTROL-CATALOG.md splits secret scanning in two: gitleaks covers git
+#  HISTORY (this file), trivy covers the working tree (ci.yml::trivy).
+#  RELEASE-POLICY.md lists "Gitleaks secret scan" as a required status
+#  check on `main`.
+# ═══════════════════════════════════════════════════════════════════════
+
+name: Gitleaks
+
+on:
+  workflow_dispatch:
+  # Enabled on transfer to the public repository: Actions minutes are
+  # free on public repos, which was the only reason these were dormant.
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "41 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitleaks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      # fetch-depth: 0 is mandatory — the entire point of this job is to
+      # scan history, not just the tip commit. A shallow clone would report
+      # a clean tree while a leaked key sits three commits back.
+      - name: Checkout (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The gitleaks ACTION requires a paid licence key for organisation-owned
+      # repositories. The gitleaks BINARY does not — it is open source, and it
+      # is the thing that actually does the scanning. So this runs the pinned
+      # CLI directly instead of the action wrapper: same scan, same version,
+      # no licence, no secret to manage.
+      #
+      # SECURITY.md A4 pins the version rather than tracking latest.
+      - name: Gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL "$url" -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks version
+
+          # Scans git HISTORY, not just the tip — a key three commits back is
+          # exactly what this job exists to find. --redact so a match never
+          # prints the secret itself into a public log.
+          # --redact so a matched secret is never printed into a public log.
+          # Report in JSON as well as SARIF: on a finding, "leaks found: 1"
+          # on its own is not actionable, so the rule, file and line are
+          # echoed below. The value stays redacted.
+          set +e
+          /tmp/gitleaks git . --redact --report-format json --report-path gitleaks.json
+          rc=$?
+          set -e
+
+          if [ "$rc" -ne 0 ] && [ -f gitleaks.json ]; then
+            echo "::group::Findings (values redacted)"
+            node -e 'const f=require("./gitleaks.json");for(const x of f){console.log(`${x.RuleID}  ${x.File}:${x.StartLine}  commit=${(x.Commit||"").slice(0,9)}  match=${x.Match}`)}' || cat gitleaks.json
+            echo "::endgroup::"
+          fi
+          exit "$rc"
+

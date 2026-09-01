@@ -1,0 +1,20 @@
+# Line endings.
+#
+# `npm run generate` writes the content_scripts block into manifest.json with
+# LF, while a Windows checkout under core.autocrlf=true gives the rest of the
+# file CRLF. The result is a manifest with mixed line endings, which hid a real
+# defect: scripts/lib/manifest-splice.mjs round-trips LF but not CRLF, so
+# `tests/manifest-splice.test.js` ("splicing an unchanged value back is
+# byte-for-byte identical") passes on a mixed or LF file and fails on a
+# uniformly-CRLF one — i.e. on any fresh Windows clone.
+#
+# Pinning the text formats the tooling reads and writes to LF makes every
+# checkout byte-identical on every platform, which is what the byte-for-byte
+# test is actually asserting.
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+
+# Binaries are left to git's own detection.

@@ -1,0 +1,35 @@
+{
+  "_comment_about_this_file": [
+    "Firefox enterprise policies template.",
+    "",
+    "Linux:   /etc/firefox/policies/policies.json",
+    "         (or /usr/lib/firefox/distribution/policies.json)",
+    "macOS:   /Applications/Firefox.app/Contents/Resources/distribution/policies.json",
+    "Windows: HKLM\\Software\\Policies\\Mozilla\\Firefox  (registry-based)",
+    "         OR  C:\\Program Files\\Mozilla Firefox\\distribution\\policies.json",
+    "",
+    "The Firefox extension ID for Sonomos is `desktop-connector@sonomos.ai`",
+    "(set in manifest.json under browser_specific_settings.gecko.id).",
+    "",
+    "For managed-storage values, Firefox does NOT read from the policies",
+    "file. Instead it reads a separate JSON file at:",
+    "   Linux:   /etc/firefox/managed-storage/desktop-connector@sonomos.ai.json",
+    "   macOS:   /Library/Application Support/Mozilla/ManagedStorage/desktop-connector@sonomos.ai.json",
+    "   Windows: HKLM\\Software\\Mozilla\\ManagedStorage\\desktop-connector@sonomos.ai",
+    "See firefox-managed-storage.json in this directory for that file."
+  ],
+
+  "policies": {
+    "ExtensionSettings": {
+      "desktop-connector@sonomos.ai": {
+        "installation_mode": "force_installed",
+        "install_url": "https://addons.mozilla.org/firefox/downloads/latest/locke-extension/latest.xpi",
+        "default_area": "navbar"
+      }
+    },
+
+    "ExtensionUpdate": true,
+    "DisableTelemetry": false,
+    "DontCheckDefaultBrowser": true
+  }
+}

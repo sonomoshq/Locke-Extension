@@ -1,0 +1,52 @@
+# Packaged builds
+*.zip
+*.xpi
+*.crx
+dist/
+build/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
+
+# Secrets — never commit
+.env
+*.pem
+*.key
+
+# Rust build output (the native messaging host).
+# Cargo.lock IS committed (binary crate, reproducible builds).
+target/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Node test runner artifacts (we use node:test, but just in case)
+node_modules/
+coverage/
+
+# Release artifacts produced by .github/workflows/release.yml
+*.sigstore.bundle
+*.sha256
+
+# Crux per-session scratch state (regenerated each session)
+.crux/intent.json
+
+# Local Claude Code config
+.claude/
+.omc/
+
+# Store credentials never live in the working tree at all — they are read
+# from $LOCKE_RELEASE_ENV or ~/.config/sonomos/release.env (see
+# docs/store/CREDENTIALS.md). These patterns are a second line of defence.
+release.env
+*.release.env
+
+# Graphiq
+.graphiq/

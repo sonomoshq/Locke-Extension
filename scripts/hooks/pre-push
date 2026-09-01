@@ -1,0 +1,122 @@
+#!/bin/sh
+# Locke Extension pre-push gate — installed by `npm run install-hooks`, which
+# copies this file to $(git rev-parse --git-common-dir)/hooks/pre-push.
+#
+# What it is for: catching a bad push before it leaves the machine — a failing
+# test, a version that does not match the tag, a manifest a store would reject.
+# It calls the SAME scripts .github/workflows/release.yml calls, so the two
+# cannot drift: a check added in one is a check the other runs.
+#
+# What it does, by what you are pushing:
+#
+#   any branch      npm test + preflight (version, manifest)
+#   main            the same — a push to main never publishes anything
+#   refs/tags/v*    full preflight including credentials, then a real
+#                   publish to Chrome, Edge and Firefox
+#
+# Bypass with `git push --no-verify`.
+#
+# CAUTION for anyone editing the prose in this file: a global core.hooksPath
+# may point at a third-party shim that delegates here. At least one such shim
+# refuses to delegate to a repo hook whose TEXT matches the shim vendor's own
+# name — its recursion guard is a `grep` over this file.
+# Mentioning that vendor by name anywhere in here, even in a comment, silently
+# disables this entire gate: the push succeeds, nothing is validated, and
+# nothing warns you. `npm run install-hooks` checks for that condition after
+# copying. Do not set a repo-local core.hooksPath either: the value is a
+# single path, not a search list, so it would disable the global shim's own
+# work for this repo.
+
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+remote_name=${1:-origin}
+
+publish_tag=''
+publish_sha=''
+pushing_code=''
+
+# stdin: <local ref> <local sha> <remote ref> <remote sha>, one line per ref.
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -z "${local_ref:-}" ] && continue
+  # A deletion pushes the all-zero sha. Matched by shape rather than against
+  # a literal, so this keeps working in a SHA-256 repo where it is 64 chars.
+  case "$local_sha" in
+    *[!0]*) ;;
+    *) continue ;;
+  esac
+
+  case "$remote_ref" in
+    refs/tags/v*)
+      publish_tag=${remote_ref#refs/tags/}
+      publish_sha=$local_sha
+      ;;
+    refs/heads/*)
+      pushing_code=1
+      ;;
+  esac
+done
+
+# Nothing recognisable (a note, a deletion-only push): stay out of the way.
+if [ -z "$publish_tag" ] && [ -z "$pushing_code" ]; then
+  exit 0
+fi
+
+cd "$repo_root"
+
+if [ -z "$publish_tag" ]; then
+  echo "pre-push: validating (no v* tag in this push, so nothing will be published)"
+  node scripts/preflight.mjs --checks=version,manifest,tests
+  exit $?
+fi
+
+echo "pre-push: $publish_tag is a release tag — this push will submit to the extension stores"
+
+# The build reads the WORKING TREE, not the tagged commit, so the tag is only
+# meaningful if the two are the same thing. Without these two checks, tagging
+# a reviewed merge commit while carrying uncommitted debug code would ship
+# that debug code to three stores under a tag that does not contain it — and
+# would void the reproducible-build claim in RELEASE-POLICY.md, since
+# SOURCE_DATE_EPOCH pins timestamps but nothing pins content.
+head_sha=$(git rev-parse HEAD)
+if [ "$head_sha" != "$publish_sha" ]; then
+  echo "pre-push: $publish_tag points at $publish_sha but HEAD is $head_sha." >&2
+  echo "          Check out the tagged commit before pushing the tag — the build packages the working tree." >&2
+  exit 1
+fi
+if [ -n "$(git status --porcelain)" ]; then
+  echo "pre-push: the working tree has uncommitted changes, which would be packaged into the store zips." >&2
+  git status --short >&2
+  exit 1
+fi
+
+# RELEASE-POLICY.md requires the tag to sit on a commit that went through a
+# reviewed PR. The hook cannot verify who approved it, but it CAN verify the
+# commit is already on the remote's main: that rules out publishing a build
+# from a commit nobody else has, and it means the store artifact always
+# corresponds to code that survived the push before the tag ref lands.
+git fetch --quiet "$remote_name" main 2>/dev/null || {
+  echo "pre-push: could not fetch $remote_name/main — refusing to publish a tag whose commit cannot be checked" >&2
+  exit 1
+}
+if ! git merge-base --is-ancestor "$publish_sha" "$(git rev-parse "$remote_name/main")"; then
+  echo "pre-push: $publish_tag points at a commit that is not on $remote_name/main." >&2
+  echo "          Merge the release PR first, then tag the merge commit (docs/security/RELEASE-POLICY.md)." >&2
+  exit 1
+fi
+
+# preflight runs again inside publish.mjs; running it here first means a
+# credential or version problem is reported before anything is built.
+node scripts/preflight.mjs --tag="$publish_tag" --stores=all
+
+# Reattach the terminal. git feeds this hook its ref list on stdin, so without
+# </dev/tty the publisher inherits a pipe, `process.stdin.isTTY` is undefined,
+# and the "Ctrl-C to abort" window is skipped on the one code path that
+# actually submits to live stores. If there is no controlling terminal (a
+# scripted push, a CI runner), fall through without it — there is nobody to
+# prompt, and the abort window would be theatre.
+if [ -e /dev/tty ]; then
+  node scripts/publish.mjs --tag="$publish_tag" --store=all </dev/tty
+else
+  node scripts/publish.mjs --tag="$publish_tag" --store=all
+fi

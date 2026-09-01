@@ -1,0 +1,57 @@
+# Dependabot configuration.
+#
+# These schedules are live. Every workflow in .github/workflows/ is
+# currently dispatch-only, so a Dependabot PR arrives with no checks
+# attached until those triggers are enabled. That is expected.
+#
+# npm is deliberately ABSENT from this file. package.json declares zero
+# dependencies and zero devDependencies by design (SECURITY.md A4,
+# supply chain), and the ci.yml::lint-js tripwire "no JS deps in
+# package.json" fails any PR that adds one. There is nothing for
+# Dependabot to update, and configuring the npm ecosystem here would imply
+# a dependency surface that does not exist.
+
+version: 2
+
+updates:
+  # ── GitHub Actions ─────────────────────────────────────────────────
+  #
+  # Every action in .github/workflows/ is pinned to a full commit SHA with
+  # the human-readable version in a trailing comment (SECURITY.md A4:
+  # "an upstream tag move cannot silently change CI behaviour").
+  # Dependabot understands that convention: it bumps the SHA *and* rewrites
+  # the version comment, so pinning and automated updates coexist.
+  #
+  # SECURITY.md A4 records the residual risk this closes: "a malicious
+  # commit to one of the pinned-by-SHA GitHub Actions repos that targets a
+  # release tag we haven't yet bumped to is not automatically caught — we'd
+  # need to actively bump that pin."
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      # Matches CONTRIBUTING.md's conventional-commit types.
+      prefix: "ci"
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      # One PR for the routine patch/minor churn across all first-party
+      # actions; majors still arrive individually so they get real review.
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # ── Cargo (the Rust native-messaging host) ─────────────────────────
+  #
+  # dependency tree. Cargo.lock IS committed (see .gitignore) precisely so
+  # these updates are reviewable and the build is reproducible.
+  #

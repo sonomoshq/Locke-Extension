@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  English-language string table for Sonomos.admx.
+  Install at %SystemRoot%\PolicyDefinitions\en-US\Sonomos.adml
+  (or your Central Store equivalent).
+-->
+<policyDefinitionResources xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                           revision="1.0"
+                           schemaVersion="1.0">
+
+  <displayName>Sonomos Desktop Connector</displayName>
+  <description>Group Policy settings for the Sonomos Desktop Connector browser extension.</description>
+
+  <resources>
+    <stringTable>
+      <string id="SonomosDesktop">Sonomos Desktop Connector</string>
+
+      <string id="KeystrokeGuard">Enable keystroke-tracker blocker</string>
+      <string id="KeystrokeGuard_Explain">When enabled, the extension blocks known third-party keystroke trackers across all websites. When disabled, the keystroke guard is removed entirely and pages can install their own input listeners without interference.</string>
+
+      <string id="Telemetry">Enable shape-only telemetry</string>
+      <string id="Telemetry_Explain">When enabled, the extension logs shape-only events (drift signals, mask success/failure counts — never request bodies) to the service-worker console. No data leaves the device regardless of this setting.</string>
+
+      <string id="Heartbeat">Health-check interval (seconds)</string>
+      <string id="Heartbeat_Explain">How often the extension probes the local Sonomos native-messaging host for health. Lower values give faster failure detection at higher CPU cost. Allowed range 10–600 seconds; default 30.</string>
+    </stringTable>
+  </resources>
+</policyDefinitionResources>

@@ -1,0 +1,307 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  The only live trigger in this file is `workflow_dispatch` — a human
+#  clicking "Run workflow" and meaning it.
+#
+#  The push and pull_request triggers are written out below but COMMENTED
+#  OUT. Enabling them goes together with turning on the required status
+#  checks listed in docs/security/RELEASE-POLICY.md ("Branch protection");
+#  a required check that is not reporting blocks every merge.
+#
+#  Job names in this file are load-bearing: RELEASE-POLICY.md names
+#  `ci.yml::lint-js`, `lint-python`, `validate-manifest` and
+#  `trivy` as required checks, and
+#  CONTROL-CATALOG.md / ASVS-MAPPING.md / SUB-PROCESSORS.md cite the
+#  individual tripwire STEP names verbatim. Renaming either breaks the
+#  audit trail and the branch-protection config. Don't.
+# ═══════════════════════════════════════════════════════════════════════
+
+name: CI
+
+on:
+  workflow_dispatch:
+  # Enabled on transfer to the public repository: Actions minutes are
+  # free on public repos, which was the only reason these were dormant.
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least privilege by default; no job here needs more than read.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The repo has no build step and no JS dependencies; Node is only used to
+  # run node:test and the zero-dep scripts under scripts/.
+  NODE_VERSION: "24"
+
+jobs:
+  # ── Required check: ci.yml::lint-js ──────────────────────────────────
+  lint-js:
+    name: lint-js
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # There is no `npm ci` step anywhere in this workflow, on purpose:
+      # package.json declares zero dependencies and zero devDependencies.
+      # See SECURITY.md A4 (supply chain) and the tripwire below.
+      - name: no JS deps in package.json
+        run: |
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+            const deps = Object.keys(pkg.dependencies ?? {});
+            const dev = Object.keys(pkg.devDependencies ?? {});
+            if (deps.length || dev.length) {
+              console.error("TRIPWIRE: package.json must declare zero JS dependencies.");
+              if (deps.length) console.error("  dependencies:    " + deps.join(", "));
+              if (dev.length)  console.error("  devDependencies: " + dev.join(", "));
+              console.error("  The extension is deliberately dep-free at runtime and tests use");
+              console.error("  node:test. Adding a dep requires a SECURITY.md A4 review first.");
+              process.exit(1);
+            }
+            console.log("ok — dependencies {} and devDependencies {} are both empty");
+          '
+
+      # A stray node_modules/ or lockfile with real entries is the same
+      # failure wearing a different hat.
+      - name: package-lock declares no third-party packages
+        run: |
+          node --input-type=module -e '
+            import { existsSync, readFileSync } from "node:fs";
+            if (!existsSync("package-lock.json")) { console.log("no package-lock.json — fine"); process.exit(0); }
+            const lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
+            const foreign = Object.keys(lock.packages ?? {}).filter((k) => k !== "");
+            if (foreign.length) {
+              console.error("TRIPWIRE: package-lock.json resolves third-party packages:");
+              for (const f of foreign) console.error("  " + f);
+              process.exit(1);
+            }
+            console.log("ok — lockfile resolves nothing but the root package");
+          '
+
+      - name: Syntax-check every JavaScript file
+        run: |
+          # `node --check` is the whole lint story here: no ESLint, because
+          # ESLint would be a devDependency and the tripwire above forbids it.
+          fail=0
+          while IFS= read -r f; do
+            node --check "$f" || fail=1
+          done < <(git ls-files '*.js' '*.mjs')
+          exit "$fail"
+
+      - name: Unit tests (node:test)
+        run: npm test
+
+  # ── Required check: ci.yml::lint-python ──────────────────────────────
+  #
+  # This job used to be a documented no-op that asserted there was no Python
+  # in the tree and failed loudly if any appeared — at which point, it said,
+  # "this job must be replaced with a real linter (ruff + mypy) before
+  # merging". Python did appear (scripts/check_copyright.py), so the
+  # tripwire was correctly failing and this is the promised replacement.
+  #
+  # ruff runs over every tracked .py/.pyi, so a new Python file is linted
+  # from the commit that adds it — the property the tripwire was protecting.
+  # The empty-set case still fails: a required check that silently passes on
+  # nothing is how a linter quietly stops running.
+  #
+  # Lint only, not formatting. `ruff format --check` currently disagrees
+  # with the one Python file here, and reformatting it is a separate change
+  # from making this check honest. Add `ruff format --check` when someone
+  # decides to own the formatting pass.
+  lint-python:
+    name: lint-python
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No setup-python action: ubuntu-24.04 ships Python 3.12, which is all
+      # ruff needs to run. One less pinned third-party action in the supply
+      # chain, and SECURITY.md A4 counts those.
+      - name: Install ruff (version-pinned)
+        run: python3 -m pip install --disable-pip-version-check --quiet 'ruff==0.15.12'
+
+      - name: ruff check
+        run: |
+          files="$(git ls-files '*.py' '*.pyi')"
+          if [ -z "$files" ]; then
+            echo "::error::No Python files found, but lint-python is a required check."
+            echo "If Python is genuinely gone, retire this job and remove it from the"
+            echo "required checks in docs/security/RELEASE-POLICY.md in the same change."
+            echo "Leaving it passing on an empty set means it enforces nothing."
+            exit 1
+          fi
+          echo "linting:"
+          echo "$files"
+          # shellcheck disable=SC2086
+          ruff check --output-format=github $files
+
+  # ── Required check: ci.yml::validate-manifest ────────────────────────
+  validate-manifest:
+    name: validate-manifest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # The single source of truth for store rules is
+      # scripts/store-build.mjs::validate, which runs against the STAGED
+      # per-target trees rather than the repo manifest — so it checks what
+      # actually ships. `npm run validate` stages and validates without
+      # writing artifacts; preflight runs the same code path. CI calls them
+      # rather than re-implementing manifest logic in YAML or jq, because a
+      # second copy is exactly how CI and the packager drift apart.
+      - name: Validate manifest (superset + per-store transforms)
+        run: |
+          npm run validate
+          node scripts/preflight.mjs --checks=manifest
+
+      # The two steps below are cited by name in docs/security (
+      # CONTROL-CATALOG.md, ASVS-MAPPING.md 11.1.1, RISK-REGISTER.md R-01,
+      # docs/legal/SUB-PROCESSORS.md). They re-assert the specific
+      # invariants those documents promise, as named, individually
+      # greppable checks — still delegating the actual rule to
+      # scripts/store-build.mjs::validate, and reading the staged manifest
+      # so a transform cannot reintroduce what the source tree does not have.
+      - name: Host permissions are loopback-only
+        run: |
+          node --input-type=module -e '
+            import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+            import { tmpdir } from "node:os";
+            import { join } from "node:path";
+            import { TARGETS, stage, validate } from "./scripts/store-build.mjs";
+            const dist = mkdtempSync(join(tmpdir(), "ci-loopback-"));
+            try {
+              for (const target of Object.keys(TARGETS)) {
+                const staged = stage(target, dist);
+                const problems = validate(target, staged).filter((p) => p.includes("loopback"));
+                if (problems.length) {
+                  console.error("TRIPWIRE: non-loopback host permission introduced.");
+                  for (const p of problems) console.error("  " + p);
+                  console.error("  The only outbound request this extension makes is a loopback");
+                  console.error("  presence beacon; page data goes via native messaging, not HTTP.");
+                  console.error("  NOTE: this check asserts LOOPBACK, never a port — the port");
+                  console.error("  bound is the CSP connect-src. See SECURITY.md A1, R-01.");
+                  process.exit(1);
+                }
+                const m = JSON.parse(readFileSync(join(staged, "manifest.json"), "utf8"));
+                console.log(`ok — ${target} host_permissions: ` + JSON.stringify(m.host_permissions ?? []));
+              }
+            } finally {
+              rmSync(dist, { recursive: true, force: true });
+            }
+          '
+
+      - name: No content_script uses <all_urls> in MAIN world
+        run: |
+          node --input-type=module -e '
+            import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+            import { tmpdir } from "node:os";
+            import { join } from "node:path";
+            import { TARGETS, stage, validate } from "./scripts/store-build.mjs";
+            const dist = mkdtempSync(join(tmpdir(), "ci-allurls-"));
+            try {
+              for (const target of Object.keys(TARGETS)) {
+                const staged = stage(target, dist);
+                // validate() rejects a wildcard host on ANY content script,
+                // and names the MAIN world when that is where it appears.
+                const problems = validate(target, staged).filter((p) => p.includes("wildcard host"));
+                if (problems.length) {
+                  console.error("TRIPWIRE: a content script claims all-URLs scope.");
+                  for (const p of problems) console.error("  " + p);
+                  console.error("  The store listing and CONTROL-CATALOG.md promise a fixed,");
+                  console.error("  named AI-surface list. Widening it needs a listing update");
+                  console.error("  and a re-review, not a manifest edit.");
+                  process.exit(1);
+                }
+                const m = JSON.parse(readFileSync(join(staged, "manifest.json"), "utf8"));
+                const main = (m.content_scripts ?? []).filter((cs) => cs.world === "MAIN");
+                console.log(`ok — ${target}: ${main.length} MAIN-world content script(s), ` +
+                  `${main.reduce((n, cs) => n + (cs.matches?.length ?? 0), 0)} named host match(es), no all-URLs`);
+              }
+            } finally {
+              rmSync(dist, { recursive: true, force: true });
+            }
+          '
+
+      # MUST STAY LAST in this job: `npm run generate` rewrites the working
+      # tree. It regenerates content/web-surfaces.generated.js AND re-emits
+      # manifest.json through JSON.stringify, which reflows manifest.json's
+      # compact inline arrays into expanded ones. That reflow is cosmetic and
+      # NOT a staleness signal, so the diff below is scoped to the generated
+      # file only — widening it to the whole tree would fail every run.
+      - name: Generated surfaces are in sync with shared/ai-surfaces.json
+        run: |
+          npm run generate
+          if ! git diff --quiet -- content/web-surfaces.generated.js; then
+            echo "::error::content/web-surfaces.generated.js is stale."
+            echo "Run 'npm run generate' and commit the result."
+            git --no-pager diff -- content/web-surfaces.generated.js
+            exit 1
+          fi
+          echo "ok — generated surfaces match their source."
+
+  # ── Required check: ci.yml::trivy ────────────────────────────────────
+  #
+  # SECURITY.md A4 and CONTROL-CATALOG.md cite `ci.yml::trivy` for both
+  # dependency-vulnerability scanning and working-tree secret scanning
+  # (gitleaks covers git HISTORY; trivy covers the checked-out tree).
+  trivy:
+    name: trivy
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Trivy filesystem scan (vuln + secret + misconfig)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          # Fail the build on any HIGH/CRITICAL finding — SECURITY.md A4
+          # promises exactly this.
+          exit-code: "1"
+          format: table
+
+      # A SARIF upload to the Code Scanning dashboard is deliberately absent:
+      # findings fail the job above, and the table output is in the run log.
+      # To add one, run trivy a second time with `format: sarif`, feed it to
+      # `github/codeql-action/upload-sarif`, and raise this job's permissions
+      # to include `security-events: write`.

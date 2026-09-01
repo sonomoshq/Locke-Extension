@@ -1,0 +1,24 @@
+{
+  "_comment_about_this_file": [
+    "Firefox managed-storage values for Sonomos Desktop Connector.",
+    "Drop into the path matching your platform — see the comment in",
+    "firefox-policies.json for the full path list. The file MUST be",
+    "named after the gecko id: desktop-connector@sonomos.ai.json",
+    "",
+    "Firefox reads this file once at startup; restart the browser after",
+    "editing. Values land in browser.storage.managed and override the",
+    "user's popup settings."
+  ],
+
+  "name": "desktop-connector@sonomos.ai",
+  "description": "Managed configuration for Sonomos Desktop Connector",
+  "type": "storage",
+  "data": {
+    "allowedProviders": [
+      "openai-api", "anthropic-api", "chatgpt", "claude", "gemini"
+    ],
+    "telemetryEnabled": true,
+    "heartbeatSeconds": 30,
+    "lockedSettings": ["allowedProviders"]
+  }
+}

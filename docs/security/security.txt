@@ -1,0 +1,20 @@
+# RFC 9116 security.txt
+# Deploy this file to https://sonomos.ai/.well-known/security.txt
+# (and to /security.txt as a redirect, per the RFC).
+#
+# Re-sign with `gpg --clearsign security.txt` if PGP-signing is desired
+# before publishing. Without a signature browsers/scrapers still accept
+# it; the signature only matters for high-assurance pipelines.
+#
+# Update the Expires field at least annually — an expired security.txt
+# is treated by some scanners as if no policy exists.
+
+Contact: mailto:security@sonomos.ai
+Contact: https://github.com/sonomoshq/Locke-Extension/security/advisories/new
+Expires: 2027-05-10T00:00:00.000Z
+Encryption: https://sonomos.ai/.well-known/pgp-key.asc
+Preferred-Languages: en
+Canonical: https://sonomos.ai/.well-known/security.txt
+Policy: https://github.com/sonomoshq/Locke-Extension/blob/main/SECURITY.md
+Acknowledgments: https://sonomos.ai/security/acknowledgments
+Hiring: https://sonomos.ai/careers

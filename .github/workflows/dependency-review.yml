@@ -1,0 +1,74 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  The only live trigger in this file is `workflow_dispatch`. The
+#  `pull_request` trigger is written out below but COMMENTED OUT.
+#
+#  dependency-review-action reads the GitHub Dependency Graph, which must
+#  be enabled for the repository.
+#
+#  It also ONLY works on `pull_request` events — it diffs the base and
+#  head commits of a PR. A manual `workflow_dispatch` run has no PR to
+#  diff, so the review step is skipped with an explanation rather than
+#  erroring out; see the guard below.
+#
+#  SECURITY.md A4 and CONTROL-CATALOG.md cite this file;
+#  RELEASE-POLICY.md lists "Dependency review" as a required status check
+#  on `main`.
+# ═══════════════════════════════════════════════════════════════════════
+
+name: Dependency review
+
+on:
+  workflow_dispatch:
+  # Enabled on transfer to the public repository: Actions minutes are
+  # free on public repos, which was the only reason these were dormant.
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: dependency-review
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Needed only for `comment-summary-in-pr`; harmless otherwise.
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Explain manual dispatch
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "::notice::dependency-review only runs on pull_request events."
+          echo "This run was triggered by '${{ github.event_name }}', so there is no"
+          echo "base..head dependency diff to review and the review step is skipped."
+          echo ""
+          echo "What this control actually covers when live:"
+          echo "  * npm  — package.json declares ZERO dependencies by design; the"
+          echo "           ci.yml::lint-js tripwire 'no JS deps in package.json'"
+          echo "           fails any PR that adds one. This job is the second net."
+          echo "  * (no cargo manifest in this repository)"
+          echo "           real finding will come from."
+
+      - name: Dependency review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # SECURITY.md A4 promises this "fails any PR that introduces a
+          # vulnerable transitive dep, before review".
+          fail-on-severity: moderate
+          comment-summary-in-pr: on-failure
+          # The repo ships without a LICENSE file today (CONTRIBUTING.md
+          # "Licensing of contributions"), so licence-based allow/deny lists
+          # are deliberately NOT configured yet — configuring them before the
+          # project's own licence is decided would encode a policy nobody has
+          # agreed to. Revisit when TODO.md's LICENSE item lands.

@@ -1,0 +1,42 @@
+{
+  "_comment_about_this_file": [
+    "Managed-policy template for Microsoft Edge. Edge uses the same",
+    "ExtensionSettings + ExtensionInstallForcelist policy keys as Chrome,",
+    "but under the Microsoft\\Edge registry/policy hive rather than",
+    "Google\\Chrome.",
+    "",
+    "Linux:   /etc/opt/edge/policies/managed/sonomos.json",
+    "macOS:   /Library/Managed Preferences/com.microsoft.Edge.plist",
+    "Windows: HKLM\\Software\\Policies\\Microsoft\\Edge\\3rdparty\\extensions\\",
+    "         <EDGE_EXTENSION_ID>\\policy",
+    "",
+    "Edge extension IDs are different from Chrome IDs even for the same",
+    "extension package. If sourcing from the Edge Add-ons store, the ID is",
+    "on the listing page. If sideloading, see DEPLOYMENT.md."
+  ],
+
+  "ExtensionInstallForcelist": [
+    "<EDGE_EXTENSION_ID>;https://edge.microsoft.com/extensionwebstorebase/v1/crx"
+  ],
+
+  "ExtensionSettings": {
+    "<EDGE_EXTENSION_ID>": {
+      "installation_mode": "force_installed",
+      "update_url": "https://edge.microsoft.com/extensionwebstorebase/v1/crx",
+      "runtime_allowed_hosts": ["*://127.0.0.1/*"]
+    }
+  },
+
+  "3rdparty": {
+    "extensions": {
+      "<EDGE_EXTENSION_ID>": {
+        "allowedProviders": [
+          "openai-api", "anthropic-api", "chatgpt", "claude", "gemini"
+        ],
+        "telemetryEnabled": true,
+        "heartbeatSeconds": 30,
+        "lockedSettings": ["allowedProviders"]
+      }
+    }
+  }
+}
