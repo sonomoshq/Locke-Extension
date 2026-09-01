@@ -65,5 +65,19 @@ jobs:
           # Scans git HISTORY, not just the tip — a key three commits back is
           # exactly what this job exists to find. --redact so a match never
           # prints the secret itself into a public log.
-          /tmp/gitleaks git . --redact --report-format sarif --report-path gitleaks.sarif
+          # --redact so a matched secret is never printed into a public log.
+          # Report in JSON as well as SARIF: on a finding, "leaks found: 1"
+          # on its own is not actionable, so the rule, file and line are
+          # echoed below. The value stays redacted.
+          set +e
+          /tmp/gitleaks git . --redact --report-format json --report-path gitleaks.json
+          rc=$?
+          set -e
+
+          if [ "$rc" -ne 0 ] && [ -f gitleaks.json ]; then
+            echo "::group::Findings (values redacted)"
+            node -e 'const f=require("./gitleaks.json");for(const x of f){console.log(`${x.RuleID}  ${x.File}:${x.StartLine}  commit=${(x.Commit||"").slice(0,9)}  match=${x.Match}`)}' || cat gitleaks.json
+            echo "::endgroup::"
+          fi
+          exit "$rc"
 

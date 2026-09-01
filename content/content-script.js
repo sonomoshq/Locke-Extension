@@ -102,6 +102,11 @@
 
     const reply = (verdict) => {
       try {
+        // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration
+        // -- deliberate; see the SAME_WINDOW comment above. targetOrigin filters by
+        // the receiving DOCUMENT's origin, not by listener, so every script in this
+        // document could read this post whatever we passed; and location.origin throws
+        // or is silently dropped in the opaque-origin frames the manifest opts into.
         window.postMessage({ type: VERDICT, callId: data.callId, verdict }, SAME_WINDOW);
       } catch { /* page gone — nothing to answer */ }
     };
@@ -184,6 +189,11 @@
   function pushConfig() {
     readShimConfig().then((config) => {
       try {
+        // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration
+        // -- deliberate; see the SAME_WINDOW comment above. targetOrigin filters by
+        // the receiving DOCUMENT's origin, not by listener, so every script in this
+        // document could read this post whatever we passed; and location.origin throws
+        // or is silently dropped in the opaque-origin frames the manifest opts into.
         window.postMessage({ type: CONFIG, config }, SAME_WINDOW);
       } catch { /* page gone */ }
     }).catch(() => { /* the shim's own defaults hold */ });

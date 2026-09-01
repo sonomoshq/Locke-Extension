@@ -56,6 +56,10 @@ jobs:
       # listing this as a required check.
       - name: Semgrep scan
         run: |
+          # The SARIF goes to RUNNER_TEMP, not the working tree: the second
+          # pass scans "files tracked by git" plus anything present, and a
+          # report written here gets scanned by that pass, which then
+          # flags strings inside semgrep's own output.
           # Two passes on purpose: the semgrep CLI emits ONE output format
           # per invocation. The first pass writes SARIF for the artifact and
           # never fails the job; the second prints human-readable findings to
@@ -66,7 +70,7 @@ jobs:
             --config p/security-audit \
             --config p/secrets \
             --metrics=off \
-            --sarif --output semgrep.sarif || true
+            --sarif --output "$RUNNER_TEMP/semgrep.sarif" || true
           semgrep scan \
             --config p/javascript \
             --config p/xss \
@@ -80,7 +84,7 @@ jobs:
         if: always()
         with:
           name: semgrep-sarif
-          path: semgrep.sarif
+          path: ${{ runner.temp }}/semgrep.sarif
           if-no-files-found: warn
 
       # To land findings in the Code Scanning dashboard, replace (or
