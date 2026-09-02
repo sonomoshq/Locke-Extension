@@ -1,6 +1,9 @@
 {
+  "_comment": "CANONICAL Sonomos AI-surface registry — the single source of truth for which AI apps/sites/APIs the product covers. Lives in Service-Mesh/sonomos-vocab and is embedded into the `sonomos-vocab` crate (include_str!), so Rust consumers — Proxy (api_hosts → TLS MITM, skip_path_segments → capture scoping, capture_path_allowlist → the per-host ALLOW-list half of capture scoping, api_scan_paths → content scoping) and the proxy shim (api_hosts → fail-closed SNI policy) — get the data AND the canonical host-matching semantics from the crate. JS consumers (Desktop-Extension web_hosts → page-side shim + manifest; Desktop-Frontend 'Protected Surfaces' UI) receive vendored copies via Locke scripts/sync-surfaces.sh. Do NOT hand-edit vendored copies — edit THIS file and re-run the sync. A provider's `id` is the canonical app identity every capture surface must emit (GuardRequest.app → engine provider → detections.ai_provider). See Locke docs/AI-SURFACES.md. COVERAGE IS NOT UNIFORM: being in this file means the product KNOWS about a surface, not that it screens everything a user types on it — a provider's `web_screening` says whether that provider's web_hosts have a screened submission path at all (`web_screening_modes` below defines the values), and a provider's `localhost_screening` says under which routing its `localhost_ports` are screened at all (`localhost_screening_modes` defines those).",
+  "_one_rule_that_covers_every_host": "The extension screens the BODY of a script-issued fetch/XMLHttpRequest. A prompt that reaches a provider on a URL instead — typed into the browser's address bar, launched from whatever engine the user set as their browser default, followed as a `?q=` deep link, or submitted by a `<form>` (a form submission is a browser NAVIGATION, not a script call, and `method=post` is unhooked exactly like `method=get`) — is disclosed before any page-side code runs. That is true on EVERY host in this file, including the `body` ones: perplexity.ai, kagi.com and duckduckgo.com all publish OpenSearch descriptors so a browser can send prompts to them by navigation, and a surface bot-gated against probing may do the same without us being able to check. So this is a property of the TRANSPORT, not of a site, and no per-site list can express it — which is why the honest form is this one sentence rather than a longer `web_hosts`. Screening it is deferred: see `web_screening_modes.deferred_to_1x`.",
   "version": 1,
   "skip_path_segments": {
+    "_comment": "Request PATHS the proxy must NOT capture/scan, matched as contiguous runs of complete path segments (never naive substrings — /v1/token_usage IS captured, /usage is not). Default is capture-everything (a missed prompt is a PII leak); list only endpoints that provably carry no prompt: telemetry, feature-flag evals, model/registry listings, billing. Observed: Claude Code sent thousands of /api/event_logging/v2/batch telemetry events — ~85% of all detections, almost all false-positive.",
     "segments": [
       ["event_logging"],
       ["api", "eval"],
@@ -11,12 +14,37 @@
       ["v1", "models"]
     ]
   },
+  "capture_methods": {
+    "mitm": "Proxy decrypts the TLS-terminated request and redacts the JSON body (api_hosts). Reliable for SDK/CLI/desktop-app API traffic.",
+    "extension": "Browser extension holds a script-issued request on a web_host and screens its BODY before it leaves the page. Used where MITM is unreliable (anti-bot / JA3 fingerprinting on consumer web apps). It hooks exactly four transports — fetch, XMLHttpRequest, sendBeacon, fetchLater — and holds no webRequest/webNavigation permission, so a top-level navigation passes it unseen. See `_one_rule_that_covers_every_host`.",
+    "passthrough": "Recognised as AI traffic but not intercepted (e.g. listed for UI/awareness only)."
+  },
+  "web_screening_modes": {
+    "_comment": "Per-provider `web_screening`: whether this provider's web_hosts have a submission path the extension actually screens. ABSENT MEANS \"body\" — every entry predating this field is body-screened, which is what the extension has always done — so a consumer that has not adopted the field keeps behaving exactly as it does today. A value a consumer does not recognise must be read as NOT screened: protection may never be inferred from a mode you cannot interpret. WHAT THIS FIELD IS NOT: it is not a promise that everything typed on a `body` host is screened — nothing typed into an address bar is screened on any host, per `_one_rule_that_covers_every_host`. The axis here is 'does this surface have a screened submission path at all', which is precisely the question a UI must answer before it offers a protection toggle. Deliberately still two values: a third 'partly' mode would have to be set per site from what we could probe, and the sites that matter most (chatgpt.com, claude.ai, chat.mistral.ai) are bot-gated against probing — so it would encode our probe coverage rather than a property of the surface, which is the same defect this field was added to fix. This is per-PROVIDER because a provider entry is already the unit that shares a capture story; a provider whose hosts genuinely differ is split into two entries (duckduckgo.com sits in `search` while duck.ai is its own provider, for exactly that reason), and `provider_for_host` resolves a host to the entry with the LONGEST matching suffix so a nested split like kagi.com / assistant.kagi.com lands on the right entry regardless of catalog order.",
+    "body": "The extension holds fetch/XHR requests that carry a BODY and screens the exact bytes before they leave the page. That covers chat surfaces, where the prompt IS the POST body.",
+    "none": "This surface has no screened submission path: what a user types here leaves as a top-level navigation (a search box is a GET, or a POST form — both are navigations). Consumers MUST present these as unscreened and MUST NOT offer a toggle that implies protection. THE HOSTS STAY IN `web_hosts` AND MUST NOT BE MOVED OUT OF IT: `web_hosts` drives BOTH the extension's injection list AND the shim's request-target scope set, so deleting a host from here deletes real screening — possibly on a DIFFERENT page, since the shim scopes on the request TARGET (duck.ai's chat XHRs target duckduckgo.com; Kagi Assistant is reached through kagi.com). Anything that does leave one of these hosts as a bodied fetch/XHR is still screened normally; `none` is a statement about what the user types, not a switch.",
+    "deferred_to_1x": "Screening navigation-borne prompts is DEFERRED TO 1.x, and the reason is not plumbing. For chat, masking preserves utility because the model still answers the masked question; for search the PII often IS the query, and searching for `<PERSON_1> <ADDRESS_1>` returns nothing useful. Mask-and-forward — the primitive the whole product rests on — does not transfer. It needs a different interaction model (warn-and-confirm before the navigation commits, an override verdict path, 'sent anyway' event semantics), which is a feature with its own design doc, not a capture hook. Two consequences while it is deferred. (1) DO NOT add search engines to this file to 'improve coverage': every one would be `none`, which buys no protection while costing two content-script match patterns, a UI row, a standing claim and a liveness obligation — this file shipped a dead Phind for seven months. (2) The class cannot be enumerated anyway — Ecosia, Qwant, Startpage, Mojeek, Yandex, Baidu, Naver, Seznam and every self-hosted SearXNG instance are all navigation-borne, and the catalog is CLOSED-WORLD: a host we never name gets no injection, no toggle and no claim, which is already the correct answer for all of them. The general rule is `_one_rule_that_covers_every_host`, stated once; the list is only the surfaces we make a statement about."
+  },
+  "localhost_screening_modes": {
+    "_comment": "Per-provider `localhost_screening`: how much of a provider's `localhost_ports` traffic the proxy can actually screen. Same discipline as `web_screening`: ABSENT MEANS \"explicit-proxy-only\" — the only coverage loopback has ever had — so a consumer that has not adopted the field keeps claiming exactly what was true before it existed; a value a consumer does not recognise must be read as NOT screened, because protection may never be inferred from a mode you cannot interpret. And like `web_screening`, this field is about what may be CLAIMED, never a switch: it gates nothing, and no capture, MITM or path-scoping decision reads it (pinned by `declaring_localhost_screening_changes_no_capture_decision`).",
+    "explicit-proxy-only": "Screened ONLY when a client is explicitly proxied at the Sonomos proxy — HTTP_PROXY/HTTPS_PROXY in the environment, or a per-tool --proxy flag. The transparent path does NOT carry loopback traffic: the nftables redirect returns early for loopback (`oifname lo return`) and redirects dport 443 only, so a direct connection to 127.0.0.1:11434 never reaches the proxy, and nothing in Locke sets HTTPS_PROXY for the user. Consumers MUST NOT present these ports as protected by default, and MUST NOT claim local-model traffic is screened without the 'when the client is routed through the proxy' qualifier. Transparent loopback capture (a loopback-scoped redirect rule, shim routing on SO_ORIGINAL_DST, plaintext-HTTP handling) is 1.x work — when it ships it arrives as a NEW mode value, never by silently widening this one."
+  },
+  "capture_path_allowlist_semantics": {
+    "_comment": "Per-provider `capture_path_allowlist`: the ALLOW-list half of capture scoping, keyed by the HOST it narrows. ABSENT MEANS “capture everything except skip_path_segments” — the conservative default every host has always had — so a consumer that has not adopted the field, and every provider that does not declare it, behaves exactly as before. WHY IT EXISTS: redaction is field-agnostic BY CONSTRUCTION. Spliicer-Guard emits every string leaf of a JSON body (Spliicer-Guard/src/extract/json.rs) and the only stage that may drop one is a DENY-list of 14 protocol key names (Spliicer-Guard/src/classify.rs) whose value half rejects anything containing '@' or whitespace — so an email address or a person's name can never be excluded by it. Measured end to end on the real chain: {'email':'test@gmail.com','password':'hunter2'} is rebuilt as {'email':'RED_n05x','password':'hunter2'}. Harmless on an api_host that carries Bearer-token completions and nothing else; fatal on a host that carries the user's ACCOUNT traffic on the same hostname as chat (claude.ai also serves sign-in, profile and billing), where a masked email means authentication simply fails. Desktop apps that are web wrappers (Claude desktop → claude.ai, MS Copilot desktop → copilot.microsoft.com) live entirely on such hosts and are screened by nothing today, because the browser extension cannot see inside a native app. This field is the mechanism such a host needs BEFORE it can be promoted into api_hosts; the promotion itself is a separate release decision that still needs an authenticated real-traffic test.",
+    "keyed_by_host": "The key is a host entry, matched with this file's one host-matching rule (case-insensitive, trailing-dot-stripped, exact or subdomain-of); the LONGEST matching key wins. Keyed by host rather than by provider because the risk is a property of the hostname: the anthropic provider owns BOTH api.anthropic.com — an api_host that must keep the capture-everything default — and claude.ai. A provider-wide list could not narrow the second without silently narrowing the first, turning 'capture everything a prompt could hide in' into 'capture only what someone remembered to type', which is a PII leak.",
+    "matching": "Segment-wise, never substrings — the same rule as skip_path_segments and for the same reason (/v1/token_usage is not /usage). '*' is a wildcard for exactly ONE whole segment, because the real prompt endpoints are UUID-bearing: /api/organizations/*/chat_conversations/*/completion. A pattern segment mixing '*' with anything else (chat_*) is MALFORMED and matches nothing — partial-segment matching is the naive-substring bug arriving through the other door. Segment counts must be EQUAL: a pattern is NOT a prefix, because a path with an unanticipated trailing segment is a different endpoint and admitting it is exactly the accident this field exists to prevent (prefix matching stays addable later; it could not be removed later). Matching is ASCII case-insensitive and patterns must be written lowercase. There is NO percent-decoding, so a percent-encoded spelling simply fails to match. Query strings are not part of a path and are never seen.",
+    "unrecognised_means_passthrough": "A path matching no pattern is NOT captured and NOT masked, and neither is a path matched only by a malformed pattern: anything unrecognised claims less, never more — the same discipline as web_screening_modes. Note it does NOT fall back to capture-everything: on a host narrowed for this reason, capture-everything IS the authentication-breaking behaviour, so a data defect must fail toward passthrough rather than toward masking a sign-in. An empty list reads as ABSENT, so a half-written entry (a _comment and no paths) cannot silently switch screening off on a host we decrypt. Malformed patterns are kept out of releases by the crate test every_shipped_capture_path_pattern_is_well_formed.",
+    "composition_with_skip_path_segments": "capture = allowlist_admits(host, path) AND NOT skip_path_segments(path). BOTH, never either: the allow-list narrows and the deny-list still subtracts. Stated allow-then-deny because that is the reading that matters — the DENY-LIST WINS, so a provider cannot re-admit telemetry by naming it in its allow-list, and skip_path_segments stays a global floor no per-provider data can lift.",
+    "does_not_widen_decryption": "Read only about traffic on a host the MITM gate already admitted, and the MITM gate does not read it — the two answers come from disjoint fields. Declaring an allow-list changes which of a host's already-decrypted paths are scanned and rewritten, and nothing else. Declaring one for a host that is still only a web_host is completely inert, which is what lets the mechanism ship ahead of the decision to use it.",
+    "shape": "\"capture_path_allowlist\": { \"_comment\": \"...\", \"hosts\": { \"claude.ai\": [\"/api/organizations/*/chat_conversations/*/completion\"] } }. No provider declares one today — this file ships the mechanism and no narrowing, so no host's behaviour changes."
+  },
   "providers": [
     {
       "id": "openai", "name": "OpenAI / ChatGPT", "desktop_app": true, "status": "v1",
       "api_hosts": ["api.openai.com", "chatgpt.com"],
       "web_hosts": ["chatgpt.com", "chat.openai.com", "platform.openai.com"],
       "capture_path_allowlist": {
+        "_comment": "chatgpt.com is a web host, so this list is INERT to the proxy (an_allowlist_on_a_web_only_host_is_inert_until_it_is_promoted) — its consumer is the EXTENSION's page-side shim, which otherwise screens every bodied fetch on a screened host. That breaks the site logged-out: /unauth-mweb/sentinel/chat-requirements/finalize carries anti-bot proof-of-work blobs the guard classifies as un-examinable files and fail-closes on, killing the handshake ('Unable to connect'); /unauth-mweb/events/* is telemetry. Neither ever carries the prompt. Admit ONLY the prompt-bearing conversation POSTs: /backend-api/* logged-in, /backend-anon/* logged-out, /unauth-mweb/* logged-out mobile-web. Fixed-segment — sentinel's 4-segment paths and conversation/prepare (3 segments, 'conversation' != 'f') cannot match. Same shape and matching semantics as claude.ai's list; if chatgpt.com is ever promoted back into api_hosts this list starts narrowing the proxy too, which is exactly the promotion's prerequisite.",
         "hosts": {
           "chatgpt.com": [
             "/backend-api/conversation",
@@ -26,7 +54,8 @@
             "/unauth-mweb/conversation/updates"
           ]
         }
-      }
+      },
+      "notes": "chatgpt.com is a WEB host — screened by the browser extension, NOT MITM'd by the proxy. It was briefly promoted into api_hosts (2026-08-25) with a completion-only capture_path_allowlist so the proxy could screen the consumer web app / desktop wrappers the extension cannot see, but that MITMs the website: a browser that does not trust the Sonomos CA (Firefox-family keep their own cert store, not the OS one) hits an HSTS cert error, and the fail-closed shim refuses ALL of *.chatgpt.com — sign-in included — whenever the proxy is down. That promotion never passed its ship gate (the authenticated real-traffic test), so it is reverted to the design default here: web sites are screened by the extension, only true API hosts are MITM'd. api.openai.com stays the api_host; chat.openai.com now 301s to chatgpt.com."
     },
     {
       "id": "anthropic", "name": "Anthropic / Claude", "desktop_app": true, "status": "v1",
@@ -41,29 +70,34 @@
         ]
       },
       "capture_path_allowlist": {
+        "_comment": "claude.ai serves sign-in (/api/auth/send_magic_link carries email_address as a plain string leaf; /api/auth/verify_magic_link carries encoded_email_address), account, billing and conversation reads on the SAME host as chat — field-agnostic redaction there masks the sign-in email and breaks auth. Admit ONLY the two prompt-bearing POSTs. The trailing segment MUST be the literal completion/retry_completion and NEVER '*': /api/organizations/{org}/chat_conversations/{conv}/current_leaf_message_uuid is a 6-segment sibling a trailing wildcard would wrongly admit. The two '*' stand for the org and conversation UUIDs. Covers the claude.ai web app AND both desktop Electron apps (same host+path). Multipart uploads (/api/{org}/upload, /api/organizations/{org}/convert_document) are a documented residual gap the JSON-leaf engine cannot parse.",
         "hosts": {
           "claude.ai": [
             "/api/organizations/*/chat_conversations/*/completion",
             "/api/organizations/*/chat_conversations/*/retry_completion"
           ]
         }
-      }
+      },
+      "notes": "claude.ai promoted from web_hosts to api_hosts 2026-08-25. api.claude.ai was REMOVED from api_hosts in the SAME edit: it is a subdomain of claude.ai, so listing both fails the redundancy lint no_host_is_listed_twice_and_none_is_redundant_within_its_provider (catalog.rs:1200-1219). ACCEPTED NARROWING (the api.claude.ai apex trap, resolved explicitly because the mechanism cannot resolve it): the allowlist mechanism cannot express a capture-everything key — empty lists read as absent (catalog.rs:352-364), there is no all-paths wildcard, and segment counts must be equal — so once claude.ai is an api_host, EVERY *.claude.ai subdomain, including the removed api.claude.ai, inherits claude.ai's completion-only allowlist rather than capture-everything (subdomain inheritance pinned at catalog.rs:1676-1699). This is safe ONLY because api.claude.ai does not resolve (NXDOMAIN re-verified 2026-08-25); api.anthropic.com remains the capture-everything Claude API host and is untouched. SHIP GATE: re-verify at ship time that api.claude.ai and every *.claude.ai API subdomain is still non-resolving; if api.claude.ai is ever activated as a bearer-token API it would be silently under-captured and this promotion MUST be revisited. ACCEPTED RELEASE POSTURE: the fail-closed shim refuses all of *.claude.ai (sign-in included) when the proxy is down; fail-closed + screening hold over TCP/443 only (QUIC/HTTP-3 bypasses until QUIC_REJECT=1). Claude Code is unaffected (it uses api.anthropic.com, a separate host key). SHIPS ONLY AFTER the authenticated real-traffic test (magic-link sign-in + profile/billing edit + a chat turn, on web AND the desktop app). claude.com / console.anthropic.com stay web_hosts. The prompt is the top-level body.prompt string leaf; turn_message_uuids and create_conversation_params.name (sent empty) carry no PII."
     },
     {
       "id": "google", "name": "Google Gemini / Vertex / AI Studio", "desktop_app": false, "status": "v1-api,1.x-web",
       "api_hosts": ["generativelanguage.googleapis.com", "aiplatform.googleapis.com"],
       "web_hosts": ["gemini.google.com", "aistudio.google.com"],
+      "notes": "UNVERIFIED, AND THE ONLY FIRST-HAND EVIDENCE CONTRADICTS IT. This entry has said since the crate's first commit that Gemini web/app traffic often uses protobuf/RPC (not plain JSON), so the generic JSON scan may not see the prompt and web masking needs per-surface decoding (1.x). That sentence has been copied forward unchanged and was never derived from a capture: there is no fixture, HAR, test or comment behind it anywhere in the fleet. Against it, the Sonomos browser extension shipped a WORKING Gemini masker in 2026-03 whose own notes say Gemini web sends a form-encoded f.req field carrying nested JSON (the batchexecute/RPC envelope) -- a shape the guard's existing form and multipart extractors already surface as a scannable text leaf. The observed behaviour argues against protobuf too: an undecodable body does NOT silently yield zero detections. The guard screens it as one opaque blob, the engine returns Unsupported, and withhold cannot withhold a non-image, so every Gemini prompt would hard-fail with a visible refusal -- which nobody has reported. DO NOT build a protobuf decoder off this note: capture one real Gemini web body first (Spliicer-Guard docs/HARVEST.md, ZenHub #139) and replay it. The two readings imply completely different work -- a new binary codec, versus no new extractor at all plus a possible over-masking guard on the RPC envelope. See ZenHub #173. The API hosts are standard JSON and MITM-redactable now. NOTE the caveat this entry has always carried: `web_screening: body` says the prompt travels as a body we HOLD, not that we can always read it — a held body we cannot decode is screened in transport and unscreened in effect. Google Search itself is a separate `search` entry: it is a different surface with a different answer.",
       "web_screening": "body"
     },
     {
       "id": "xai", "name": "xAI / Grok", "desktop_app": false, "status": "v1-api,1.x-web",
       "api_hosts": ["api.x.ai"],
-      "web_hosts": ["grok.com", "console.x.ai"]
+      "web_hosts": ["grok.com", "console.x.ai"],
+      "notes": "grok.x.ai was retired from this entry 2026-08-18: it 301-redirects to the x.ai marketing site (verified), so it never hosted a chat surface a content script could screen, while the live Grok web app at grok.com was absent from the catalog entirely. That is an over-claim of the same family as the search one — a screened claim on a host with nothing to screen — with the real surface uncovered. console.x.ai is the developer console."
     },
     {
       "id": "meta", "name": "Meta AI", "desktop_app": false, "status": "1.x-web-standalone",
       "api_hosts": [],
-      "web_hosts": ["meta.ai"]
+      "web_hosts": ["meta.ai"],
+      "notes": "Standalone meta.ai only. The bulk of Meta AI usage is embedded in WhatsApp / Instagram / Facebook (web traffic mixed with the host app; native apps) — out of scope until forcible capture (v2). Covering meta.ai captures only the small standalone slice."
     },
     {
       "id": "deepseek", "name": "DeepSeek", "desktop_app": false, "status": "v1-api,1.x-web",
@@ -75,15 +109,18 @@
       "api_hosts": ["api.perplexity.ai", "www.perplexity.ai"],
       "web_hosts": ["perplexity.ai"],
       "capture_path_allowlist": {
+        "_comment": "www.perplexity.ai carries sign-in/session (/api/auth/*), settings, subscription and upload metadata under /rest/* on the SAME host as chat — admit ONLY the single prompt-bearing SSE endpoint (the ask box POSTs JSON, replies stream as SSE). Keyed at www.perplexity.ai and NOT the apex perplexity.ai on purpose: host_matches('perplexity.ai','api.perplexity.ai') is TRUE, so an apex key would also narrow the shipped, LIVE v1 api_host api.perplexity.ai from capture-everything to this one path — decrypted but never captured = a silent PII leak on real completion traffic. www.perplexity.ai does not match api.perplexity.ai, so api.perplexity.ai keeps the capture-everything default. Covers the Perplexity Windows/Mac desktop app and the Comet browser (same /rest/sse/perplexity_ask endpoint), both invisible to the extension.",
         "hosts": {
           "www.perplexity.ai": ["/rest/sse/perplexity_ask"]
         }
-      }
+      },
+      "notes": "www.perplexity.ai promoted into api_hosts 2026-08-25 (the sibling of the apex, NOT the apex). WHY: keying at perplexity.ai would narrow the live api_host api.perplexity.ai (verified resolving 2026-08-25) — the exact silent-leak defect — AND api_hosts ['api.perplexity.ai','perplexity.ai'] would fail the redundancy lint; deleting api.perplexity.ai instead would silence the lint while KEEPING the leak, and an empty override key cannot help (empty lists are dropped, catalog.rs:357-361). desktop_app set true so the promoted app surface renders a Controls row/toggle rather than being decrypted invisibly (side effect: api.perplexity.ai now renders a UI row too). ACCEPTED: the perplexity.ai web_host's *.perplexity.ai extension injection still covers www.perplexity.ai, so the WEB app is double-covered (extension + proxy) — benign redundancy (already-redacted RED_ tokens are not re-detected); the net new coverage is the desktop app + Comet, which only the proxy can reach. The fail-closed shim refuses www.perplexity.ai (its sign-in included) when the proxy is down — www-scoped, the apex perplexity.ai is unaffected; fail-closed + screening hold over TCP/443 only (QUIC bypass until QUIC_REJECT=1). SHIPS ONLY AFTER the authenticated real-traffic test, which MUST confirm the default web/desktop/Comet clients submit chat to www.perplexity.ai and HALT the promotion if any default client uses the apex perplexity.ai for chat. Perplexity also ships /opensearch.xml with a GET `{searchTerms}` template and honours /search?q= (both verified 2026-08-18), so it can be registered as a browser's default engine and prompted by navigation — unscreened, like every other surface in this file. That is `_one_rule_that_covers_every_host`, not a Perplexity-specific fact, and it is deliberately NOT encoded as a per-site mode: see `web_screening_modes._comment`."
     },
     {
       "id": "mistral", "name": "Mistral / Le Chat", "desktop_app": false, "status": "v1-api,1.x-web",
       "api_hosts": ["api.mistral.ai"],
-      "web_hosts": ["chat.mistral.ai"]
+      "web_hosts": ["chat.mistral.ai"],
+      "notes": "chat.lechat.fr removed 2026-08-18: it has no DNS record at all, and the parent `lechat.fr` now 301s to an unrelated French consumer-goods site (verified). A dead AI hostname in a shipped MAIN-world injection list is worse than useless — whoever registers that name next inherits injection on their pages. Mistral's Le Chat is chat.mistral.ai."
     },
     {
       "id": "qwen", "name": "Alibaba Qwen", "desktop_app": false, "status": "v1-api,1.x-web",
@@ -93,17 +130,31 @@
     {
       "id": "microsoft", "name": "Microsoft Copilot", "desktop_app": false, "status": "1.x-web",
       "api_hosts": [],
-      "web_hosts": ["copilot.microsoft.com"]
+      "web_hosts": ["copilot.microsoft.com"],
+      "notes": "ADDED 2026-08-18, and the only entry in this round that increases protection rather than correcting a claim. `www.bing.com/chat` 302-redirects here (verified), so the catalog covered Bing's search half — which screens nothing — while Microsoft's bodied, screenable chat half was absent from the file entirely. No api_hosts: Azure OpenAI is per-resource (`{resource}.openai.azure.com`), which cannot be one safe entry — the same problem as the Bedrock regions. Microsoft 365 Copilot for work tenants is a different surface on different hosts and is NOT covered here."
+    },
+    {
+        "id": "github-copilot",
+        "name": "GitHub Copilot",
+        "desktop_app": true,
+        "status": "v1",
+        "api_hosts": [
+            "githubcopilot.com"
+        ],
+        "web_hosts": [],
+        "notes": "ADDED 2026-08-28. GitHub Copilot's API traffic was in NO catalog entry, so it matched no provider, took the default surface profile and was never screened -- and because nothing was captured it did not show up as an unprotected surface either, it simply never appeared. The pre-catalog guard had a copilot arm reached by api.githubcopilot.com; the migration to this file dropped the host, and Spliicer-Guard's surface_profile.rs has carried a comment saying so ever since. SEPARATE FROM microsoft ON PURPOSE: that entry is Microsoft Copilot on copilot.microsoft.com, a different product on a different host with a different transport. One id for both would put two products in one metrics row, which is the anthropic-vs-claude drift again in the other direction. THE APEX IS DELIBERATE: host_matches means an entry covers itself and every subdomain, and the whole of githubcopilot.com is Copilot -- so this one line covers api., proxy.individual., proxy.business., proxy.enterprise. and any variant GitHub adds, without us enumerating hosts we have not observed. That is the opposite of the search entry listing www.google.com rather than google.com, where the apex would have swallowed an unrelated estate. NO web_hosts: Copilot on the web lives at github.com/copilot, and github.com serves sign-in, billing, repositories and the whole site on that same name. Field-agnostic redaction would mask an email in a sign-in body and break authentication -- exactly the case capture_path_allowlist exists for. A web surface here needs that allow-list first, and a real-traffic test; it is not covered by this entry. desktop_app is true because Copilot runs inside editors (VS Code, JetBrains, Visual Studio), which the browser extension cannot see -- MITM is the only route to this surface."
     },
     {
       "id": "duckduckgo", "name": "DuckDuckGo Duck.ai", "desktop_app": false, "status": "1.x-web",
       "api_hosts": [],
-      "web_hosts": ["duck.ai"]
+      "web_hosts": ["duck.ai"],
+      "notes": "Split out of the `search` entry 2026-08-18. duck.ai is DuckDuckGo's standalone AI chat (verified title: 'Duck.ai by DuckDuckGo. Private AI chat. Free.') and its prompt leaves as a bodied POST the extension holds — it sat under `search` by brand association, so declaring that entry `none` would have told users a working, screened surface was unprotected AND removed the only toggle they had over it. DO NOT REMOVE duckduckgo.com FROM THE `search` ENTRY: duck.ai's chat XHRs target duckduckgo.com (verified — POST https://duckduckgo.com/duckchat/v1/chat answers, and duck.ai's CSP connect-src names duckduckgo.com), and the shim scopes on the REQUEST TARGET host, so dropping it would silently stop screening this chat. duckduckgo.com's own search box is a navigation and stays unscreened: two pages, two truths, two entries."
     },
     {
       "id": "kagi", "name": "Kagi Assistant", "desktop_app": false, "status": "1.x-web",
       "api_hosts": [],
-      "web_hosts": ["assistant.kagi.com"]
+      "web_hosts": ["assistant.kagi.com"],
+      "notes": "Split out of the `search` entry 2026-08-18. Reached from kagi.com/assistant (verified 302 → assistant.kagi.com, title 'Kagi Assistant'); bodied chat, screened today. Kagi's other surface, the kagi.com search box, is NOT screened and stays in `search` — note its homepage form is `method=post`, which looks bodied but is a browser NAVIGATION, not a script-issued fetch: the shim hooks no submit event and no form element, so it is unhooked exactly like a GET. assistant.kagi.com is also a subdomain of the `search` entry's kagi.com, which is why `provider_for_host` resolves the LONGEST matching entry rather than the first one in catalog order."
     },
     {
       "id": "cohere", "name": "Cohere", "desktop_app": false, "status": "v1",
@@ -128,20 +179,23 @@
         "bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com",
         "bedrock-runtime.eu-central-1.amazonaws.com", "bedrock-runtime.ap-northeast-1.amazonaws.com"
       ],
-      "web_hosts": []
+      "web_hosts": [],
+      "notes": "Other regions added by operators via config; the bedrock-runtime.{region}.amazonaws.com pattern can't be a single safe suffix."
     },
     {
       "id": "search", "name": "Web search (navigation-borne queries)", "desktop_app": false, "status": "1.x-web",
       "api_hosts": [],
       "web_hosts": ["www.google.com", "www.bing.com", "duckduckgo.com", "kagi.com", "you.com", "search.brave.com"],
-      "web_screening": "none"
+      "web_screening": "none",
+      "notes": "NOT A LIST OF SEARCH ENGINES TO BE COMPLETED — see `web_screening_modes.deferred_to_1x` before adding one. These are surfaces the product already injects on whose only submission path is a top-level navigation, so nothing a searcher types on them is screened; the entry exists so no consumer presents them as protected. PRUNED 2026-08-18 after live probing: brave.com (Brave's marketing site — 'The browser that puts you first' — not the engine; search.brave.com is, and the apex bought a `*.brave.com` injection pattern across Brave's entire web estate for zero screening), leo.brave.com (no DNS record at all, and Brave Leo is a browser-native sidebar — structurally unreachable by a content script under ANY permission model, not merely unscreened), phind.com and www.phind.com (Phind shut down 2026-01-16; www.phind.com was in any case already subsumed by phind.com under the subdomain rule). duck.ai and assistant.kagi.com moved OUT to their own entries because they are screened. KEPT DELIBERATELY: duckduckgo.com and kagi.com — their own search boxes are navigations, but those hostnames also carry the chat traffic of the two entries above, and the shim scopes on the request target, so removing either would delete real screening on a different page. you.com is kept and claims nothing: its homepage is now an API pitch ('The Leading Web Search APIs for AI') and the consumer chat is login-gated, so 'we screen nothing you typically type here' is the honest reading, and any bodied chat that does happen is still screened per the `none` mode."
     },
     {
       "id": "local", "name": "Local model servers", "desktop_app": false, "status": "v1",
       "api_hosts": [],
       "web_hosts": [],
       "localhost_ports": [11434],
-      "localhost_screening": "explicit-proxy-only"
+      "localhost_screening": "explicit-proxy-only",
+      "notes": "Ollama default port (11434). Screened only when a client is explicitly proxied via HTTP(S)_PROXY/--proxy; the transparent path does not carry loopback traffic (the nftables redirect has `oifname lo return` and a dport-443-only scope, and nothing in Locke sets HTTPS_PROXY). This entry used to say 'Loopback, MITM-redactable', which every consumer honestly rendered as protected-by-default — the same over-claim family as the search one. See `localhost_screening_modes`."
     }
   ]
 }
