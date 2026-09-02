@@ -112,9 +112,10 @@ the source you wrote.
 | `npm run generate` | Regenerates `content/web-surfaces.generated.js` from `shared/ai-surfaces.json` |
 | `npm run validate` | Stages both targets and applies the store rules without writing any artifact — the cheap form of the `npm run package` gate |
 | `npm run package` | Wipes `dist/`, stages `dist/{chromium,firefox}/`, writes both store zips deterministically |
+| `npm run smoke` | Opt-in, developer-run in-browser check: builds `dist/`, loads it unpacked in Chrome and Firefox, and asserts the shim installed its `fetch` hook and reported `NO_BRIDGE` cleanly. **Needs a one-time `cd tests/smoke && npm install`**, and skips (exit 0) without it or without a browser. Not run by any workflow. See [`tests/smoke/README.md`](tests/smoke/README.md). |
 | `npm run install-hooks` | Installs `scripts/hooks/*` into the repo's real hooks directory (also runs as `prepare`) |
 | `npm run bump -- <major\|minor\|patch\|X.Y.Z>` | Writes all five version sites and opens a dated `CHANGELOG.md` section. Does not commit or tag. |
-| `npm run preflight` | The full release gate: version sites, both manifest transforms, the native-messaging host name pin, listing assets, store credentials, tests. Takes `--skip-tests`, `--checks=…`, `--stores=…`, `--json`. |
+| `npm run preflight` | The full release gate: version sites, both manifest transforms, listing assets, store credentials, copyright headers, tests. Takes `--skip-tests`, `--checks=…`, `--stores=…`, `--json`. |
 | `npm run publish-stores -- --dry-run` | Submits nothing; see `docs/store/RELEASE-PIPELINE.md` for what each store's dry run does and does not touch. |
 
 The publish alias is `publish-stores`, not `publish` — npm reserves
@@ -125,15 +126,21 @@ something that different.
 
 - **All changes go through a Pull Request.** No direct commits to
   `main`.
-- **Branch protection on `main`** is **not configured yet**, and no
-  workflow runs on a push or a pull request. Treat the following as the
-  house rules, enforced by review rather than by the forge, and see
+- **Branch protection on `main`** is **not configured yet**, so nothing
+  the forge does can stop a merge. Workflows *do* run now — see "What
+  runs automatically" under [Testing](#testing) — but none of them is a
+  required status check, so a red job is visible on your PR and the PR
+  merges anyway. Treat the following as the house rules, enforced by
+  review rather than by the forge, and see
   [`docs/security/RELEASE-POLICY.md`](docs/security/RELEASE-POLICY.md)
   for which of them have a mechanism behind them today:
-  - Passing checks — today that means the pre-push hook's preflight
-    (version sites, manifest transforms, the native-messaging host
-    name pin, `npm test`).
-    SAST, secret scanning and dependency review are not implemented.
+  - Passing checks — locally, the pre-push hook's preflight on a branch
+    push (version sites, both manifest transforms, `npm test`); on CI,
+    the jobs listed under Testing. `[corrected 2026-09-01]` this bullet
+    used to say SAST, secret scanning and dependency review "are not
+    implemented". They are: CodeQL, Semgrep, gitleaks, Trivy and
+    dependency-review all exist and all run. What they do not do is
+    gate.
   - At least one approving review from a CODEOWNER (see
     [`CODEOWNERS`](CODEOWNERS)).
   - Resolved conversations.
@@ -153,15 +160,35 @@ mechanics in
 [`docs/store/RELEASE-PIPELINE.md`](docs/store/RELEASE-PIPELINE.md).
 Summary:
 
-- Releases are tagged `vX.Y.Z` matching `manifest.json::version`, and
-  pushing that tag is what submits to the three extension stores.
-- Two-person release: the tagger and the approving CODEOWNER must
-  be different individuals.
-- Artifacts are byte-reproducible from a tag (`SOURCE_DATE_EPOCH`).
-  Nothing shipped so far is sigstore-signed or carries SLSA
-  provenance — an earlier version of this section said otherwise.
-  The release workflow in `.github/workflows/` carries those steps,
-  but it is not triggered by a push.
+- **Publishing is a manual dispatch, not a merge.** `release.yml` is
+  `workflow_dispatch`-only: merge the version bump to `main`, then
+  Actions → Release → "Run workflow" on `main`.
+  `scripts/release-gate.mjs` publishes only when this repository has no
+  `v<version>` tag yet, so re-dispatching on a version that already
+  shipped submits nothing and stays green. The `v<version>` tag is
+  created by the workflow as a record of what published — it is not
+  what triggers it.
+- **A workstation can still publish**, by pushing a `vX.Y.Z` tag:
+  `scripts/hooks/pre-push` runs the full preflight and then
+  `scripts/publish.mjs --store=all` against three live stores. That
+  route packages your *working tree*, which is why the hook refuses it
+  when HEAD is not the tagged commit, when the tree is dirty, or when
+  the commit is not already on `origin/main`.
+- **Neither route has a second-person approval step.**
+  `[corrected 2026-09-01]` This section used to state a two-person
+  release rule — "the tagger and the approving CODEOWNER must be
+  different individuals". That rule has been **withdrawn**
+  ([`docs/security/RELEASE-POLICY.md`](docs/security/RELEASE-POLICY.md)),
+  and the documents that cited it as a control have been corrected. One
+  person can review, merge and dispatch. Dispatch-only makes shipping a
+  deliberate act rather than a side effect of a merge; it is not an
+  approval gate and must not be described as one.
+- Artifacts are byte-reproducible (`SOURCE_DATE_EPOCH`), and
+  `quality.yml::reproducible-build` now checks that on every push to
+  `main` and every pull request. Nothing shipped so far is
+  sigstore-signed or carries SLSA provenance — `release.yml` holds the
+  `Sign artifacts` and `SLSA build provenance attestation` steps, but no
+  release has been published through it.
 
 ## Testing
 
@@ -198,20 +225,60 @@ bare directory as a module and dies with
   the gate cannot disagree.
 - **Native-messaging host name pin**: the host name lives in exactly
   one place on this side, `shared/constants.js::NATIVE_HOST`, and it
-  has to match the registration the Locke desktop app writes. That
-  registration is not in this repository, so nothing here can check
-  the pair. A drift means the browser launches nothing and the
-  extension fails closed for every user, and it surfaces at run time
+  has to match the registration the Locke desktop app writes.
+  `tests/constants.test.js` pins the literal, so this side cannot drift
+  by accident — but that registration is not in this repository, so
+  nothing here can check the *pair*. `scripts/preflight.mjs` used to
+  carry a `native-host` check that cross-referenced the host manifest's
+  `allowed_origins`; it was removed because the other half of the
+  contract is not readable from here, and the check now lives with the
+  native messaging host. A drift means the browser launches nothing and
+  the extension fails closed for every user, and it surfaces at run time
   rather than at build time.
-- **What runs automatically**: the local pre-push hook, and only
-  that. `.github/workflows/` holds workflows covering CI, static
-  analysis, secret and dependency scanning, SBOM generation and
-  release, but **none of them is triggered by a push or a pull
-  request**, so nothing there gates one. In practice there is no lint
-  job, no SAST, no secret scanning and no dependency review on your
-  PR. An earlier version of this section described all of those as
-  running on every push.
-  Activating them is tracked in
+- **In-browser smoke** (`npm run smoke`): everything above runs the
+  extension's modules *outside* a browser — `node:test`, plus a `vm`
+  sandbox for `content/shim.js` — so none of it answers "does this still
+  do anything when a real browser loads it". `tests/smoke/` does, by
+  loading the built `dist/` trees unpacked in Chrome and Firefox. It is
+  **opt-in and gates nothing**: no workflow runs it, a missing browser or
+  a missing driver is a skip rather than a failure, and its dependency
+  lives in a nested `tests/smoke/package.json` so the root manifest stays
+  at zero (`ci.yml::lint-js` fails on any root dependency). The last
+  recorded results, and what the harness cannot see, are in
+  [`docs/testing/BROWSER-SMOKE.md`](docs/testing/BROWSER-SMOKE.md).
+- **What runs automatically**: the local pre-push hook, and — since
+  this repository was made public — eight of the nine workflows in
+  `.github/workflows/`. `[corrected 2026-09-01]` An earlier version of
+  this section said none of them was triggered by a push or a pull
+  request and that there was no lint job, no SAST, no secret scanning
+  and no dependency review on your PR. That stopped being true when the
+  triggers were uncommented.
+
+  On a push to `main` **and** on every pull request against it:
+  `ci.yml` (`lint-js`, `lint-python`, `validate-manifest`, `trivy`),
+  `quality.yml` (`generated-drift`, `permission-diff`, `package-smoke`,
+  `payload-audit`, `reproducible-build`, `actions-pinned`, `amo-lint`),
+  `codeql.yml`, `semgrep.yml` and `gitleaks.yml` — the last three also
+  on a weekly schedule. `dependency-review.yml` runs on pull requests
+  only, because it diffs a PR's base against its head and a manual run
+  has no PR to diff. `sbom.yml` runs on pushes to `main` and monthly;
+  `scorecard.yml` weekly, on pushes to `main`, and on
+  `branch_protection_rule`. `release.yml` is the ninth and is
+  deliberately `workflow_dispatch`-only, so merging publishes nothing.
+
+  **Running is not gating.** Branch protection on `main` is still not
+  configured, so none of these is a required status check and a failing
+  job does not block a merge.
+  [`docs/security/RELEASE-POLICY.md`](docs/security/RELEASE-POLICY.md)
+  is the authority on which check is in which state and marks each one
+  `[live]`, `[gate]`, `[hook]` or `[pending]`; the `[gate]` rows —
+  `quality.yml`'s `payload-audit`, `reproducible-build`,
+  `actions-pinned`, `generated-drift`, `package-smoke` and `amo-lint` —
+  fail their own job when the property they guard is violated, which is
+  the strongest thing true of any check here today. Note also that this
+  repository is newly public: **no workflow run has completed in it
+  yet**, so nothing above has produced a result. Turning these into
+  required checks is tracked in
   [`docs/security/MANAGEMENT-REVIEW.md`](docs/security/MANAGEMENT-REVIEW.md).
 
 For UI changes, manually verify the change works end-to-end in a

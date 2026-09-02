@@ -9,13 +9,16 @@ No real credential value appears anywhere in this repository, and none ever
 should.  The examples below are shaped like the real thing and are not the
 real thing.
 
-## These credentials now publish unattended
+## These credentials publish from CI, not from a workstation
 
-`[added 2026-08-31]` A merge to `main` publishes to the Chrome Web Store,
-Edge Add-ons and AMO with **no human approval step**
-(`docs/security/RELEASE-POLICY.md`).  The values below therefore live in
-repository secrets rather than on one operator's machine, and nobody is
-watching the console when they are used.
+`[added 2026-08-31; restated 2026-09-01]` Dispatching `release.yml` on `main`
+publishes to the Chrome Web Store, Edge Add-ons and AMO with **no human
+approval step** (`docs/security/RELEASE-POLICY.md`).  The values below
+therefore live in repository secrets rather than on one operator's machine.
+Since 2026-09-01 a release starts with somebody clicking Run workflow, so
+there is at least a person who knows a publish is happening — but they are
+watching a run summary, not a console, and nothing about the credentials'
+expiry is any less silent for it.
 
 Two of them expire on a fixed clock, and both are load-bearing:
 

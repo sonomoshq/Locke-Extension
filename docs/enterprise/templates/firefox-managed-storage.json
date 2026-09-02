@@ -1,24 +1,54 @@
 {
   "_comment_about_this_file": [
-    "Firefox managed-storage values for Sonomos Desktop Connector.",
-    "Drop into the path matching your platform — see the comment in",
+    "Firefox managed-storage values for the Locke extension.",
+    "Drop into the path matching your platform - see the comment in",
     "firefox-policies.json for the full path list. The file MUST be",
     "named after the gecko id: desktop-connector@sonomos.ai.json",
     "",
+    "The gecko id still says `desktop-connector` because it is the id",
+    "already registered for this add-on (manifest.json,",
+    "browser_specific_settings.gecko.id). Changing it would orphan every",
+    "existing install, so the old product name survives in the id and",
+    "nowhere else.",
+    "",
     "Firefox reads this file once at startup; restart the browser after",
     "editing. Values land in browser.storage.managed and override the",
-    "user's popup settings."
+    "user's local settings.",
+    "",
+    "The `data` block below maps 1:1 onto managed-schema.json at the repo",
+    "root, which is authoritative for every key, type and bound. Only the",
+    "names in shared/constants.js::MANAGED_KEYS are read; anything else is",
+    "ignored on arrival.",
+    "",
+    "Enforced today: allowedProviders (which catalog providers the shim",
+    "screens), heartbeatSeconds (health-probe cadence, 10-600s),",
+    "debugLogging (healthy-path console lines only - a blocked or",
+    "unscreened send is warned about regardless) and enforceTimeoutMs (how",
+    "long a HELD request waits for a verdict before it is BLOCKED,",
+    "1000-120000ms).",
+    "",
+    "Accepted and then ignored, so deliberately absent from this template",
+    "[documented 2026-09-01]: telemetryEnabled (nothing consults it) and",
+    "lockedSettings (there is no popup settings UI, so there is nothing",
+    "for it to lock). Setting either changes no behaviour.",
+    "",
+    "allowedProviders takes CATALOG PROVIDER IDS from",
+    "shared/ai-surfaces.json - not product nicknames, not API endpoint",
+    "names. The accepted values are the enum in managed-schema.json;",
+    "tests/shim.test.js pins that enum against the catalog. `[]` or unset",
+    "means EVERY catalog surface is screened, which is the default and the",
+    "recommended setting. A non-empty list is SUBTRACTIVE - it can only",
+    "remove surfaces from screening - and a provider left off it is not",
+    "screened at all, so prompts to it leave the machine unexamined."
   ],
 
   "name": "desktop-connector@sonomos.ai",
-  "description": "Managed configuration for Sonomos Desktop Connector",
+  "description": "Managed configuration for the Locke extension",
   "type": "storage",
   "data": {
-    "allowedProviders": [
-      "openai-api", "anthropic-api", "chatgpt", "claude", "gemini"
-    ],
-    "telemetryEnabled": true,
+    "allowedProviders": [],
     "heartbeatSeconds": 30,
-    "lockedSettings": ["allowedProviders"]
+    "debugLogging": false,
+    "enforceTimeoutMs": 45000
   }
 }

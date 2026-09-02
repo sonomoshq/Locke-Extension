@@ -6,10 +6,12 @@ a mix of automated guards and process commitments, and the two are
 [Enforcement status](#enforcement-status-2026-09-01) before treating
 any line below as a control an auditor can rely on.
 
-**Read [How a release publishes](#how-a-release-publishes) first.** A
-push to `main` publishes to the extension stores automatically, with no
-human approval step. The two-person release rule this document used to
-carry has been withdrawn.
+**Read [How a release publishes](#how-a-release-publishes) first.**
+Publishing is a **manual dispatch**: somebody opens Actions → Release →
+"Run workflow" on `main`, and that is what submits to the extension
+stores. Merging does not publish. There is still **no second-person
+approval step** — the two-person release rule this document used to
+carry has been withdrawn and has not come back.
 
 The operator-facing mechanics (commands, dry runs, store failure
 modes) live in
@@ -19,22 +21,31 @@ credentials in
 
 ## Enforcement status (2026-09-01)
 
-Until now every workflow in `.github/workflows/` was
+Until recently every workflow in `.github/workflows/` was
 `workflow_dispatch`-only, with its real triggers commented out, and the
 only checks that ran were local ones in the `scripts/hooks/pre-push` git
-hook. **That has changed: all nine workflows now carry real triggers**
-— `push` to `main` and/or `pull_request` for `ci.yml`, `codeql.yml`,
-`semgrep.yml`, `gitleaks.yml`, `quality.yml`, `release.yml` and
+hook. **That has changed: eight of the nine workflows now carry real
+triggers** — `push` to `main` and/or `pull_request` for `ci.yml`,
+`codeql.yml`, `semgrep.yml`, `gitleaks.yml`, `quality.yml` and
 `dependency-review.yml`, plus weekly schedules on `codeql.yml`,
 `semgrep.yml`, `gitleaks.yml` and `scorecard.yml` and a monthly one on
 `sbom.yml`.
+
+`release.yml` is the ninth, and it is deliberately the exception:
+**`workflow_dispatch` only** (Sonomos #190). It briefly ran on every push
+to `main`, which made merging the publish action; that trigger has been
+removed and `tests/release-gate.test.js` asserts that no workflow in the
+repository pairs a push, pull-request or schedule trigger with a store
+publish.
 
 Two things a reader should not conflate:
 
 1. **A workflow that runs is not a required check.** Branch protection
    on `main` is still not configured, so a failing job is visible but
-   does not block a merge — and merging is what publishes. That is the
-   single largest gap in this policy (`RISK-REGISTER.md` R-15).
+   does not block a merge. It no longer blocks a *release* either, which
+   is the more serious half: the release dispatch does not consult the
+   status of the checks that ran on the commit it is building. That is
+   the single largest gap in this policy (`RISK-REGISTER.md` R-15).
 2. **Nothing has run here yet.** This repository is newly public and has
    no run history. A row marked `[live]` will run from the first push;
    it has not yet produced a result.
@@ -50,12 +61,14 @@ Statements below are marked:
   `--no-verify`
 - `[pending]` — a commitment with no mechanism behind it yet
 
-**Publication is the piece that is fully automatic.** A merge to `main`
-builds, tests, runs preflight and publishes, with no human approval step
-(see [How a release publishes](#how-a-release-publishes)). So the part
-of the pipeline that ships to users is server-side and unattended, while
-the checks that would gate it are not yet required. That is the wrong
-way round, and it is stated here rather than smoothed over.
+**Publication needs a deliberate human action, and nothing more than
+that.** One person dispatching `release.yml` on `main` builds, tests,
+runs preflight and publishes to three stores (see
+[How a release publishes](#how-a-release-publishes)). Everything after
+the click is unattended, and nobody else has to agree at any point. So
+the honest description is: publication is *intentional* but *unreviewed*,
+while the checks that would gate it are not yet required. Do not upgrade
+"someone had to click it" into an approval step.
 
 **No release has been published through `release.yml`**, so nothing
 shipped to date is signed, attested or SBOM'd — that is why those rows
@@ -73,9 +86,17 @@ as evidence.
   strict semver — breaking changes can land in MINOR if the
   desktop app coordinates).
 - `manifest.json::version` is what publishes. It is the value each
-  publisher compares against the store's live version, so the version
-  in the merge commit is the release identity — a git tag, if one is
-  cut, records the release rather than causing it.
+  publisher compares against the store's live version, so the version on
+  `main` at dispatch time is the release identity.
+- **The `v<version>` tag is now load-bearing, as a record rather than a
+  trigger.** `scripts/release-gate.mjs` reads the tag set to answer "has
+  this version already been released?", and `release.yml` creates the tag
+  as part of publishing. Deleting a release tag therefore re-arms a
+  version for republication — don't, unless that is precisely what you
+  mean. Pushing a `v*` tag from a workstation publishes by a different
+  route entirely (`scripts/hooks/pre-push`); the two paths compose,
+  because a version already tagged that way is one the CI gate then
+  declines to submit again.
 - All five version sites MUST agree: `manifest.json`, `package.json`,
   both sites in `package-lock.json`, and the dated `CHANGELOG.md`
   heading. `npm run preflight -- --checks=version` fails on a mismatch
@@ -86,14 +107,21 @@ as evidence.
 
 ## How a release publishes
 
-> **Changed 2026-08-31. There is no human approval gate on publication.**
-> A push to `main` publishes. The two-person release rule that used to
-> sit in this section — "the person who tags a release MUST NOT be the
-> same person who approved the release PR" — has been **withdrawn**, and
-> every document that cited it as a control has been corrected
-> (`CONTROL-CATALOG.md`, `ASVS-MAPPING.md`, `CII-CHECKLIST.md`,
-> `RISK-REGISTER.md` R-04/R-15). Do not cite it. There is no separation
-> of duties on release any more.
+> **Changed 2026-09-01 (Sonomos #190). Publishing is a manual dispatch;
+> merging ships nothing.** `release.yml` is `workflow_dispatch`-only. Its
+> `push` trigger — which made every version-changing merge to `main` an
+> unattended three-store submission — has been removed.
+>
+> **This is not an approval gate, and must not be cited as one.** The
+> two-person release rule that used to sit in this section — "the person
+> who tags a release MUST NOT be the same person who approved the release
+> PR" — remains **withdrawn**, and every document that cited it as a
+> control has been corrected (`CONTROL-CATALOG.md`, `ASVS-MAPPING.md`,
+> `CII-CHECKLIST.md`, `RISK-REGISTER.md` R-04/R-15). One person can still
+> review, merge and dispatch. What dispatch-only buys is narrower and
+> worth naming precisely: **shipping is now an act somebody has to
+> choose**, rather than a side effect of a merge that may have been about
+> something else.
 
 ### The mechanism
 
@@ -106,20 +134,44 @@ as evidence.
    - any user-facing release-notes content
 2. The pull request is reviewed. See
    [Where the review happens now](#where-the-review-happens-now) — this
-   is the *only* review before the extension reaches users.
-3. **Merge to `main`.** That is the publish action. Nothing else has to
-   happen and nobody else has to agree.
-4. **The version gate decides whether this merge is a release.**
+   is still the *only* review before the extension reaches users.
+3. **Merge to `main`.** Nothing ships. No workflow submits anything to a
+   store on a push, and `tests/release-gate.test.js` asserts that.
+4. **Dispatch the Release workflow on `main`** — Actions → Release → "Run
+   workflow", branch `main`. That is the publish action. It is deliberate,
+   it is attributable to whoever clicked it in the run's metadata, and
+   nobody else has to agree.
+5. **The version gate decides whether this dispatch is a release.**
    `scripts/release-gate.mjs` (`.github/workflows/release.yml::gate`)
-   compares `manifest.json::version` at the merge commit against the
-   version at the previous commit. Unchanged → the pipeline stops and
-   nothing ships, and the job is green. Changed → it is a release. So an
-   ordinary merge — docs, CI, a refactor — publishes nothing, and
-   bumping the version in the PR is what makes merging it a release.
-   The gate is **fail-closed**: when it cannot determine the previous
-   version (shallow clone, rewritten history, no parent) it does not
-   publish. Covered by `tests/release-gate.test.js`.
-5. If the gate says release, the pipeline runs, in this order:
+   asks whether this repository already has a `v<version>` release tag for
+   `manifest.json::version`. Tagged → the pipeline stops, nothing ships,
+   and the job is green, so re-dispatching to look at the workflow is
+   safe. Untagged → it is a release, and `release.yml` creates the tag as
+   part of publishing.
+
+   The comparison used to be against the **parent commit** — right for a
+   push trigger, wrong for a dispatch. Under dispatch the tip of `main` is
+   routinely not the bump commit, so a parent-commit gate would answer
+   "unchanged" on a perfectly good release and `force: true` would become
+   the way every release is cut. An override used every time is not an
+   override.
+
+   The gate is **fail-closed in four directions**, all covered by
+   `tests/release-gate.test.js`:
+   - the version already has a release tag → no publish
+   - a **shallow** clone, where a missing tag proves nothing → no publish
+     (which is why the `gate` job checks out with `fetch-depth: 0`)
+   - git unavailable or the tag list unreadable → no publish
+   - a dispatch on **any ref but `main`** → no publish, and `--force`
+     does **not** override this one. Dispatch, unlike the push trigger it
+     replaced, lets the operator pick a branch; building a release from an
+     unreviewed one would sign it under a sigstore identity that does not
+     match the verification recipe published under
+     [Artifact integrity](#artifact-integrity).
+
+   `force: true` remains for exactly one case: re-driving a publish that
+   failed *after* the tag was created.
+6. If the gate says release, the pipeline runs, in this order:
    - `release.yml::Validate version matches manifest`
    - `npm test` (`release.yml::Unit tests (node:test)`)
    - `scripts/preflight.mjs` — version sites, both store manifest
@@ -130,7 +182,7 @@ as evidence.
      CI-created tag and a GitHub release
    - `scripts/publish.mjs`, all three publishers concurrently, in the
      `store-publish` job
-6. **Per-store version checks are a safety net below the gate, not the
+7. **Per-store version checks are a safety net below the gate, not the
    gate.** Each publisher also refuses to re-submit a version a store
    already has, which is what makes a re-drive safe:
    - Chrome — `scripts/publish/chrome.mjs` reads `:fetchStatus` and
@@ -149,7 +201,7 @@ as evidence.
    comparison rather than a three-store query —
    [`docs/store/AUTOMATED-RELEASE.md`](../store/AUTOMATED-RELEASE.md)
    sets out the reasoning.
-7. **`submitted` is still not `live`.** Chrome enters review, Edge
+8. **`submitted` is still not `live`.** Chrome enters review, Edge
    enters certification (up to 7 business days, with no API to poll),
    and AMO signs automatically but reviews afterwards. Watch each
    console and record the outcome in the release's changelog entry.
@@ -177,13 +229,18 @@ would make this section wrong, so update it in the same change.
 
 The review that used to happen at release time — a second person
 looking at what was about to ship, after the code was already merged —
-**has to happen at pull-request review time instead, because merging is
-what ships.** There is no later checkpoint. Concretely:
+**still has to happen at pull-request review time.** Dispatch-only did
+not add a checkpoint: it moved the moment of shipping, not the moment of
+review, and the person who dispatches is typically the person who
+merged. Concretely:
 
-- A merge is irreversible in the direction that matters. Stores reject
-  a re-upload of an existing version, so a bad release is corrected by
-  publishing a *new* version, never by withdrawing the one that went
-  out.
+- The *dispatch* is what is irreversible, and it is irreversible in the
+  direction that matters. Stores reject a re-upload of an existing
+  version, so a bad release is corrected by publishing a *new* version,
+  never by withdrawing the one that went out. What dispatch-only changes
+  is that a merge is now recoverable: a mistake noticed after merging and
+  before dispatching can be fixed with another merge, which was not true
+  when the merge itself submitted to three stores.
 - The tag is now cut **by CI**, after the build, from the version in the
   manifest. It is a lightweight tag and nothing signs it, so a tag no
   longer carries any human assertion about the release — do not read one
@@ -195,16 +252,27 @@ what ships.** There is no later checkpoint. Concretely:
 - **Branch protection on `main` is not configured** (see below), so
   even the pull-request review is a process commitment, not a
   server-side rule. An account with write access can push straight to
-  `main`, and that publishes. This is the largest single gap in this
-  policy and it is tracked as `RISK-REGISTER.md` R-15.
+  `main` and then dispatch a release from it, with nobody having looked
+  at either step. This is the largest single gap in this policy and it is
+  tracked as `RISK-REGISTER.md` R-15.
+- **Who may dispatch is GitHub's `actions: write` permission, and
+  nothing narrower.** There is no allowlist of release operators in this
+  repository. Restricting the `store-publish` environment to named
+  reviewers is still the change that would turn this into a real approval
+  gate; see the note above about keeping this document true if you make
+  it.
 
 Do not describe any of the above to an auditor as separation of duties.
-It is not. It is one review, unenforced, before an automatic publish.
+It is not. It is one review, unenforced, before a publish that one
+person chooses to run.
 
-### Credential expiry is now a release-blocking hazard
+### Credential expiry is a release-blocking hazard
 
-Unattended publishing turns two known credential lifetimes from
-operator annoyances into pipeline outages. Neither has an owner yet.
+Two known credential lifetimes are pipeline outages waiting to happen,
+and neither has an owner yet. Dispatch-only softens the *symptom* and not
+the problem: the failure now lands on somebody who is watching the run
+they just started, rather than on a merge nobody was watching. It is
+still a failed release either way.
 
 | Credential | Lifetime | What happens when it lapses |
 |---|---|---|
@@ -226,9 +294,10 @@ protection has not been set up, so every row below is `[pending]`
 until the workflows land and the rules are turned on. The middle column
 records what, if anything, covers the same ground in the meantime.
 
-This table matters more than it used to. A merge to `main` publishes to
-three stores, so an unprotected `main` is an unprotected publish
-button.
+This table matters. A merge to `main` no longer publishes, but a release
+is dispatched from whatever `main` holds at that moment, and the gate
+does not read the status of the checks that ran on it — so an unprotected
+`main` is still what a release is built from.
 
 | Rule | Covered today by | Status |
 |---|---|---|
@@ -276,8 +345,9 @@ config.
 ## Signed commits
 
 - **Nothing enforces a signature on anything today.** `[pending]` —
-  publication is driven by the merge commit on `main`, not by a tag, so
-  a tag signature is not on the path to a release even when one is cut.
+  publication is driven by a dispatch against `main`, and the `v<version>`
+  tag is created by CI *after* the build, so a tag signature is not on
+  the path to a release even when one is cut.
   Sign tags (`git tag -s`) as a matter of practice; do not represent it
   as a control.
 - **Recommended for all commits.** Branch protection should require
@@ -290,9 +360,9 @@ below were once stale: this table listed `sonomos-extension-<v>.zip` and
 a tarball for the native messaging host, neither of which any build in
 this repo has ever produced. `scripts/package.mjs` emits exactly two
 files. The sigstore bundles, SLSA attestation and SBOMs are real steps
-in `release.yml`, which now runs on push to `main` — but **no release
-has been published through it**, so none of them has been produced for
-any shipped version.
+in `release.yml`, which is dispatched by hand — but **no release has
+been published through it**, so none of them has been produced for any
+shipped version.
 
 Every release produces:
 
@@ -301,15 +371,17 @@ Every release produces:
 | `dist/locke-extension-<version>-chromium.zip` | Chrome Web Store **and** Edge Add-ons submission package | Rebuild the published commit with `SOURCE_DATE_EPOCH` and `sha256sum`-compare | Produced by `npm run package` |
 | `dist/locke-extension-<version>-firefox.zip` | Firefox AMO submission package | Same | Produced by `npm run package` |
 | `dist/publish-report.json` | Per-store submission outcome, secrets redacted | Read it; `ok:false` on any store exits 1 | Produced by `scripts/publish.mjs` |
-| `<artifact>.zip.sha256` | Checksum sidecar | `sha256sum -c` | `release.yml::sha256 sidecars` — the step runs on push to `main`, but no release has been published, so no sidecar exists yet |
+| `<artifact>.zip.sha256` | Checksum sidecar | `sha256sum -c` | `release.yml::sha256 sidecars` — the step runs on a release dispatch, but no release has been published, so no sidecar exists yet |
 | `<artifact>.zip.sigstore.bundle` | Keyless OIDC signature over each zip | `cosign verify-blob --bundle <artifact>.zip.sigstore.bundle --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp 'release\.yml@refs/heads/main'` — note the identity is a **branch** ref, not a tag: releases are built from `main`, not from a signed tag | `release.yml::Sign artifacts`; nothing shipped so far is signed |
 | SLSA build provenance attestation | Provenance | `gh attestation verify <artifact> -R sonomoshq/Locke-Extension` | `release.yml::SLSA build provenance attestation`; nothing shipped so far is attested |
 | `sbom.cyclonedx.json` / `sbom.spdx.json` | Dependency inventory | Standard CycloneDX / SPDX consumers | `release.yml` and `sbom.yml`; never published against a version. The extension declares zero runtime dependencies |
 | Native-host tarball | — | — | **Not an artifact of this repository.** The native messaging host is built and shipped with the Locke desktop app; nothing here produces or verifies it |
 
 The full IT-side verification recipe lives in
-[`docs/enterprise/DEPLOYMENT.md`](../enterprise/DEPLOYMENT.md), and
-needs the same correction applied where it names artifacts.
+[`docs/enterprise/DEPLOYMENT.md`](../enterprise/DEPLOYMENT.md). `[updated
+2026-09-01]` — it used to name artifacts no build here has ever produced;
+it now lists exactly what `scripts/package.mjs` and `release.yml` emit,
+with a column saying that none of it exists yet.
 
 ## Reproducible builds
 
@@ -365,14 +437,15 @@ even before a release exists to check against.
 ## Hotfix releases
 
 A hotfix (e.g. `2.0.1` after `2.0.0`) follows the same flow: bump the
-version, write the changelog entry, open a PR, merge. The merge
-publishes. Speed is not a reason to skip the pull-request review — it
-is now the *only* review, so skipping it under time pressure means
-nobody looked at the release at all.
+version, write the changelog entry, open a PR, merge, dispatch. Speed is
+not a reason to skip the pull-request review — it is still the *only*
+review, so skipping it under time pressure means nobody looked at the
+release at all. Dispatch-only does not help here: the same person under
+the same time pressure clicks the button.
 
 ## Release-pipeline failure handling
 
-If publishing fails after the merge:
+If publishing fails after the dispatch:
 
 1. **The version is spent either way.** Stores reject a re-upload of an
    existing version, so a version that reached any store cannot be
@@ -392,9 +465,8 @@ If publishing fails after the merge:
    accepted the version answers `skipped`, which is why re-running all
    three is also safe.
 4. If the fix requires a code or manifest change, open a PR bumping to
-   the next patch (`2.0.1` → `2.0.2`) with the fix in it. Merging that
-   PR publishes the new version — there is no way to "re-cut" the old
-   number.
+   the next patch (`2.0.1` → `2.0.2`) with the fix in it. Merge it and
+   dispatch again — there is no way to "re-cut" the old number.
 5. The changelog entry for the new version should explain the failed
    predecessor.
 

@@ -1,6 +1,7 @@
 // Copyright © 2026 Sonomos, Inc. All rights reserved.
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { readFile } from 'node:fs/promises';
 
 import {
   captureFailureToName,
@@ -852,4 +853,114 @@ test('the redaction note appears alongside the fail-open notes when all three ar
 
 test('a zero redaction count reports nothing extra', () => {
   assert.equal(noteFor({ redactedItems: 0 }), null);
+});
+
+// ── "we have not heard yet" is not "the app is down" ───────────────
+//
+// `STATUS.UNKNOWN` is the worker's initial state and the literal fallback
+// `popup/popup.js` renders when the service worker cannot be reached at all.
+// It used to collapse into the `offline` view, so opening the popup asserted
+// **"The Locke desktop app isn't running… Open it to resume"** before anything
+// had been checked — a claim about somebody else's process, made from having
+// asked nobody, and prescribing a fix for it. Exactly the defect the NO_BRIDGE
+// branch was carved out to stop, one status over.
+
+test('an unchecked state says it is checking, and blames nothing', () => {
+  const copy = copyFor({ status: STATUS.UNKNOWN, screening: SCREENING.UNCONFIRMED });
+  assert.equal(copy.view, 'checking');
+  assert.equal(copy.badge, 'Checking…');
+  assert.ok(!/isn’t running/.test(copy.detail), copy.detail);
+  assert.ok(!/isn’t answering/.test(copy.detail), copy.detail);
+  assert.ok(!/Open it to resume/.test(copy.detail), copy.detail);
+  assert.match(copy.detail, /Nothing has answered yet/);
+});
+
+test('a state object with no status at all is "checking", not "offline"', () => {
+  // popup.js renders `{ status: STATUS.UNKNOWN }` when the worker is
+  // unreachable, and `copyFor` defaults a missing status to the same thing.
+  // Neither is evidence about the desktop app.
+  for (const state of [{}, null, undefined, { status: STATUS.UNKNOWN }]) {
+    assert.equal(copyFor(state).view, 'checking', String(state));
+  }
+});
+
+test('checking never claims protection either — it says nothing is proved', () => {
+  const copy = copyFor({ status: STATUS.UNKNOWN });
+  assert.equal(copy.screeningLabel, 'Not yet confirmed');
+  assert.ok(!/confirmed active/.test(copy.detail), copy.detail);
+  assert.ok(!/protecting/.test(copy.detail), copy.detail);
+});
+
+test('an error still outranks an unchecked status', () => {
+  // A health check that threw told us something, even though it left the
+  // status where it was. "Checking" would be the wrong answer there.
+  assert.equal(viewFor({ status: STATUS.UNKNOWN, error: 'worker-error' }), 'error');
+  assert.equal(viewFor({ status: STATUS.UNKNOWN, error: 'bridge-error' }), 'error');
+});
+
+test('the checking badge is the same word popup.html already ships', async () => {
+  // The placeholder markup told the truth and the copy replaced it with a
+  // claim. They have to agree, or the badge flickers through two words.
+  const html = await readFile(new URL('../popup/popup.html', import.meta.url), 'utf8');
+  const copy = copyFor({ status: STATUS.UNKNOWN });
+  assert.ok(
+    html.includes(`data-status="checking"`),
+    'popup.html must ship the checking state, not offline, as its placeholder'
+  );
+  assert.ok(html.includes(copy.badge), `popup.html must ship the badge text "${copy.badge}"`);
+});
+
+// ── the offline line says what was observed, not what it guesses ───
+
+test('offline reports silence, not a claim about whether the app is running', () => {
+  // This branch is reached from a host that replied `connected: false` AND
+  // from a bridge timeout. A timeout is silence: the app may be running and
+  // wedged, or just slower than `bridgeTimeoutMs`. "isn't answering" is true
+  // in both; "isn't running" is only true in one, and is the sentence that
+  // sends somebody to start an app that is already open.
+  const copy = copyFor({ status: STATUS.DISCONNECTED });
+  assert.equal(copy.view, 'offline');
+  assert.match(copy.detail, /isn’t answering/);
+  assert.ok(!/isn’t running/.test(copy.detail), copy.detail);
+  assert.match(copy.detail, /held back/);
+});
+
+// ── "held back" names the subset, not the whole site ───────────────
+//
+// Only requests with a BODY are ever screened, and on the `search` catalog
+// entries a prompt that arrives as a top-level navigation — the address bar,
+// the default search engine, a `?q=` link, a form submit — is not screened on
+// any host (HONEST.md, and `web_screening: "none"` in shared/ai-surfaces.json).
+// So "requests to the AI apps and search engines Locke screens are being held
+// back" was a comfortable sentence rather than a true one: during an outage a
+// user reading it concludes nothing of theirs left, and a search typed into
+// the address bar left anyway.
+
+test('no outage sentence claims that everything to those sites is held back', () => {
+  const details = [
+    copyFor({ status: STATUS.CONNECTED, error: 'worker-error' }).detail,
+    copyFor({ status: STATUS.DISCONNECTED }).detail,
+    copyFor({ status: STATUS.NO_BRIDGE }).detail,
+    copyFor(connected({ screening: SCREENING.UNAVAILABLE })).detail
+  ];
+  for (const detail of details) {
+    assert.match(detail, /held back/, detail);
+    assert.match(
+      detail,
+      /requests Locke screens on/,
+      `must name the screened subset rather than the whole site: ${detail}`
+    );
+    assert.ok(
+      !/requests to the AI apps/.test(detail),
+      `must not claim every request to those sites is held: ${detail}`
+    );
+  }
+});
+
+test('the "nothing sent yet" line does not promise that any send confirms screening', () => {
+  // A send that is out of scope — no body, a skipped path, a surface the user
+  // or a policy excluded — confirms nothing, and the line used to say
+  // "the first time you send" flatly.
+  const copy = copyFor(connected({ screening: SCREENING.UNCONFIRMED }));
+  assert.match(copy.detail, /the first time you send something it screens/);
 });

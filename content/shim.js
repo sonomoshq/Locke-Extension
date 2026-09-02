@@ -310,19 +310,75 @@
     return false;
   }
 
-  // The catalog says which hosts we screen; the user's own settings can take
-  // one back out. Every scope decision goes through here rather than calling
-  // isAiHost directly, so there is one place where "in scope" is decided.
+  // ── surfaces an ADMIN policy excluded ───────────────────────────────────
+  //
+  // `allowedProviders` from managed storage (managed-schema.json), pushed the
+  // same way `disabledWebHosts` is. A non-empty list means "screen only these
+  // catalog providers"; empty or absent means every catalog surface, which is
+  // the default and the only safe reading of a policy nobody set.
+  //
+  // `null` — not an empty Set — is the no-restriction state, because an empty
+  // allowlist and an absent one have to mean the same thing here ("everything")
+  // while an empty *disable* set means the opposite ("nothing is off"). One
+  // Set with two readings is how a policy ends up screening nothing.
+  //
+  // Values are CATALOG IDS (`openai`, `anthropic`, `google`, …) matched against
+  // SONOMOS_WEB_PROVIDERS, not hostnames and not product nicknames. An id the
+  // catalog does not know matches nothing, so a typo'd policy narrows scope
+  // rather than widening it.
+  //
+  // Be clear about what that costs, because it is the sharp edge of this knob:
+  // a narrowed surface is not screened AT ALL, so prompts to it leave the
+  // machine unexamined, and NOTHING SURFACES THAT. The popup reports whether
+  // the desktop app is reachable and whether screening is answering; it has no
+  // notion of scope, so a policy that excluded every provider looks exactly
+  // like a healthy one. The only signal is the `config-applied` debug line
+  // below, which names the applied ids rather than counting them — and that
+  // line needs `debugLogging`. `managed-schema.json` pins the enum to the
+  // catalog and tests/shim.test.js pins the two together, which is where a
+  // typo is meant to be caught: before it is deployed, not after.
+  //
+  // SUBTRACTIVE, and that is the whole security story, exactly as it is for
+  // disabledHosts above: this can only ever remove a host from scope. AI_HOSTS
+  // is generated into the package at build time and the manifest only injects
+  // us on those hosts, so no value here reaches a host that was not already in
+  // both. A hostile page can forge SONOMOS_CONFIG and hand itself an allowlist
+  // that excludes it — and gains nothing it did not already have, since
+  // HONEST.md's forgeable-channel bullet already grants it a pristine `fetch`.
+  let allowedProviders = null;
+
+  // Mirrors `maxItems` on the same key in managed-schema.json, and sits well
+  // above the catalog's provider count: a policy naming more providers than
+  // exist is not a policy, it is a paste accident.
+  const MAX_ALLOWED_PROVIDERS = 64;
+
+  function isProviderAllowed(host) {
+    if (allowedProviders === null) return true;
+    const id = providerForHost(host);
+    // A host we cannot attribute stays IN scope. An allowlist may only exclude
+    // what it can name, so an unattributable host — a catalog entry added
+    // without a provider mapping — keeps being screened rather than silently
+    // dropping out of it. Wrong in the direction that costs a held request,
+    // never in the direction that lets a body out.
+    if (id === null) return true;
+    return allowedProviders.has(id);
+  }
+
+  // The catalog says which hosts we screen; the user's own settings and an
+  // admin's policy can each take one back out. Every scope decision goes
+  // through here rather than calling isAiHost directly, so there is one place
+  // where "in scope" is decided.
   function isScreenedHost(host) {
-    return isAiHost(host) && !isDisabledHost(host);
+    return isAiHost(host) && !isDisabledHost(host) && isProviderAllowed(host);
   }
 
   // ── the page-start race for the disable set ─────────────────────────────
   //
   // We run at document_start; SONOMOS_CONFIG cannot. content-script.js has to
   // read chrome.storage first (see its pushConfig), so for the first moments of
-  // a page load `disabledHosts` is empty and isScreenedHost() answers for a
-  // surface the user switched OFF exactly as it would for one they left on. The
+  // a page load `disabledHosts` is empty, `allowedProviders` is unrestricted,
+  // and isScreenedHost() answers for a surface the user switched OFF — or one
+  // an admin policy excluded — exactly as it would for one still in scope. The
   // concrete failure: the page's first chat POST on a disabled surface gets
   // HELD and screened, and with the desktop app down it is BLOCKED — the site breaks
   // in the one configuration where the user told us to leave it alone.
@@ -882,13 +938,32 @@
       }
       disabledHosts = next;
     }
+    // Same rule, opposite polarity. An absent key leaves the current policy
+    // alone; an array replaces it — and an EMPTY array is a real answer that
+    // means "no restriction", so it clears the allowlist rather than screening
+    // nothing. Reading an empty allowlist as "screen nothing" would turn a
+    // cleared policy into a silent, total loss of coverage.
+    if (Array.isArray(config.allowedProviders)) {
+      const next = new Set();
+      for (const entry of config.allowedProviders.slice(0, MAX_ALLOWED_PROVIDERS)) {
+        if (typeof entry !== 'string') continue;
+        const id = entry.trim().toLowerCase();
+        if (id !== '') next.add(id);
+      }
+      allowedProviders = next.size > 0 ? next : null;
+    }
     // The channel has answered, so nothing waits on it again — including a
     // push that carried no disabledWebHosts key. "Arrived" is about the
     // config, not about its contents: a later push still replaces the set,
     // it just no longer has anyone holding a request for it.
     noteConfigArrived();
     debug('config-applied', {
-      enforceTimeoutMs, debugLogging: debugSetting, disabledHosts: disabledHosts.size
+      enforceTimeoutMs,
+      debugLogging: debugSetting,
+      disabledHosts: disabledHosts.size,
+      // `all` rather than 0, so a policy that excluded every provider is not
+      // rendered the same way as no policy at all.
+      allowedProviders: allowedProviders === null ? 'all' : [...allowedProviders].join(',')
     });
   }
 

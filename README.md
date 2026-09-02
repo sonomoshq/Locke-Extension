@@ -214,21 +214,32 @@ live in [docs/store/LISTING.md](docs/store/LISTING.md).
 
 `npm run package` builds the two store artifacts — one Chromium zip
 that serves **both** the Chrome Web Store and Edge Add-ons, and one Firefox
-zip for AMO. Pushing a `vX.Y.Z` tag is what submits them: the
-`scripts/hooks/pre-push` hook runs the release gate and then
-`scripts/publish.mjs --store=all`.
+zip for AMO.
+
+Submitting them is always a **deliberate act**, never a side effect of
+merging, by one of two routes:
+
+- **From CI (the normal one):** merge the version bump, then dispatch
+  Actions → Release → "Run workflow" on `main`. `release.yml` is
+  `workflow_dispatch`-only, and `scripts/release-gate.mjs` publishes only
+  when this repository has no `v<version>` release tag yet.
+- **From a workstation:** pushing a `vX.Y.Z` tag, where the
+  `scripts/hooks/pre-push` hook runs preflight and then
+  `scripts/publish.mjs --store=all`.
+
+Neither route has a second-person approval step.
 
 - [`docs/store/RELEASE-PIPELINE.md`](docs/store/RELEASE-PIPELINE.md) — the
-  operator's guide: the bump → PR → tag sequence, what the pre-push hook does
-  on a branch versus a tag, dry runs, reproducible builds, and a
-  troubleshooting table for the ways each store says no.
+  operator's guide: the bump → PR → merge → dispatch sequence, what the
+  pre-push hook does on a branch versus a tag, dry runs, reproducible builds,
+  and a troubleshooting table for the ways each store says no.
 - [`docs/store/CREDENTIALS.md`](docs/store/CREDENTIALS.md) — every store
   credential, where to get it, and how each one expires (the Edge API key
   every 72 days; the Chrome refresh token every 7 while the OAuth consent
   screen is in Testing).
 
-Policy — who may tag, and what is actually enforced versus merely committed
-to — is [`docs/security/RELEASE-POLICY.md`](docs/security/RELEASE-POLICY.md).
+Policy — who may release, and what is actually enforced versus merely
+committed to — is [`docs/security/RELEASE-POLICY.md`](docs/security/RELEASE-POLICY.md).
 
 ## Security model
 
@@ -255,10 +266,11 @@ See [SECURITY.md](SECURITY.md). TL;DR:
 Both checks run locally (`npm run validate` or `npm run package`, and the
 `scripts/hooks/pre-push` hook), and a contributor can bypass the hook with
 `git push --no-verify`.
-`.github/workflows/` re-asserts them. The checks there do not yet run on a
-push or a pull request, so nothing there gates one — with one exception:
-`release.yml` runs on every push to `main`, and publishes to the three
-stores when `manifest.json`'s version has changed. Merging is what ships.
+`.github/workflows/` re-asserts them, and those workflows now run on pushes
+to `main` and on pull requests — but branch protection is not configured, so
+nothing there *gates* a merge yet. `release.yml` is the deliberate exception
+in the other direction: it is `workflow_dispatch`-only, so nothing publishes
+to a store without somebody choosing to.
 The Scorecard and SLSA badges above are aspirational because the release
 pipeline has not run yet, not because it cannot; see
 [`docs/security/RELEASE-POLICY.md`](docs/security/RELEASE-POLICY.md).

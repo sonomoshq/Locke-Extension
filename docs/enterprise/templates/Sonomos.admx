@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Windows GPO ADMX template for Sonomos Desktop Connector.
-  Pair with the en-US/Sonomos.adml file in this directory.
+  Windows GPO ADMX template for the Locke extension (Sonomos).
+  Pair with the en-US/Sonomos.adml file in this directory. Every
+  $(string.X) and $(presentation.X) referenced here must exist there, or
+  the Group Policy editor silently drops the setting.
 
   Install:
     1. Copy Sonomos.admx to %SystemRoot%\PolicyDefinitions\
@@ -11,6 +13,28 @@
 
   Replace <EXTENSION_ID> in this file with the actual 32-char Chrome
   extension ID before deploying.
+
+  WHAT THIS FILE COVERS, AND WHAT IT DOES NOT [2026-09-01]
+
+  It covers the three SCALAR managed settings the extension enforces:
+  heartbeatSeconds, debugLogging and enforceTimeoutMs. Their authoritative
+  descriptions, types and bounds are in managed-schema.json at the repo
+  root; the strings in the .adml restate them for the GPO editor and are
+  not the source of truth.
+
+  It does NOT cover `allowedProviders`, which is a LIST of catalog provider
+  ids. Chrome reads a list-valued 3rdparty extension policy from a single
+  registry value holding JSON, which this ADMX has no element type for;
+  set it through chrome-managed-policy.json (or the equivalent registry
+  value) instead. That file also explains what narrowing it costs.
+
+  Two keys that were once here are gone on purpose. `keystrokeGuardEnabled`
+  named a subsystem removed in 2.0.0 — nothing reads it, and a GPO checkbox
+  for a protection that does not exist is a lie an admin can toggle.
+  `telemetryEnabled` is still accepted by the extension but is inert
+  (nothing consults it; the service worker logs regardless), so it gets no
+  policy element here either. Same reasoning for `lockedSettings`, which
+  has no popup settings UI to lock.
 -->
 <policyDefinitions xmlns:xsd="http://www.w3.org/2001/XMLSchema"
                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -32,41 +56,43 @@
   </categories>
 
   <policies>
-    <policy name="KeystrokeGuardEnabled"
-            class="Both"
-            displayName="$(string.KeystrokeGuard)"
-            explainText="$(string.KeystrokeGuard_Explain)"
-            key="Software\Policies\Google\Chrome\3rdparty\extensions\&lt;EXTENSION_ID&gt;\policy"
-            valueName="keystrokeGuardEnabled">
-      <parentCategory ref="SonomosDesktop"/>
-      <supportedOn ref="windows:SUPPORTED_WindowsVista"/>
-      <enabledValue><decimal value="1"/></enabledValue>
-      <disabledValue><decimal value="0"/></disabledValue>
-    </policy>
-
-    <policy name="TelemetryEnabled"
-            class="Both"
-            displayName="$(string.Telemetry)"
-            explainText="$(string.Telemetry_Explain)"
-            key="Software\Policies\Google\Chrome\3rdparty\extensions\&lt;EXTENSION_ID&gt;\policy"
-            valueName="telemetryEnabled">
-      <parentCategory ref="SonomosDesktop"/>
-      <supportedOn ref="windows:SUPPORTED_WindowsVista"/>
-      <enabledValue><decimal value="1"/></enabledValue>
-      <disabledValue><decimal value="0"/></disabledValue>
-    </policy>
-
     <policy name="HeartbeatSeconds"
             class="Both"
             displayName="$(string.Heartbeat)"
             explainText="$(string.Heartbeat_Explain)"
-            key="Software\Policies\Google\Chrome\3rdparty\extensions\&lt;EXTENSION_ID&gt;\policy"
-            valueName="heartbeatSeconds">
+            presentation="$(presentation.Heartbeat)"
+            key="Software\Policies\Google\Chrome\3rdparty\extensions\&lt;EXTENSION_ID&gt;\policy">
       <parentCategory ref="SonomosDesktop"/>
       <supportedOn ref="windows:SUPPORTED_WindowsVista"/>
       <elements>
         <decimal id="Heartbeat_Decimal" valueName="heartbeatSeconds"
                  minValue="10" maxValue="600" required="true"/>
+      </elements>
+    </policy>
+
+    <policy name="DebugLogging"
+            class="Both"
+            displayName="$(string.DebugLogging)"
+            explainText="$(string.DebugLogging_Explain)"
+            key="Software\Policies\Google\Chrome\3rdparty\extensions\&lt;EXTENSION_ID&gt;\policy"
+            valueName="debugLogging">
+      <parentCategory ref="SonomosDesktop"/>
+      <supportedOn ref="windows:SUPPORTED_WindowsVista"/>
+      <enabledValue><decimal value="1"/></enabledValue>
+      <disabledValue><decimal value="0"/></disabledValue>
+    </policy>
+
+    <policy name="EnforceTimeoutMs"
+            class="Both"
+            displayName="$(string.EnforceTimeout)"
+            explainText="$(string.EnforceTimeout_Explain)"
+            presentation="$(presentation.EnforceTimeout)"
+            key="Software\Policies\Google\Chrome\3rdparty\extensions\&lt;EXTENSION_ID&gt;\policy">
+      <parentCategory ref="SonomosDesktop"/>
+      <supportedOn ref="windows:SUPPORTED_WindowsVista"/>
+      <elements>
+        <decimal id="EnforceTimeout_Decimal" valueName="enforceTimeoutMs"
+                 minValue="1000" maxValue="120000" required="true"/>
       </elements>
     </policy>
   </policies>

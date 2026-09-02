@@ -3,27 +3,53 @@
   English-language string table for Sonomos.admx.
   Install at %SystemRoot%\PolicyDefinitions\en-US\Sonomos.adml
   (or your Central Store equivalent).
+
+  Every id here is referenced by Sonomos.admx, and every $(string.X) and
+  $(presentation.X) that file references exists here. The KeystrokeGuard
+  strings were removed on 2026-09-01 along with the policy that used them:
+  the keystroke-guard subsystem was deleted in 2.0.0 and nothing in the
+  extension has read that setting since. The Telemetry strings went with
+  the same edit, because `telemetryEnabled` is accepted by the extension
+  and then ignored — see Sonomos.admx for the reasoning.
 -->
 <policyDefinitionResources xmlns:xsd="http://www.w3.org/2001/XMLSchema"
                            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                            revision="1.0"
                            schemaVersion="1.0">
 
-  <displayName>Sonomos Desktop Connector</displayName>
-  <description>Group Policy settings for the Sonomos Desktop Connector browser extension.</description>
+  <displayName>Locke extension (Sonomos)</displayName>
+  <description>Group Policy settings for the Locke browser extension, the browser half of Sonomos's on-device privacy screen for AI apps.</description>
 
   <resources>
     <stringTable>
-      <string id="SonomosDesktop">Sonomos Desktop Connector</string>
-
-      <string id="KeystrokeGuard">Enable keystroke-tracker blocker</string>
-      <string id="KeystrokeGuard_Explain">When enabled, the extension blocks known third-party keystroke trackers across all websites. When disabled, the keystroke guard is removed entirely and pages can install their own input listeners without interference.</string>
-
-      <string id="Telemetry">Enable shape-only telemetry</string>
-      <string id="Telemetry_Explain">When enabled, the extension logs shape-only events (drift signals, mask success/failure counts — never request bodies) to the service-worker console. No data leaves the device regardless of this setting.</string>
+      <string id="SonomosDesktop">Locke extension (Sonomos)</string>
 
       <string id="Heartbeat">Health-check interval (seconds)</string>
-      <string id="Heartbeat_Explain">How often the extension probes the local Sonomos native-messaging host for health. Lower values give faster failure detection at higher CPU cost. Allowed range 10–600 seconds; default 30.</string>
+      <string id="Heartbeat_Explain">How often the extension probes the Locke desktop app, through the local native-messaging host, for health. Lower values give faster failure detection at higher CPU cost; higher values mean a longer wait before the extension notices the desktop app has come back. Allowed range 10-600 seconds; default 30.
+
+This setting does not affect screening itself. An in-scope request is screened when it is sent, whatever this interval is.</string>
+
+      <string id="DebugLogging">Log healthy-path capture decisions to the console</string>
+      <string id="DebugLogging_Explain">When enabled, the capture path prints its normal-path decisions (allow / redact / out-of-scope) to the browser console. Default: disabled.
+
+Warnings for a request that was BLOCKED, or that went out unscreened, are printed whatever this is set to - that is the case a user needs explained, and it must not depend on an administrator having turned a flag on first.
+
+Shape-only either way: host, path, byte counts, media types and decisions. Request bodies and header values are never logged.</string>
+
+      <string id="EnforceTimeout">Verdict timeout before a held request is blocked (milliseconds)</string>
+      <string id="EnforceTimeout_Explain">How long the page-side shim HOLDS an outbound AI request while it waits for the Locke desktop app's verdict. Allowed range 1000-120000 ms; default 45000.
+
+This is a fail-closed ceiling, not a hint. When it expires the request is BLOCKED, not sent: the extension never lets a body out unexamined because screening was slow. Set it above worst-case screening time on the slowest machine in the fleet, or healthy sends will start failing on those machines and users will see the page's own network-error handling.</string>
     </stringTable>
+
+    <presentationTable>
+      <presentation id="Heartbeat">
+        <decimalTextBox refId="Heartbeat_Decimal" defaultValue="30" spinStep="5">Seconds between health checks (10-600):</decimalTextBox>
+      </presentation>
+
+      <presentation id="EnforceTimeout">
+        <decimalTextBox refId="EnforceTimeout_Decimal" defaultValue="45000" spinStep="1000">Milliseconds to hold a request before blocking it (1000-120000):</decimalTextBox>
+      </presentation>
+    </presentationTable>
   </resources>
 </policyDefinitionResources>

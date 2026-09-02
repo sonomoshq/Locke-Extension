@@ -211,11 +211,12 @@ Scope: quarterly (first formal review for this product line)
   control. `[corrected 2026-08-31]` — the native-messaging host name pin
   is no longer in that list: it cross-checked the host's manifest
   templates, which are not part of this repository. **Also corrected:
-  "what runs today" is no longer only the hook.** `release.yml` now runs
-  on push to `main` and publishes to three stores when the version
-  changed, with no approval step (`docs/security/RELEASE-POLICY.md`). So
-  the shipping half of the pipeline is live and server-side while the
-  scanning half is still dormant, which is the wrong way round and is
+  "what runs today" is no longer only the hook.** `release.yml` publishes
+  to three stores when a person dispatches it on `main`, with no approval
+  step (`docs/security/RELEASE-POLICY.md`). `[restated 2026-09-01]` — it
+  briefly ran on push to `main`, so merging was shipping; that trigger is
+  gone (Sonomos #190). Shipping is now intentional but still unreviewed,
+  and the dispatch does not read the scanning half's results, which is
   the standing action item below.
 
 **`TODO.md` status**
@@ -295,12 +296,12 @@ add/remove/adjust during the review.)*
 |---|---|---|
 | Schedule a legal-review block to walk the legal-review checklist in `TODO.md` | Operations | 2026-Q2 end |
 | Submit CII Best Practices badge form (15-min paste from `docs/security/CII-CHECKLIST.md`) | Engineering | 2026-Q2 mid |
-| ~~Activate `.github/workflows/`~~ — **closed 2026-09-01**: all nine workflows now carry real triggers | Engineering | *done* |
+| ~~Activate `.github/workflows/`~~ — **closed 2026-09-01**: eight of the nine workflows now carry real triggers; `release.yml` stays `workflow_dispatch`-only by design (Sonomos #190) | Engineering | *done* |
 | Review the first completed run of each workflow and record the baseline — nothing has run in this repository, so every "enabled" row in `CONTROL-CATALOG.md` and `ASVS-MAPPING.md` is unconfirmed until this happens (added 2026-09-01) | Engineering | First push after publication |
 | Configure branch protection on `main` with the CI jobs — at minimum the `quality.yml` gates and `ci.yml` — as required status checks, and required reviewers on the `store-publish` environment, so the release policy stops being advisory. **Now the highest-value open item**: the triggers are live but a failing check does not block a merge, and a merge publishes | Engineering | Before the first automated release |
 | Publish one release through `release.yml` so at least one artifact is signed, attested and SBOM'd — still open: no release has been published. Until it happens the README carries no supply-chain badge, by design | Engineering | Next release |
 | Run first OpenSSF Scorecard cycle and review the score — `scorecard.yml` is now scheduled weekly. Decide separately whether to set `publish_results: true`, which is still `false`: without it the score stays a private SARIF artifact and no badge is earned | Engineering | First scheduled cycle |
-| Configure branch protection on `main` requiring a non-author CODEOWNER approval — **now the only review before a store submission**, since a merge to `main` publishes (added 2026-08-31) | Engineering | Before the first automated release |
+| Configure branch protection on `main` requiring a non-author CODEOWNER approval — **still the only review before a store submission**, since releasing is a dispatch the merging author can run themselves (added 2026-08-31; restated 2026-09-01 for dispatch-only) | Engineering | Before the first automated release |
 | Give the Chrome `CWS_REFRESH_TOKEN` (7-day life while the OAuth consent screen is in Testing) and the `EDGE_API_KEY` (72-day life, no server-side warning) a named owner — unattended publishing breaks on both clocks and neither has one (added 2026-08-31) | Operations | Before the first automated release |
 | Identify a second CODEOWNER candidate for code review | Operations | 2026-Q2 end |
 

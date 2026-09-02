@@ -8,15 +8,29 @@
     "Windows: HKLM\\Software\\Policies\\Mozilla\\Firefox  (registry-based)",
     "         OR  C:\\Program Files\\Mozilla Firefox\\distribution\\policies.json",
     "",
-    "The Firefox extension ID for Sonomos is `desktop-connector@sonomos.ai`",
-    "(set in manifest.json under browser_specific_settings.gecko.id).",
+    "The Firefox extension ID is `desktop-connector@sonomos.ai` (set in",
+    "manifest.json under browser_specific_settings.gecko.id). It keeps the",
+    "old product name because it is the id already registered for this",
+    "add-on; changing it would orphan every existing install.",
+    "",
+    "There is ONE policies.json per machine and it is not merged key by",
+    "key with anything else, so this template deliberately sets only what",
+    "this extension needs. It used to also carry `DisableTelemetry` and",
+    "`DontCheckDefaultBrowser`, which are browser-wide settings unrelated",
+    "to Locke: pasted into a fleet that had already decided those",
+    "questions, they silently overrode that decision. Removed 2026-09-01.",
     "",
     "For managed-storage values, Firefox does NOT read from the policies",
     "file. Instead it reads a separate JSON file at:",
     "   Linux:   /etc/firefox/managed-storage/desktop-connector@sonomos.ai.json",
     "   macOS:   /Library/Application Support/Mozilla/ManagedStorage/desktop-connector@sonomos.ai.json",
     "   Windows: HKLM\\Software\\Mozilla\\ManagedStorage\\desktop-connector@sonomos.ai",
-    "See firefox-managed-storage.json in this directory for that file."
+    "See firefox-managed-storage.json in this directory for that file.",
+    "",
+    "The install_url below points at the AMO slug this add-on has been",
+    "listed under in docs/store/LISTING.md (`locke-extension`). No release",
+    "has been published to AMO yet, so that URL does not resolve today;",
+    "confirm it against the live listing before you deploy this."
   ],
 
   "policies": {
@@ -28,8 +42,6 @@
       }
     },
 
-    "ExtensionUpdate": true,
-    "DisableTelemetry": false,
-    "DontCheckDefaultBrowser": true
+    "ExtensionUpdate": true
   }
 }

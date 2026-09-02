@@ -55,7 +55,34 @@ import { SCREENING, STATUS } from '../shared/constants.js';
 // Collapse the background worker's finer-grained status into the states the
 // popup cares about. A hard bridge/worker error is "error";
 // connected/warming (the app is up) is "online"; NO_BRIDGE is "setup";
-// everything else — disconnected, unknown, timeout — reads as "offline".
+// UNKNOWN — nobody has asked yet — is "checking"; everything else —
+// disconnected, timeout — reads as "offline".
+//
+// ## Why UNKNOWN is not "offline"
+//
+// It used to be, and that was the same defect as the NO_BRIDGE one below,
+// one status over. `STATUS.UNKNOWN` is the *initial* state
+// (`background/service-worker.js` `initialState`) and the literal fallback the
+// popup renders when the worker cannot be reached at all
+// (`popup/popup.js`: `render(initial ?? { status: STATUS.UNKNOWN })`). It means
+// "no health check has answered", which is not an observation about the
+// desktop app — and every popup open passes through it before `requestCheck`
+// returns.
+//
+// Rendering that as **Offline — "The Locke desktop app isn't running… Open it
+// to resume"** asserted a fact nobody had established and prescribed a fix for
+// it, on a machine where the app may well be running and screening. It also
+// contradicted our own toolbar badge, which has always shown `?` in grey for
+// UNKNOWN and `off` in red for DISCONNECTED — two Sonomos surfaces describing
+// one moment in words that do not line up, which is the failure mode this file
+// exists to prevent. And `popup.html` ships "Checking…" as its pre-render
+// placeholder, so the first thing the copy did was replace an honest
+// placeholder with a claim.
+//
+// "Checking" says what is true: we have not heard yet. It is a transient state
+// in the healthy case and a durable one only when the service worker itself is
+// unreachable — which is worth showing as its own thing rather than blaming
+// the app for.
 //
 // ## Why NO_BRIDGE is not "offline"
 //
@@ -88,13 +115,24 @@ import { SCREENING, STATUS } from '../shared/constants.js';
 export function viewFor(state) {
   const status = state?.status ?? STATUS.UNKNOWN;
   const error = state?.error;
+  // An error outranks UNKNOWN: a health check that threw told us something,
+  // even though it left the status where it was.
   if (error === 'bridge-error' || error === 'worker-error') return 'error';
   if (status === STATUS.CONNECTED || status === STATUS.WARMING) return 'online';
   if (status === STATUS.NO_BRIDGE) return 'setup';
+  if (status === STATUS.UNKNOWN) return 'checking';
   return 'offline';
 }
 
-const STATUS_BADGE = { online: 'Online', offline: 'Offline', error: 'Error', setup: 'Setup' };
+// "Checking…" is the same string `popup.html` ships as its placeholder, so the
+// badge does not flicker through a different word on the way to an answer.
+const STATUS_BADGE = {
+  online: 'Online',
+  offline: 'Offline',
+  error: 'Error',
+  setup: 'Setup',
+  checking: 'Checking…'
+};
 
 const SCREENING_LABEL = {
   [SCREENING.AVAILABLE]: 'Active',
@@ -115,7 +153,35 @@ const SCREENING_LABEL = {
 // accurate version: it says what actually decides scope (catalog
 // membership) instead of asserting a property of the site that a user can
 // correctly dispute.
-const COVERED_SITES = 'the AI apps and search engines Locke screens';
+//
+// Self-contained on purpose — it is dropped into sentences whose subject is a
+// request, so a pronoun here ("the AI apps and search engines it covers")
+// would attach to the wrong noun.
+const COVERED_SITES = 'the AI apps and search engines Locke covers';
+
+// What is actually being held back during an outage, and it is NOT "everything
+// you send to those sites".
+//
+// Every "held back" sentence below used to say "requests to ${COVERED_SITES}",
+// which reads as all of them. Only requests with a BODY are ever screened, and
+// on the `search` catalog entries — `www.google.com`, `www.bing.com` and the
+// rest, declared `web_screening: "none"` — a prompt that arrives as a top-level
+// navigation (the address bar, the default search engine, a `?q=` link, a
+// `<form>` submit) is not screened on ANY host and is therefore not held back
+// by an outage either. `HONEST.md` states that plainly; the popup was quietly
+// claiming otherwise.
+//
+// It matters most in exactly the state these sentences describe. A user
+// reading "requests to the search engines Locke screens are being held back"
+// during an outage concludes nothing of theirs is leaving. A search typed into
+// the address bar left anyway. Naming the subset is the difference between a
+// true sentence and a comfortable one.
+// Written out rather than composed from COVERED_SITES: the leading "Locke" is
+// what lets the trailing "it" be read correctly, and composing the two would
+// either repeat the name twice in one clause or strand the pronoun.
+const SCREENED_REQUESTS = 'the requests Locke screens on the AI apps and search engines it covers';
+const SCREENED_REQUESTS_CAP =
+  SCREENED_REQUESTS.charAt(0).toUpperCase() + SCREENED_REQUESTS.slice(1);
 
 // The recent capture event this popup may describe, or null. A plain shape
 // check — the freshness judgement itself belongs to the producer
@@ -130,8 +196,15 @@ function recentCaptureEvent(state) {
 // The detail line. Keyed on the pair, because the interesting cases are
 // exactly the ones where the two disagree.
 function detailFor(view, screening, recentFailure) {
+  if (view === 'checking') {
+    // Says only what we know: nothing has answered yet. It deliberately makes
+    // no claim about the desktop app, and no claim about protection either
+    // way — screening does not run through this popup, so its silence is not
+    // evidence about anything.
+    return 'Checking with the Locke desktop app. Nothing has answered yet, so this popup can’t tell you whether screening is running — that answer is a moment away. Screening itself doesn’t depend on this window: an in-scope request is held for a verdict and blocked if none comes back.';
+  }
   if (view === 'error') {
-    return `Locke hit a problem, so requests to ${COVERED_SITES} are being held back. Open the Locke desktop app for details.`;
+    return `Locke hit a problem, so ${SCREENED_REQUESTS} are being held back. Open the Locke desktop app for details.`;
   }
   if (view === 'setup') {
     // Names the missing step, and only the missing step. "Open the app" used
@@ -142,14 +215,20 @@ function detailFor(view, screening, recentFailure) {
     // consent prompt — the actual fix — is waiting. content/shim.js gives the
     // same advice for the same condition (`connector-not-started`); one
     // problem, one fix, on both surfaces.
-    return `Locke’s browser connector didn’t start, so requests to ${COVERED_SITES} are being held back. Open the Locke desktop app and click Allow when it asks to connect this extension — or add this extension’s ID under Settings → Locke Extension — then retry.`;
+    return `Locke’s browser connector didn’t start, so ${SCREENED_REQUESTS} are being held back. Open the Locke desktop app and click Allow when it asks to connect this extension — or add this extension’s ID under Settings → Locke Extension — then retry.`;
   }
   if (view === 'offline') {
-    return `The Locke desktop app isn’t running, so requests to ${COVERED_SITES} are being held back. Open it to resume.`;
+    // "isn't answering", not "isn't running". This branch is reached from a
+    // host that replied `connected: false` AND from a bridge timeout, and a
+    // timeout is silence rather than an observation: the app may be running
+    // and wedged, or simply slower than `bridgeTimeoutMs`. Saying what we
+    // observed — no answer — costs nothing and stays true in both, and the
+    // remedy is the same either way.
+    return `The Locke desktop app isn’t answering, so ${SCREENED_REQUESTS} are being held back. Open it to resume — or restart it, if it is already open.`;
   }
   if (screening === SCREENING.UNAVAILABLE) {
     // The state this whole split exists for: app up, nothing screening.
-    return `The desktop app is running, but screening isn’t answering. Requests to ${COVERED_SITES} are being held back until it recovers.`;
+    return `The desktop app is reachable, but screening isn’t answering. ${SCREENED_REQUESTS_CAP} are being held back until it recovers.`;
   }
   if (screening === SCREENING.AVAILABLE) {
     // This state now has exactly one source: a real verdict on real traffic
@@ -185,7 +264,7 @@ function detailFor(view, screening, recentFailure) {
   }
   // Connected, but nothing has proved anything behind the app is screening.
   // Say that, rather than the comfortable thing.
-  return `Connected to the Locke desktop app. Screening is confirmed the first time you send to one of ${COVERED_SITES}.`;
+  return `Connected to the Locke desktop app. Screening is confirmed the first time you send something it screens, on one of ${COVERED_SITES}.`;
 }
 
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;

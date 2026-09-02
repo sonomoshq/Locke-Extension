@@ -1,24 +1,28 @@
-# Automated release — how a merge becomes a store update
+# Automated release — how a dispatch becomes a store update
 
-**A push to `main` publishes to the Chrome Web Store, Edge Add-ons and Firefox
-AMO. There is no human approval step.** Merging is the release.
+**Dispatching `release.yml` on `main` publishes to the Chrome Web Store, Edge
+Add-ons and Firefox AMO. There is no human *approval* step** — one person can
+merge their own change and release it themselves. Merging, on its own, ships
+nothing (Sonomos #190).
 
 ## The rule
 
-`release.yml` publishes when, and only when, `manifest.json`'s `version` differs
-from the version at the previous commit. Everything else about the push is
-irrelevant.
+`release.yml` runs on `workflow_dispatch` only, and publishes when, and only
+when, this repository has no `v<version>` release tag for `manifest.json`'s
+`version`.
 
 ```
-merge to main
-  └─ gate            reads manifest.json at HEAD and at HEAD^
-      ├─ unchanged   → stop. Nothing is built, nothing ships. Job is green.
-      └─ changed     → release  → build, test, sign, attest, GitHub release
+Actions → Release → Run workflow (branch: main)
+  └─ gate            reads manifest.json and the v* tag set
+      ├─ tagged      → stop. Nothing is built, nothing ships. Job is green.
+      ├─ not main    → stop. A release is only ever built from main.
+      └─ untagged    → release  → build, test, sign, attest, tag, GitHub release
                      → store-publish → Chrome + Edge + AMO
 ```
 
-So an ordinary merge — docs, CI, a refactor — ships nothing. To release, bump
-the version in the pull request and merge it:
+So a dispatch on a version that already shipped ships nothing — safe to click
+if you just want to read the summary. To release, bump the version in the pull
+request, merge it, then dispatch:
 
 ```sh
 npm run bump -- patch     # or minor / major / an explicit X.Y.Z
@@ -26,11 +30,13 @@ npm run bump -- patch     # or minor / major / an explicit X.Y.Z
 
 The gate is `scripts/release-gate.mjs`, and it is tested
 (`tests/release-gate.test.js`). Its failure posture is deliberate: when it
-**cannot tell** what the previous version was — a shallow clone, a rewritten
-history, no parent commit — it does **not** publish. A missing answer is not a
-yes. `workflow_dispatch` with `force: true` overrides that.
+**cannot tell** whether the version has already shipped — a shallow clone,
+git unavailable, an unreadable tag list — it does **not** publish. A missing
+answer is not a yes. `force: true` overrides that, and is meant for one case:
+re-driving a publish that failed *after* the tag was created. It does **not**
+override the `main`-only rule.
 
-### Why the comparison is against git and not against the stores
+### Why the gate asks git about tags rather than asking the stores
 
 The obvious design is to ask each store what version is live. It does not work
 uniformly. Chrome exposes a published version; Edge's Partner Center API is
@@ -97,11 +103,14 @@ gone:
 - The tag is now created **by CI** after the build, from the version in the
   manifest. It is a lightweight tag, not a human-signed one, and
   `gh release create --verify-tag` is correspondingly no longer used.
-- There is no approval between merging and publishing.
+- There is no approval between merging and publishing. Since 2026-09-01 there
+  is a *dispatch* between them (Sonomos #190) — one person deciding to ship,
+  which is not the same thing as a second person agreeing to.
 
 **The consequence is that pull-request review is now the only review.** A change
-that reaches `main` with a version bump reaches three public review queues
-without anyone looking again. `docs/security/RELEASE-POLICY.md` records this.
+that reaches `main` with a version bump reaches three public review queues as
+soon as somebody runs this workflow, without anyone looking again.
+`docs/security/RELEASE-POLICY.md` records this.
 
 ## Failure modes worth knowing
 
@@ -121,12 +130,16 @@ as an artifact. But do not read a green run as "it shipped": **check the issue
 tracker, not the tick.** If nobody watches those issues, a failed release is
 invisible.
 
-**The `quality.yml` gates run on the same push, not before it.** A push to
-`main` starts `release.yml` and `quality.yml` in parallel; there is no
-dependency between them, and branch protection is not configured, so a
-`payload-audit` or `reproducible-build` failure does not stop the publish that
-is already running. Those gates protect the pull request, which is where they
-have to catch a problem — they are not a last line of defence on `main`.
+**The `quality.yml` gates do not gate the release.** They run on the push and
+the pull request; `release.yml` runs when a human dispatches it, reads nothing
+about their outcome, and branch protection is not configured, so a red
+`payload-audit` or `reproducible-build` on the commit being released does not
+stop the publish. (Before 2026-09-01 the two started in parallel on the same
+push, which was worse only in that nobody had chosen to ship.) Those gates
+protect the pull request, which is where they have to catch a problem — they
+are not a last line of defence on `main`, and the dispatch is not one either:
+**look at the checks on the commit before you click Run workflow, because
+nothing else will.**
 
 **Publishing is not reversible** the way a GitHub release is. Chrome and Edge
 submissions enter review queues, and no store lets a version be re-uploaded.
@@ -138,11 +151,16 @@ varies by whether a human review is triggered.
 
 ## Re-driving a failed release
 
-`workflow_dispatch` on `release.yml`:
+Dispatch `release.yml` again, on `main`:
 
-- `force: true` — publish even though the version did not change in the last
-  commit. Necessary when re-driving, because the version bump is by then several
-  commits back.
+- `force: true` — publish even though the version already carries a release
+  tag. Necessary when re-driving, because a run that reached `store-publish`
+  created the `v<version>` tag first, and the gate reads that tag as "already
+  released". This is the input's only intended use.
+
+  It does **not** override the `main`-only rule: `scripts/release-gate.mjs`
+  refuses any other ref regardless, because a release built elsewhere would be
+  signed under an identity the published verification recipe does not match.
 - `stores` — `all`, or a single store, so a successful store is not asked to
   accept a version it already has.
 
