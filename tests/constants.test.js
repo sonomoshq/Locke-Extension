@@ -169,6 +169,12 @@ test('constants: message-map values are non-empty strings', () => {
 
 test('constants: INFRASTRUCTURE_REASONS is the shared closed set, frozen', () => {
   assert.equal(Object.isFrozen(INFRASTRUCTURE_REASONS), true);
+  // The values, written out. Deliberately NOT redundant with the vendored-JSON
+  // pin below: the two catch opposite mistakes. That one catches a hand-edit of
+  // the generated file (canonical is right, our copy isn't); this one catches
+  // canonical CHANGING and the change arriving here unreviewed on the next
+  // sync. A set matched as substrings against sentences another team writes
+  // should not be able to change under this repo without a diff somebody reads.
   assert.deepEqual([...INFRASTRUCTURE_REASONS], [
     'engine unavailable',
     'guard unreachable',
@@ -177,6 +183,42 @@ test('constants: INFRASTRUCTURE_REASONS is the shared closed set, frozen', () =>
     'engine protocol failure',
     'bridge protocol failure'
   ]);
+});
+
+test('constants: INFRASTRUCTURE_REASONS is the vendored vocab, not a copy of it', async () => {
+  // shared/vocab.json is the vendored copy of Service-Mesh/sonomos-vocab/vocab.json
+  // (Locke scripts/sync-surfaces.sh puts it there; that script's --check mode,
+  // run by Locke's `vendored-vocab` fleet pin, fails a push if it ever stops
+  // matching canonical). scripts/generate-vocab.mjs compiles it into
+  // shared/vocab.generated.js, which is what constants.js re-exports.
+  //
+  // This is the link that closes the chain at this end. It fails if anybody
+  // hand-edits the generated file, or if `npm run generate` was not re-run
+  // after a sync. Without it, "generated" would be a claim about how the file
+  // came to exist rather than a fact about its contents — and a stale generated
+  // file looks exactly like a current one.
+  //
+  // It replaces a pin that lived in Extension-Bridge and read this repo's
+  // predecessor off the filesystem. That one could not survive a fresh clone,
+  // and by the end it was reading Depreciated-Desktop-Extension — a repo that
+  // ships no browser extension — so it had stopped protecting anything that
+  // runs while still looking like coverage.
+  //
+  // Order is compared, not membership. `infrastructureFragment` returns the
+  // FIRST fragment that matched as the thing we record and display, so two
+  // lists holding the same six strings in different orders can still attribute
+  // one reason two different ways. Canonical pins its order for that reason.
+  const vendored = JSON.parse(
+    await readFile(new URL('../shared/vocab.json', import.meta.url), 'utf8')
+  );
+  assert.ok(
+    Array.isArray(vendored.infrastructure_reason_fragments) &&
+      vendored.infrastructure_reason_fragments.length > 0,
+    'shared/vocab.json must carry a non-empty infrastructure_reason_fragments — comparing ' +
+      'against an absent or empty key would make this assertion trivially true, which is the ' +
+      'one failure mode a drift pin exists to rule out'
+  );
+  assert.deepEqual([...INFRASTRUCTURE_REASONS], vendored.infrastructure_reason_fragments);
 });
 
 test('constants: the real outage token classifies as infrastructure', () => {
@@ -302,9 +344,13 @@ test('constants: an unspecified, missing, or unrecognised cause falls back to th
 
 test('constants: the shim’s inlined copy of the set has not drifted', async () => {
   // content/shim.js is a MAIN-world classic script and cannot import an ES
-  // module, so it carries its own copy. If the two ever disagree, one capture
-  // surface starts calling an outage a refusal while the other does not — and
-  // nothing else in the build would notice.
+  // module — generated or not, which is why this copy did not go away when
+  // constants.js stopped declaring the list — so it carries its own copy. If
+  // the two ever disagree, one capture surface starts calling an outage a
+  // refusal while the other does not, and nothing else in the build would
+  // notice. Pinning it to `INFRASTRUCTURE_REASONS` rather than to a literal is
+  // what keeps this a one-link check: that import is now the generated file, so
+  // the shim is transitively pinned to canonical too.
   const shim = await readFile(new URL('../content/shim.js', import.meta.url), 'utf8');
   const block = /const INFRASTRUCTURE_REASONS = \[([^\]]*)\]/.exec(shim);
   assert.ok(block, 'shim.js must declare INFRASTRUCTURE_REASONS');

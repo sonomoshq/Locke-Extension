@@ -23,7 +23,7 @@
   "scripts": {
     "test": "node --test tests/*.test.js",
     "smoke": "node tests/smoke/run.mjs",
-    "generate": "node scripts/generate-surfaces.mjs",
+    "generate": "node scripts/generate-surfaces.mjs && node scripts/generate-vocab.mjs",
     "validate": "node scripts/validate-store.mjs",
     "package": "node scripts/package.mjs",
     "preflight": "node scripts/preflight.mjs",

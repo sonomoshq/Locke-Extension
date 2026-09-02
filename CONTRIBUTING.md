@@ -109,7 +109,7 @@ the source you wrote.
 | Script | What it does |
 |---|---|
 | `npm test` | `node --test tests/*.test.js` |
-| `npm run generate` | Regenerates `content/web-surfaces.generated.js` from `shared/ai-surfaces.json` |
+| `npm run generate` | Regenerates `content/web-surfaces.generated.js` from `shared/ai-surfaces.json`, and `shared/vocab.generated.js` from `shared/vocab.json` |
 | `npm run validate` | Stages both targets and applies the store rules without writing any artifact — the cheap form of the `npm run package` gate |
 | `npm run package` | Wipes `dist/`, stages `dist/{chromium,firefox}/`, writes both store zips deterministically |
 | `npm run smoke` | Opt-in, developer-run in-browser check: builds `dist/`, loads it unpacked in Chrome and Firefox, and asserts the shim installed its `fetch` hook and reported `NO_BRIDGE` cleanly. **Needs a one-time `cd tests/smoke && npm install`**, and skips (exit 0) without it or without a browser. Not run by any workflow. See [`tests/smoke/README.md`](tests/smoke/README.md). |

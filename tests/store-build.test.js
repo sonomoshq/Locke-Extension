@@ -92,6 +92,8 @@ test('store: staged payload is runtime-only, PNG icons, no build inputs', () => 
     assert.ok(names.includes('managed-schema.json'));
     assert.equal(names.filter((n) => n.endsWith('.svg')).length, 0, 'design-master SVGs must not ship');
     assert.ok(!names.includes('shared/ai-surfaces.json'), 'build-input catalog must not ship');
+    assert.ok(!names.includes('shared/vocab.json'), 'vendored vocab is a build input, not payload');
+    assert.ok(names.includes('shared/vocab.generated.js'), 'the GENERATED vocab is payload and must ship');
     for (const excluded of ['package.json', 'README.md']) {
       assert.ok(!names.includes(excluded), `${excluded} must not ship`);
     }
