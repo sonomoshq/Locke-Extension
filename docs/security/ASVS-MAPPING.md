@@ -17,13 +17,15 @@ Notation:
 - **Roadmap**: not yet met; tracked elsewhere.
 
 > **How to read the status column, 2026-09-01.** This repository is
-> newly public, and every workflow in `.github/workflows/` now carries
-> real triggers. `ci.yml`, `codeql.yml`, `semgrep.yml`, `gitleaks.yml`,
-> `quality.yml` and `release.yml` run on `push` to `main` and/or
+> newly public, and eight of the nine workflows in `.github/workflows/`
+> now carry real triggers. `ci.yml`, `codeql.yml`, `semgrep.yml`,
+> `gitleaks.yml` and `quality.yml` run on `push` to `main` and/or
 > `pull_request`; `codeql.yml`, `semgrep.yml`, `gitleaks.yml` and
 > `scorecard.yml` also run weekly and `sbom.yml` monthly;
 > `dependency-review.yml` runs on `pull_request`. Previously all of them
-> were `workflow_dispatch`-only.
+> were `workflow_dispatch`-only. **`release.yml` still is, deliberately**
+> (Sonomos #190): publishing to three stores must not be a side effect of
+> a merge.
 >
 > **Wired is not the same as has run.** Nothing has run in this
 > repository yet — there is no run history here to cite, and no scan
@@ -50,9 +52,10 @@ Notation:
 > byte-identical — see 14.1.1). The others are `actions-pinned`,
 > `generated-drift`, `permission-diff`, `package-smoke` and `amo-lint`.
 >
-> `release.yml` runs on push to `main` and publishes to the three stores
-> when `manifest.json`'s version differs from the previous commit's, with
-> **no human approval step** — see
+> `release.yml` is `workflow_dispatch`-only (2026-09-01, Sonomos #190) and
+> publishes to the three stores when a person dispatches it on `main` and
+> this repository has no `v<version>` release tag for
+> `manifest.json`'s version, with **no human approval step** — see
 > [`docs/store/AUTOMATED-RELEASE.md`](../store/AUTOMATED-RELEASE.md) and
 > `RELEASE-POLICY.md`. **No release has been published through it yet**,
 > so nothing shipped to date is signed, attested or SBOM'd; that is why
@@ -173,13 +176,16 @@ contained.
 
 ## Release process (not an ASVS section — read it before citing one)
 
-`[added 2026-08-31; restated 2026-09-01]` Publication is **automatic on
-merge to `main`**, with no human approval step: a merge builds, tests,
-runs preflight, and publishes to Chrome Web Store, Edge Add-ons and AMO
-when `scripts/release-gate.mjs` finds that `manifest.json::version`
-differs from the version at the previous commit (`release.yml::gate` →
-`release` → `store-publish`). A merge that does not change the version
-ships nothing. The `store-publish` job is `continue-on-error`, so a
+`[added 2026-08-31; restated 2026-09-01 for dispatch-only]` Publication
+is a **manual dispatch of `release.yml` against `main`**, with no human
+*approval* step: one person clicks Run workflow, and the run then builds,
+tests, runs preflight, and publishes to Chrome Web Store, Edge Add-ons
+and AMO when `scripts/release-gate.mjs` finds that this repository has no
+`v<version>` release tag for `manifest.json::version` (`release.yml::gate`
+→ `release` → `store-publish`). Merging publishes nothing; a dispatch on
+an already-released version publishes nothing. The gate also refuses a
+dispatch from any ref but `main`. Read the dispatch as *intent*, never as
+*review*: the same person may merge and dispatch. The `store-publish` job is `continue-on-error`, so a
 failed store upload does not fail the run or block `main`; it opens a
 GitHub issue instead (`release.yml::publish-failure-notice`), which
 means a publication failure is visible but not blocking. The two-person

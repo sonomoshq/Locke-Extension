@@ -1,16 +1,21 @@
 # ═══════════════════════════════════════════════════════════════════════
-#  Automated release. A push to `main` publishes to the Chrome Web Store,
-#  Edge Add-ons and Firefox AMO — with NO human approval step.
+#  Release. Publishing is a DELIBERATE, MANUAL ACT: this workflow runs on
+#  `workflow_dispatch` and nothing else. Merging to `main` no longer ships
+#  anything — a human opens Actions → Release → "Run workflow" on `main`
+#  and means it.
 #
-#  It publishes only when `manifest.json`'s version differs from the
-#  version at the previous commit (scripts/release-gate.mjs). An ordinary
-#  merge that does not touch the version builds, tests, and ships nothing.
-#  To release: bump the version in the PR (`npm run bump -- patch`) and
-#  merge it. Merging IS the release.
+#  It publishes only when this repository has no release tag for the
+#  version in `manifest.json` (scripts/release-gate.mjs). Re-dispatching on
+#  a version that has already shipped publishes nothing and stays green, so
+#  running this workflow to look at it is safe.
 #
-#  Because there is no gate after merge, the review that used to happen at
-#  release time now has to happen at pull-request review time. See
-#  docs/security/RELEASE-POLICY.md.
+#  To release: merge the version bump (`npm run bump -- patch`) and the
+#  changelog entry, then dispatch this workflow on `main`.
+#
+#  Dispatch-only is NOT an approval gate and must not be described as one.
+#  One person still both authorises and ships; what changed is that
+#  shipping is now a separate, deliberate action rather than a side effect
+#  of merging. See docs/security/RELEASE-POLICY.md.
 #
 #  Step names in this file are load-bearing. RELEASE-POLICY.md and
 #  ASVS-MAPPING.md cite `release.yml::Validate version matches manifest`,
@@ -21,12 +26,14 @@
 name: Release
 
 on:
-  push:
-    branches: [main]
+  # workflow_dispatch ONLY, and deliberately no `push:` (Sonomos #190). A push
+  # trigger here makes merging the publish action, which is what this file was
+  # changed to stop. tests/release-gate.test.js asserts that no workflow in
+  # this repository pairs a push trigger with a store publish.
   workflow_dispatch:
     inputs:
       force:
-        description: "Publish even if the version did not change. Stores reject a version that is already live, so this is for re-driving a failed publish, not for shipping the same bytes twice."
+        description: "Publish even though this version already has a release tag. That is what a run which reached store-publish leaves behind, so this is for re-driving a failed publish — not for shipping the same bytes twice. It does NOT let a release be built from a branch other than main."
         required: false
         default: false
         type: boolean
@@ -50,9 +57,9 @@ env:
   NODE_VERSION: "24"
 
 jobs:
-  # ── Decide whether this push is a release ────────────────────────────
+  # ── Decide whether this dispatch is a release ────────────────────────
   #
-  # Cheap, always runs, and is the only thing standing between a merge and
+  # Cheap, always runs, and is the only thing standing between a click and
   # three public review queues.
   gate:
     name: gate
@@ -63,13 +70,17 @@ jobs:
       publish: ${{ steps.decide.outputs.publish }}
       version: ${{ steps.decide.outputs.version }}
     steps:
-      # depth 2: the gate compares this commit's manifest against its
-      # parent's. With depth 1 there is no parent, the gate cannot tell,
-      # and it deliberately refuses to publish on an unknown answer.
+      # fetch-depth: 0 — the gate asks whether this repository already has a
+      # release tag for the manifest's version, so it needs the WHOLE tag set.
+      # A shallow checkout would hand it a partial one, where "no tag for this
+      # version" means "I could not look" rather than "not released";
+      # scripts/release-gate.mjs detects that case and refuses to publish, so
+      # shrinking this back to a shallow fetch turns every release into a
+      # --force. Depth 0 is what makes the ordinary answer trustworthy.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Node
@@ -77,13 +88,20 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      # --ref-name is passed because dispatch, unlike the push trigger this
+      # replaced, lets the operator choose the branch. The gate refuses any ref
+      # but `main` — including under --force — because the sigstore identity
+      # RELEASE-POLICY.md tells verifiers to check is pinned to
+      # `release.yml@refs/heads/main`.
       - name: Decide whether to publish
         id: decide
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
           if [ "${{ inputs.force }}" = "true" ]; then
-            node scripts/release-gate.mjs --force
+            node scripts/release-gate.mjs --force "--ref-name=$REF_NAME"
           else
-            node scripts/release-gate.mjs
+            node scripts/release-gate.mjs "--ref-name=$REF_NAME"
           fi
 
       - name: Say so in the run summary
@@ -214,14 +232,19 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      # The tag is created here rather than being a precondition, because
-      # the trigger is a branch push. It is a lightweight tag made by CI —
+      # The tag is created here rather than being a precondition, because the
+      # trigger is a dispatch on a branch. It is a lightweight tag made by CI —
       # NOT the human-signed tag the old tag-driven flow required, and
       # `--verify-tag` is correspondingly gone. RELEASE-POLICY.md records
       # that the signed-tag control no longer applies.
       #
+      # This tag is also the gate's evidence: scripts/release-gate.mjs reads the
+      # tag set to answer "has this version already been released?", so this
+      # step is what makes a second dispatch on the same version a no-op.
+      #
       # Idempotent: re-running a release for a version that already has a
-      # tag must not fail the run.
+      # tag must not fail the run. (Reaching here twice for one version means
+      # --force was used, which is exactly the re-drive case.)
       - name: Tag the release commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -262,7 +285,11 @@ jobs:
 
   # ── Store publication ────────────────────────────────────────────────
   #
-  # NO APPROVAL GATE. This runs automatically once `release` succeeds.
+  # NO APPROVAL GATE. Once a human has dispatched the workflow, this runs
+  # automatically as soon as `release` succeeds — the dispatch is the only
+  # human decision in the chain, and it is taken before the build, not after
+  # it. Nobody reviews the artifacts between building them and submitting
+  # them to three stores.
   #
   # The job still targets the `store-publish` GitHub Environment, for two
   # reasons worth keeping even without reviewers:

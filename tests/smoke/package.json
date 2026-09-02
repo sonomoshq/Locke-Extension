@@ -1,0 +1,37 @@
+{
+  "_comment": [
+    "OPT-IN, DEV-ONLY harness manifest. This is NOT part of the extension and",
+    "nothing here ever reaches a store zip: scripts/store-build.mjs stages only",
+    "background/, content/, popup/, shared/ and icons/, so tests/ cannot ship.",
+    "",
+    "It is nested on purpose. The ROOT package.json must keep declaring zero",
+    "dependencies and zero devDependencies — ci.yml::lint-js has a tripwire",
+    "('no JS deps in package.json') that fails the build otherwise, and a second",
+    "one that fails if the root package-lock.json resolves any third-party",
+    "package. Putting the harness dependency here keeps both true, and keeps the",
+    "README's 'zero runtime dependencies' badge honest, because a developer who",
+    "never runs `npm run smoke` never installs any of this.",
+    "",
+    "Install is manual and deliberate:  npm --prefix tests/smoke install",
+    "Nothing installs it for you: there is no postinstall hook and the root",
+    "`prepare` script does not reach in here.",
+    "",
+    "node_modules/ and package-lock.json under this directory are gitignored.",
+    "The lockfile in particular is NOT committed: .github/workflows/",
+    "dependency-review.yml runs on every PR with fail-on-severity: moderate,",
+    "and a committed lockfile would put puppeteer's whole transitive closure",
+    "into the dependency graph, where any unrelated advisory could turn a PR",
+    "red for a package that never ships. The single exact-pinned devDependency",
+    "below is the smallest surface that still lets `npm --prefix tests/smoke",
+    "install` do the right thing. Bumping it is a one-line edit here."
+  ],
+  "name": "locke-extension-smoke",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Developer-run, in-browser smoke harness for the Locke extension. Not run in CI.",
+  "license": "SEE LICENSE IN LICENSE",
+  "devDependencies": {
+    "puppeteer": "25.9.0"
+  }
+}

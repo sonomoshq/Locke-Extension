@@ -14,14 +14,15 @@ application security controls.
 > cite `.github/workflows/*.yml` jobs as the implementing artifact for
 > loopback pinning, content-script scoping, SAST, secret scanning, SCA,
 > SBOM, provenance, signing, reproducible builds and Scorecard
-> monitoring. Until now all nine workflows were `workflow_dispatch`-only
-> and those pointers described intent rather than operation. **Every one
-> of them now carries real triggers** — `push` to `main` and/or
-> `pull_request` for `ci.yml`, `codeql.yml`, `semgrep.yml`,
-> `gitleaks.yml`, `quality.yml`, `release.yml` and
+> monitoring. Until recently all nine workflows were
+> `workflow_dispatch`-only and those pointers described intent rather
+> than operation. **Eight of them now carry real triggers** — `push` to
+> `main` and/or `pull_request` for `ci.yml`, `codeql.yml`, `semgrep.yml`,
+> `gitleaks.yml` and `quality.yml`; `pull_request` for
 > `dependency-review.yml`; weekly schedules on `codeql.yml`,
 > `semgrep.yml`, `gitleaks.yml` and `scorecard.yml`; monthly on
-> `sbom.yml`.
+> `sbom.yml`. **`release.yml` is deliberately still
+> `workflow_dispatch`-only** (Sonomos #190).
 >
 > Rows below therefore use three markers, and the distinction between
 > the last two is the whole point:
@@ -55,9 +56,11 @@ application security controls.
 > byte). The others are `actions-pinned`, `generated-drift`,
 > `permission-diff`, `package-smoke` and `amo-lint`.
 >
-> **`release.yml` runs on push to `main`** and publishes to the three
-> stores when `manifest.json`'s version differs from the previous
-> commit's, with **no human approval step** — see
+> **`release.yml` is `workflow_dispatch`-only** and publishes to the
+> three stores when a person dispatches it on `main` and this repository
+> has no `v<version>` release tag for `manifest.json`'s version, with
+> **no human approval step** — a deliberate act by one person is not a
+> review by a second one; see
 > [`docs/store/AUTOMATED-RELEASE.md`](../store/AUTOMATED-RELEASE.md) and
 > [`RELEASE-POLICY.md`](RELEASE-POLICY.md). **No release has been
 > published through it**, which is why the signing, provenance and SBOM
@@ -146,7 +149,7 @@ on a loopback channel that no longer carries them.
 | Control | Implementation | Evidence |
 |---|---|---|
 | Change management | PR review required; branch protection on `main` | `CONTRIBUTING.md`, `CODEOWNERS` — **branch protection is not configured** (2026-08-12); the review requirement is a process commitment, not a server-side rule |
-| ~~Two-person release~~ | **WITHDRAWN 2026-08-31 — this control does not exist.** Publication is automatic on merge to `main` with no human approval step, so nothing separates authorising a change from shipping it: merging is shipping | `docs/security/RELEASE-POLICY.md` ("How a release publishes"), `RISK-REGISTER.md` R-15. The only review before a release reaches users is pull-request review under `CODEOWNERS`, and branch protection is not configured, so that review is a process commitment rather than a rule. There is no compensating control; do not cite one |
+| ~~Two-person release~~ | **WITHDRAWN 2026-08-31 — this control does not exist.** Publication is a manual dispatch of `release.yml` against `main` (2026-09-01, Sonomos #190) with no human approval step, so nothing separates authorising a change from shipping it: the same person may merge and dispatch. Do not read "somebody had to click it" as review | `docs/security/RELEASE-POLICY.md` ("How a release publishes"), `RISK-REGISTER.md` R-15. The only review before a release reaches users is pull-request review under `CODEOWNERS`, and branch protection is not configured, so that review is a process commitment rather than a rule. There is no compensating control; do not cite one |
 | Code review on critical paths | `CODEOWNERS` for security-relevant files | `CODEOWNERS` |
 | Risk register maintenance | Quarterly review | `docs/security/RISK-REGISTER.md`, `docs/security/MANAGEMENT-REVIEW.md` |
 | Threat-model maintenance | Reviewed each release | `SECURITY.md`, `docs/security/MANAGEMENT-REVIEW.md` |
@@ -200,7 +203,8 @@ These are tracked in [`TODO.md`](../../TODO.md):
   CODEOWNER approval, because merging now publishes.
 - Trademark policy
 - ~~**CI/CD activation (added 2026-08-12)**~~ — **closed 2026-09-01.**
-  All nine workflows now carry real triggers, so SAST, secret scanning,
+  Eight of the nine workflows now carry real triggers (the ninth,
+  `release.yml`, is dispatch-only by design), so SAST, secret scanning,
   SCA, SBOM generation and Scorecard are wired to `push`,
   `pull_request` and schedules rather than to a manual button. What
   replaces this gap is narrower and still open: **no run has completed

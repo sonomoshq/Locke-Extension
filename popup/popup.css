@@ -206,6 +206,11 @@ html.theme-dark .status-note { color: #8A8A8A; }
 
 /* ── Status Badges ────────────────────────────────────────────── */
 
+/* The base is deliberately the neutral grey, and `data-status="checking"`
+   inherits it with no rule of its own: "we have not heard yet" is not a
+   verdict, so it must not borrow the amber that means "something needs you".
+   It matches the toolbar badge, which shows a grey `?` for the same state
+   (background/service-worker.js BADGE). Don't give checking a colour. */
 .status-badge {
   font-size: 0.72rem;
   font-weight: 500;

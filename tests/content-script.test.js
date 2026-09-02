@@ -247,8 +247,15 @@ for (const dialect of ['chromium', 'firefox']) {
 
     const pushed = world.configs();
     assert.ok(pushed.length >= 1, 'the shim is pushed its config at document_start');
-    assert.deepEqual(Object.keys(pushed[0].data.config).sort(), ['debugLogging', 'enforceTimeoutMs']);
+    assert.deepEqual(
+      Object.keys(pushed[0].data.config).sort(),
+      ['allowedProviders', 'debugLogging', 'enforceTimeoutMs'],
+      'SHIM_SETTING_KEYS and nothing else — lockedSettings and heartbeatSeconds stay this side of the seam'
+    );
     assert.equal(pushed[0].data.config.enforceTimeoutMs, 9000);
+    // The policy is one of the three now, and it crosses with the value an
+    // admin (or the user) actually set, not a placeholder.
+    assert.deepEqual(pushed[0].data.config.allowedProviders, ['openai']);
   });
 
   test(`content-script (${dialect}): an admin policy beats the local value`, async () => {

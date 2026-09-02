@@ -7,15 +7,16 @@ so submission is a 15-minute paste job.
 
 [cii]: https://www.bestpractices.dev/
 
-> **State of these answers, 2026-09-01.** Every workflow in
-> `.github/workflows/` now carries real triggers — `ci.yml`,
-> `codeql.yml`, `semgrep.yml`, `gitleaks.yml`, `quality.yml` and
-> `release.yml` on `push` to `main` and/or `pull_request`;
-> `dependency-review.yml` on `pull_request`; weekly schedules on
-> `codeql.yml`, `semgrep.yml`, `gitleaks.yml` and `scorecard.yml`; a
-> monthly one on `sbom.yml`. Until now all of them were
-> `workflow_dispatch`-only, and the answers below were written against
-> that.
+> **State of these answers, 2026-09-01.** Eight of the nine workflows in
+> `.github/workflows/` now carry real triggers — `ci.yml`, `codeql.yml`,
+> `semgrep.yml`, `gitleaks.yml` and `quality.yml` on `push` to `main`
+> and/or `pull_request`; `dependency-review.yml` on `pull_request`;
+> weekly schedules on `codeql.yml`, `semgrep.yml`, `gitleaks.yml` and
+> `scorecard.yml`; a monthly one on `sbom.yml`. Until recently all of
+> them were `workflow_dispatch`-only, and the answers below were written
+> against that. **`release.yml` remains `workflow_dispatch`-only on
+> purpose** (Sonomos #190) — a release is dispatched by a person, not
+> triggered by a merge.
 >
 > Two things follow, and the answers keep them apart. **Checks that gate
 > by failing a job** — the payload audit and the reproducible-build
@@ -161,11 +162,13 @@ so submission is a 15-minute paste job.
 - **Build warnings clean**: yes
 - **One person can release**: **yes.** *(Restated 2026-08-31; sharpened
   2026-09-01.)*
-  Publication is automatic: a merge to `main` builds, tests and then
-  publishes to Chrome Web Store, Edge Add-ons and AMO whenever
-  `manifest.json::version` differs from the version at the previous
-  commit (`scripts/release-gate.mjs`), with **no human approval step**
-  on the publish itself. The two-person release rule that used to answer this
+  Publishing is a manual dispatch of `release.yml` against `main`, which
+  builds, tests and then publishes to Chrome Web Store, Edge Add-ons and
+  AMO whenever this repository has no `v<version>` release tag for
+  `manifest.json::version` (`scripts/release-gate.mjs`). One person can
+  merge their own change and dispatch the release themselves, so there is
+  still **no human approval step** on the publish — only a deliberate
+  one. The two-person release rule that used to answer this
   question has been withdrawn (`docs/security/RELEASE-POLICY.md`). The
   only remaining review is pull-request review under `CODEOWNERS`, and
   branch protection is not configured, so it is a process commitment
@@ -179,8 +182,8 @@ so submission is a 15-minute paste job.
   compare; never roll our own. See ASVS V6.
 - **Secured delivery**: partial. *(This answered "yes — sigstore
   keyless signing + SLSA L3 provenance". Those steps exist in
-  `release.yml`, which now runs on push to `main`, but **no release has
-  been published through it**, so no shipped artifact is signed or
+  `release.yml`, which a person dispatches on `main`, but **no release
+  has been published through it**, so no shipped artifact is signed or
   attested and the answer stays partial.)* What is true: the two store
   artifacts are byte-reproducible (`SOURCE_DATE_EPOCH`, deterministic
   ZIP writer), and as of 2026-09-01 that is checked rather than
@@ -234,10 +237,13 @@ After Passing badge, Silver requires:
 - [ ] At least 80% test coverage on critical paths (detection coverage
       lives in the desktop app, not here)
 - [ ] Two-person review on all releases. **Further away than it was**:
-      the two-person rule was withdrawn on 2026-08-31 when publication
-      moved to automatic-on-merge. Meeting this now means branch
-      protection on `main` requiring a non-author CODEOWNER approval,
-      because merging is what publishes
+      the two-person rule was withdrawn on 2026-08-31. Publication moved
+      to automatic-on-merge and then, on 2026-09-01, to a manual
+      dispatch; neither introduced a second person. Meeting this needs
+      two things — branch protection on `main` requiring a non-author
+      CODEOWNER approval, and required reviewers on the `store-publish`
+      GitHub Environment so the dispatch itself waits for somebody
+      else
 - [ ] Cryptographic agility / algorithm upgrade path documented — N/A
       as written: the extension uses no cryptography (`SECURITY.md` A1,
       `ASVS-MAPPING.md` V6). Corrected 2026-08-21 from a reference to a

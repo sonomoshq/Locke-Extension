@@ -12,7 +12,7 @@
     "",
     "Edge extension IDs are different from Chrome IDs even for the same",
     "extension package. If sourcing from the Edge Add-ons store, the ID is",
-    "on the listing page. If sideloading, see DEPLOYMENT.md."
+    "on the listing page. See docs/enterprise/DEPLOYMENT.md."
   ],
 
   "ExtensionInstallForcelist": [
@@ -30,12 +30,37 @@
   "3rdparty": {
     "extensions": {
       "<EDGE_EXTENSION_ID>": {
-        "allowedProviders": [
-          "openai-api", "anthropic-api", "chatgpt", "claude", "gemini"
+        "_comment_about_settings": [
+          "Identical to the Chrome template's settings block - same keys,",
+          "same meanings, same code reading them. chrome-managed-policy.json",
+          "in this directory carries the long-form commentary; the short",
+          "version follows.",
+          "",
+          "Enforced today: allowedProviders, heartbeatSeconds, debugLogging,",
+          "enforceTimeoutMs. Accepted and then ignored, so deliberately",
+          "absent here: telemetryEnabled and lockedSettings",
+          "[documented 2026-09-01].",
+          "",
+          "allowedProviders takes CATALOG PROVIDER IDS from",
+          "shared/ai-surfaces.json; the accepted values are the enum in",
+          "managed-schema.json. `[]` or unset means every catalog surface is",
+          "screened - the default, and the recommended setting. A non-empty",
+          "list only ever REMOVES surfaces from screening, and a provider",
+          "left off it is not screened at all: prompts to it leave the",
+          "machine unexamined.",
+          "",
+          "enforceTimeoutMs is the fail-closed ceiling. A held request that",
+          "gets no verdict inside it is BLOCKED, so this value must exceed",
+          "worst-case screening time on the slowest machine in the fleet."
         ],
-        "telemetryEnabled": true,
+
+        "allowedProviders": [],
+
         "heartbeatSeconds": 30,
-        "lockedSettings": ["allowedProviders"]
+
+        "debugLogging": false,
+
+        "enforceTimeoutMs": 45000
       }
     }
   }

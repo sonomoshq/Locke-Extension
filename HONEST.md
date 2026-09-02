@@ -102,6 +102,39 @@ verdict means no send. The residuals we accept and document:
   held and screened on a surface that is switched off. That error is
   in the over-screening direction and self-corrects on the next
   request.
+- **An enterprise policy can now narrow screening too, and nothing
+  tells the user it did.** `[added 2026-09-01]` The managed key
+  `allowedProviders` (`managed-schema.json`) was declared, merged into
+  settings and read by nothing for a long time — an admin could set it,
+  a deployment review could count it as a control, and every catalog
+  surface carried on being screened regardless. It is wired now: a
+  non-empty list of **catalog provider ids** (`openai`, `anthropic`,
+  `google`, … — the `id` values in `shared/ai-surfaces.json` that have
+  `web_hosts`) means only those providers' surfaces are screened.
+  Empty or unset still means all of them.
+
+  It is subtractive for the same reason and by the same mechanism as
+  the disable set above — it runs through the one `isScreenedHost`
+  chokepoint, and no value in it can reach a host the published
+  manifest does not already declare. The honest part is the cost: a
+  provider an admin leaves out **is not screened at all**, so prompts
+  to it leave the machine unexamined, and **no surface says so**. The
+  popup reports whether the desktop app is reachable and whether
+  screening is answering; it has no notion of scope, so a policy that
+  excluded everything looks exactly like a healthy one. The only signal
+  is a `config-applied` line on the page console, which needs
+  `debugLogging`. A typo in a policy — the old schema suggested
+  `claude-ai` where the catalog says `anthropic` — costs coverage
+  silently, which is why the schema's enum is now the catalog's own ids
+  and `tests/shim.test.js` fails if the two ever drift.
+
+  Two of its neighbours are still in the state `allowedProviders` was
+  in, and are named here rather than left to look live:
+  **`telemetryEnabled`** is consulted by nothing (the service worker's
+  `handleTelemetry` logs unconditionally), and **`lockedSettings`** has
+  nothing to lock, because the popup has no settings UI. Neither was
+  wired or removed in the same change; the enterprise deployment docs
+  say plainly which keys are enforced and which are accepted and inert.
 - **The page↔shim channel is `window.postMessage` and is forgeable.**
   A hostile *page* can observe or forge `SONOMOS_CAPTURE` /
   `SONOMOS_VERDICT` messages, and `SONOMOS_CONFIG` with them — which
@@ -437,6 +470,34 @@ verdict means no send. The residuals we accept and document:
   `verdict-timeout` / `verdict-missing`) still cannot reach the popup,
   because by definition the worker was unreachable when they happened.
   Both fail toward "we cannot tell", never toward green.
+- **The popup's STATUS row is now as careful as its screening row, and
+  was not.** `[added 2026-09-01]` Two corrections, both the same defect
+  as the bullets above, displaced from "is anything screening" to "is
+  the app there" and to "what is being held back".
+
+  First: the popup opens on the service worker's *initial* state
+  (`STATUS.UNKNOWN`), and renders that literal value whenever the worker
+  cannot be reached at all. That used to display as **Offline — "The
+  Locke desktop app isn't running… Open it to resume."** Nobody had
+  asked anything. It is an assertion about somebody else's process made
+  from having checked nothing, with a remedy attached, and on a machine
+  where the app is running and screening it is simply false — while our
+  own toolbar badge, correctly, showed a grey `?` for the same moment.
+  It reads **"Checking…"** now, says only that nothing has answered yet,
+  and blames nothing. The window is milliseconds when the worker is
+  healthy and permanent when it is not, which is exactly when a wrong
+  sentence does the most damage.
+
+  Second: every outage sentence said "requests to the AI apps and search
+  engines Locke screens are being held back", which reads as *all* of
+  them. Only bodied requests are ever screened, and a prompt that
+  arrives as a top-level navigation is not screened on any host — the
+  gap documented at the top of this file. So a user reading that during
+  an outage concluded nothing of theirs was leaving, while an address-bar
+  search left anyway. The sentences now name the subset — "the requests
+  Locke screens on…" — which is the difference between a true sentence
+  and a comfortable one. `popup/copy.js` is pure and every state above is
+  pinned by test in `tests/screening.test.js`.
 - **A blocked send says which KIND of block it is.** "We refused your
   content" and "our screener is down" are different sentences, and
   telling a user the first when the second is true sends them hunting
@@ -496,15 +557,21 @@ verdict means no send. The residuals we accept and document:
   permits noncommercial use, so an outside reviewer is free to rebuild
   and compare. What we still don't have is anyone outside the project
   who has actually done it and published the result.
-- **No two-person release rule — it was withdrawn on 2026-08-31.**
-  Publication is automatic: a push to `main` that changes
-  `manifest.json`'s version publishes to Chrome Web Store, Edge Add-ons
-  and AMO with **no human approval step**
+- **No two-person release rule — it was withdrawn on 2026-08-31 and has
+  not come back.** `[restated 2026-09-01]` Publishing is now a manual
+  dispatch: somebody runs `release.yml` on `main`, and that submits to
+  Chrome Web Store, Edge Add-ons and AMO with **no human approval step**
   ([`docs/security/RELEASE-POLICY.md`](docs/security/RELEASE-POLICY.md)).
-  [`CODEOWNERS`](CODEOWNERS) names reviewers, but branch protection is
-  not configured, so pull-request review is a process commitment rather
-  than a rule — and merging is shipping. Do not answer a
-  separation-of-duties question from this project's docs with a yes.
+  Merging no longer publishes, which is a real improvement over the
+  automatic-on-merge model it replaced — an unrelated merge can no longer
+  ship a build, and a mistake caught between merging and dispatching is
+  still fixable. It is **not** separation of duties: the same person can
+  review, merge and dispatch, minutes apart, and nothing checks that the
+  workflows which ran on that commit passed. [`CODEOWNERS`](CODEOWNERS)
+  names reviewers, but branch protection is not configured, so
+  pull-request review remains a process commitment rather than a rule. Do
+  not answer a separation-of-duties question from this project's docs
+  with a yes.
 - **First management review hasn't happened yet.**
   [`docs/security/MANAGEMENT-REVIEW.md`](docs/security/MANAGEMENT-REVIEW.md)
   defines the cadence; the first quarterly review is pre-staged in
@@ -517,8 +584,22 @@ verdict means no send. The residuals we accept and document:
   the real `shim.js` in a vm sandbox), and the native host's relay
   round-trip. The popup's **wording** is pinned by test (`popup/copy.js`
   is pure, so what the user is told about screening availability is
-  assertable), but its rendering is not: there are no DOM-level popup
-  tests and no in-browser integration tests.
+  assertable). Its **rendering** is now checked too, but only by a
+  developer-run harness that **is not in CI and gates nothing**:
+  `npm run smoke` (`tests/smoke/`) loads the built `dist/` trees
+  unpacked in a real browser, visits one catalog host, and asserts the
+  shim's `fetch` hook is installed, that the extension reports
+  `NO_BRIDGE` cleanly, and that it logs no console errors — reading the
+  popup's DOM back against the strings `popup/copy.js` produces. The
+  last recorded run
+  ([`docs/testing/BROWSER-SMOKE.md`](docs/testing/BROWSER-SMOKE.md))
+  covers **Chromium fully** and **Firefox partially**: on Firefox the
+  fetch hook, the `NO_BRIDGE` block and the console are observed, but
+  the popup's DOM is **not**, because WebDriver BiDi refuses to
+  navigate to a `moz-extension://` URL. So the popup's rendering is
+  verified on Chromium only, by hand, on one machine, on the day that
+  file says — not on every change, and not by anything that can stop a
+  release.
 - **No formal performance benchmarks for the shim on a reference page
   set.** Anecdotal observation only — and because the shim holds
   in-scope requests for the verdict round-trip, slow screening shows up as
@@ -579,9 +660,9 @@ public and no workflow run has completed in it**. What is actually true:
   version anyone can download**, because no release has been published.
 - **Sigstore signatures + SLSA L3 attestations:** **none exist.**
   `release.yml` holds the `Sign artifacts` and `SLSA build provenance
-  attestation` steps and runs automatically on a push to `main` that
-  changes the version, but no release has been published through it, so
-  nothing shipped is signed by us or attested. The verification recipe
+  attestation` steps and runs when a person dispatches it on `main`
+  (`workflow_dispatch`-only since 2026-09-01), but no release has been
+  published through it, so nothing shipped is signed by us or attested. The verification recipe
   in [`docs/enterprise/DEPLOYMENT.md`](docs/enterprise/DEPLOYMENT.md)
   describes what a release *will* produce, not what you can check
   today.
@@ -619,8 +700,8 @@ evolves. Re-rated each quarterly review.
 | Capture scoping | 8 | content scripts pinned to the AI web-surface list, not `<all_urls>`; generated from a single catalog; cross-origin attachment uploads now screened by initiator without widening that catalog or asking for a host permission. Still short of 9: only recognisable upload shapes are covered, and **no navigation-borne prompt is screened on any surface** — an address-bar query, a default-search-engine query, a `?q=` link or a `<form>` submit reaches the provider unscreened, deferred to 1.x; see the residuals above |
 | Transport isolation | 9 | native messaging → the same-user native host → `0600` UDS; no HTTP daemon, no URL a policy can redirect |
 | Page-page defenses | 9 | extension-page CSP, `frame-ancestors 'none'`; no injected page UI |
-| Supply chain | 6 | **Re-rated 2026-09-01, was 5; was 9 before 2026-08-21 on "sigstore, SLSA L3, SBOM, SHA-pin, version-pin".** Still unexercised: `release.yml` carries the cosign and `attest-build-provenance` steps and runs automatically on a version-changing push to `main`, but **no release has been published through it**, so no artifact is signed or attested and no SBOM is bound to a version. That is what keeps this out of the 8s. What earned the point: the SHA-pinning claim and the determinism claim stopped being assertions. `quality.yml::actions-pinned` fails the run if any `uses:` is not a 40-character SHA (51 references, all pinned), and `quality.yml::reproducible-build` fails unless two builds are byte-identical — and PolyForm Strict permits a noncommercial reviewer to rebuild and check that themselves. Also real and load-bearing: **zero JS dependencies** (empty `dependencies` and `devDependencies` in `package.json`, checkable by opening the file). It goes up again the day a release actually publishes. Note what this rating cannot cover: the native messaging host is installed by the desktop app rather than shipped from here, and its Rust dependency graph is not published in this repository, so nobody reading this repository can audit it |
-| CI enforcement | 4 | `[added 2026-09-01]` Every workflow now has real triggers — lint, tests, SAST, secret scanning, SCA, SBOM, Scorecard, and seven `quality.yml` jobs — where previously all were manual-dispatch-only. Two reasons this is a 4 and not higher: **no run has completed in this repository**, so nothing here has actually been checked by any of them; and **branch protection is not configured**, so a failing job does not block a merge, and a merge to `main` publishes to three stores. The wiring is done; the enforcement is not |
+| Supply chain | 6 | **Re-rated 2026-09-01, was 5; was 9 before 2026-08-21 on "sigstore, SLSA L3, SBOM, SHA-pin, version-pin".** Still unexercised: `release.yml` carries the cosign and `attest-build-provenance` steps and runs when a person dispatches it on `main`, but **no release has been published through it**, so no artifact is signed or attested and no SBOM is bound to a version. That is what keeps this out of the 8s. What earned the point: the SHA-pinning claim and the determinism claim stopped being assertions. `quality.yml::actions-pinned` fails the run if any `uses:` is not a 40-character SHA (51 references, all pinned), and `quality.yml::reproducible-build` fails unless two builds are byte-identical — and PolyForm Strict permits a noncommercial reviewer to rebuild and check that themselves. Also real and load-bearing: **zero JS dependencies in what ships** — `dependencies` and `devDependencies` are both empty in the root `package.json`, checkable by opening the file, and `ci.yml::lint-js` fails the build if either fills up. One qualification, stated rather than left for a reader to find: since 2026-09-01 `tests/smoke/package.json` declares a single pinned devDependency (Puppeteer) for the opt-in in-browser harness. It is nested, gitignored once installed, never staged into a zip (`scripts/store-build.mjs` copies only `background/`, `content/`, `popup/`, `shared/` and `icons/`), and a developer who never runs `npm run smoke` never installs it — but "this repository contains no third-party JS at all" is no longer the right sentence; "nothing third-party ships" is. It goes up again the day a release actually publishes. Note what this rating cannot cover: the native messaging host is installed by the desktop app rather than shipped from here, and its Rust dependency graph is not published in this repository, so nobody reading this repository can audit it |
+| CI enforcement | 4 | `[added 2026-09-01]` Eight of the nine workflows now have real triggers — lint, tests, SAST, secret scanning, SCA, SBOM, Scorecard, and seven `quality.yml` jobs — where previously all were manual-dispatch-only. The ninth, `release.yml`, stays `workflow_dispatch`-only on purpose: publishing to three stores is the one thing that should never happen as a side effect of a merge. Two reasons this is a 4 and not higher: **no run has completed in this repository**, so nothing here has actually been checked by any of them; and **branch protection is not configured**, so a failing job does not block a merge — and while a merge no longer publishes (`release.yml` became dispatch-only on 2026-09-01), the release dispatch does not read those checks either, so a red `main` can still be released from. The wiring is done; the enforcement is not |
 | ISMS / process | 7 | scaffolding present, first review unrun |
 | Legal docs | 5 | drafted, pending legal review |
 | Vendor maturity | 3 | v1.0, small team, and **no independent assurance of any kind** — no SOC 2, no ISO 27001, no third-party pen test, and no engagement started for any of them. Was 4 until 2026-08-21, when "no SOC 2" turned out to mean "none started" rather than "none finished" |

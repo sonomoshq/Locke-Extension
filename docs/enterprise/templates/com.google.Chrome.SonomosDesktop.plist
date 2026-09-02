@@ -6,7 +6,11 @@
     Path:   /Library/Managed Preferences/com.google.Chrome.plist
 
   Replace <EXTENSION_ID> with the actual 32-char Chrome extension ID.
-  See docs/enterprise/DEPLOYMENT.md for how to find / compute it.
+  See docs/enterprise/DEPLOYMENT.md, "Finding the extension ID".
+
+  The 3rdparty settings block below maps 1:1 onto managed-schema.json at
+  the repo root, which is authoritative for every key, type and bound.
+  Only the names in shared/constants.js::MANAGED_KEYS are read at all.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -24,6 +28,15 @@
       <string>force_installed</string>
       <key>update_url</key>
       <string>https://clients2.google.com/service/update2/crx</string>
+      <!--
+        runtime_allowed_hosts is Chrome's own per-extension host-blocking
+        policy, not a Sonomos setting, and with nothing in
+        runtime_blocked_hosts it does nothing. If your fleet blocks
+        extension hosts broadly, this extension's content scripts are what
+        screen prompts: block the AI web surfaces and screening stops while
+        the popup still reports a healthy connection. In that case the
+        allowed list must name the AI web surfaces too, not just loopback.
+      -->
       <key>runtime_allowed_hosts</key>
       <array>
         <string>*://127.0.0.1/*</string>
@@ -37,28 +50,65 @@
     <dict>
       <key>&lt;EXTENSION_ID&gt;</key>
       <dict>
+        <!--
+          allowedProviders holds CATALOG PROVIDER IDS from
+          shared/ai-surfaces.json — not product nicknames, not API endpoint
+          names. The accepted values are the enum in managed-schema.json
+          (tests/shim.test.js pins that enum against the catalog).
+
+          An empty array — or no key at all — means EVERY catalog surface is
+          screened. That is the default and the recommended setting. A
+          non-empty list is SUBTRACTIVE: it can only remove surfaces from
+          screening, never add one. A provider left off it is not screened
+          at all, so prompts to it leave the machine unexamined. Narrowing
+          this reduces protection; do it only where somebody has accepted
+          that loss in writing. To hold traffic to two vendors only:
+
+            <key>allowedProviders</key>
+            <array>
+              <string>openai</string>
+              <string>anthropic</string>
+            </array>
+        -->
         <key>allowedProviders</key>
-        <array>
-          <string>openai-api</string>
-          <string>anthropic-api</string>
-          <string>chatgpt</string>
-          <string>claude</string>
-          <string>gemini</string>
-        </array>
+        <array/>
 
-        <key>keystrokeGuardEnabled</key>
-        <true/>
-
-        <key>telemetryEnabled</key>
-        <true/>
-
+        <!-- Health-probe cadence for the Locke desktop app. 10–600. -->
         <key>heartbeatSeconds</key>
         <integer>30</integer>
 
-        <key>lockedSettings</key>
-        <array>
-          <string>allowedProviders</string>
-        </array>
+        <!--
+          Healthy-path console lines only. A blocked or unscreened send is
+          warned about on the console whatever this is set to.
+        -->
+        <key>debugLogging</key>
+        <false/>
+
+        <!--
+          The fail-closed ceiling: how long the page-side shim HOLDS an
+          outbound AI request waiting for a verdict before blocking it.
+          1000–120000 ms. Must exceed worst-case screening time on the
+          slowest machine in the fleet, or healthy sends will be blocked.
+        -->
+        <key>enforceTimeoutMs</key>
+        <integer>45000</integer>
+
+        <!--
+          Deliberately absent [documented 2026-09-01]:
+
+          keystrokeGuardEnabled — the keystroke-guard subsystem was removed
+          in 2.0.0. The key is not in managed-schema.json and not in
+          MANAGED_KEYS; nothing reads it. It was still in this template
+          until now, which is worse than useless: it read as a live
+          protection an admin could turn on.
+
+          telemetryEnabled and lockedSettings — both still declared in
+          managed-schema.json and merged into settings, and both inert.
+          Nothing consults telemetryEnabled (the service worker's
+          handleTelemetry logs unconditionally), and lockedSettings has no
+          popup settings UI to lock. A policy that sets them is accepted
+          rather than rejected, which is exactly why they are named here.
+        -->
       </dict>
     </dict>
   </dict>

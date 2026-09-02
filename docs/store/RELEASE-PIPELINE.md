@@ -89,24 +89,27 @@ consumer — shipping either only hands a reviewer extra surface to ask about.
 4. **Review.**  A CODEOWNER who is not the PR author reviews and approves.
    Read this as reviewing a *release*, because it is the last look anybody
    gets — see below.
-5. **Merge to `main`.  This is the publish action.**  Nothing else happens
-   and nobody else approves.
+5. **Merge to `main`.**  Nothing ships yet.
+6. **Dispatch the Release workflow on `main`** — Actions → Release → "Run
+   workflow".  *This* is the publish action.  Nothing else happens and nobody
+   else approves.
 
-## What a merge to `main` does
+## What a release dispatch does
 
 Full operator walkthrough — the ten repository secrets, the `store-publish`
 environment, how to re-drive a single failed store — is in
 [`AUTOMATED-RELEASE.md`](AUTOMATED-RELEASE.md).  The short version:
 
-**First, a gate decides whether this merge is a release at all.**
-`scripts/release-gate.mjs` (`.github/workflows/release.yml::gate`) compares
-`manifest.json::version` at the merge commit against the version at the
-previous commit.  Unchanged → nothing is built and nothing ships, and the job
-is green.  Changed → it is a release.  So an ordinary merge publishes
-nothing; bumping the version in the PR is what turns merging it into a
-release.  The gate is fail-closed — when it cannot determine the previous
-version (shallow clone, rewritten history, no parent) it does not publish —
-and it is covered by `tests/release-gate.test.js`.
+**First, a gate decides whether this dispatch is a release at all.**
+`scripts/release-gate.mjs` (`.github/workflows/release.yml::gate`) asks whether
+this repository already has a `v<version>` release tag for
+`manifest.json::version`.  Tagged → nothing is built and nothing ships, and the
+job is green.  Untagged → it is a release, and the workflow creates that tag as
+part of publishing.  So bumping the version is what makes the next dispatch a
+release, and re-dispatching afterwards is a safe no-op.  The gate is
+fail-closed — a shallow clone, an unreadable tag list, or a dispatch on any ref
+but `main` all mean "do not publish" — and it is covered by
+`tests/release-gate.test.js`.
 
 If the gate says release, the pipeline runs, in this order:
 
@@ -151,11 +154,12 @@ self-sufficient: the Chrome refresh token lasts **7 days** while the OAuth
 consent screen is in Testing, and the Edge API key lasts **72 days** with no
 server-side warning.
 
-**There is no approval gate after the merge.**  The review that used to
-happen when a human decided to push a tag now has to happen in pull-request
-review, because merging is what ships.  A published version cannot be
-re-cut — every store rejects a re-upload of an existing version — so the fix
-for a bad release is always a new version, never a withdrawal.
+**There is no approval gate on the dispatch.**  Clicking Run workflow is a
+deliberate act, not a reviewed one: the person who merged the change can be
+the person who releases it, seconds later.  Review still has to happen in
+pull-request review.  A published version cannot be re-cut — every store
+rejects a re-upload of an existing version — so the fix for a bad release is
+always a new version, never a withdrawal.
 
 The workflow that invokes the steps above is
 `.github/workflows/release.yml`.  If you are auditing this, read that file:
@@ -436,12 +440,16 @@ Nine workflows are committed under `.github/workflows/` — `ci.yml`,
 `release.yml`, `sbom.yml`, `scorecard.yml`, `semgrep.yml`.
 
 `[updated 2026-09-01]` — this section used to open "**every one of them is
-`workflow_dispatch`-only**", and later "all but `release.yml`".  **All nine
-now carry real triggers**: `push` to `main` and/or `pull_request` for
-`ci.yml`, `codeql.yml`, `semgrep.yml`, `gitleaks.yml`, `quality.yml`,
-`release.yml` and `dependency-review.yml`; weekly schedules on `codeql.yml`,
+`workflow_dispatch`-only**", and later "all but `release.yml`".  **Eight of
+the nine now carry real triggers**: `push` to `main` and/or `pull_request`
+for `ci.yml`, `codeql.yml`, `semgrep.yml`, `gitleaks.yml` and `quality.yml`;
+`pull_request` for `dependency-review.yml`; weekly schedules on `codeql.yml`,
 `semgrep.yml`, `gitleaks.yml` and `scorecard.yml`; monthly on `sbom.yml`.
 The `─── uncomment on open-source day ───` markers are gone with them.
+
+**`release.yml` is the ninth and stays `workflow_dispatch`-only** (Sonomos
+#190).  It briefly ran on push to `main`, which made merging the publish
+action — the one thing on this page that should never happen by accident.
 
 The dispatch-only arrangement was a billing decision: GitHub bills Actions
 minutes on private repositories, so while this repo was private the workflows
@@ -456,7 +464,8 @@ Two honest qualifications, both of which matter more than the triggers:
    live trigger as a passing check.
 2. **Nothing is a *required* check.**  Branch protection on `main` is still
    not configured, so a failing job is visible but does not block a merge —
-   and a merge to `main` publishes.  `docs/security/RELEASE-POLICY.md`
+   and the release dispatch does not read those checks either, so a red
+   `main` can still be released from.  `docs/security/RELEASE-POLICY.md`
    records which checks are in which state.
 
 Nothing has been published through `release.yml`, so nothing this repo has

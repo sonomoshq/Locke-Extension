@@ -31,6 +31,15 @@ __pycache__/
 node_modules/
 coverage/
 
+# The opt-in in-browser smoke harness (tests/smoke) is the one place with a
+# JS dependency, and it must never reach the root manifest or the dependency
+# graph: ci.yml::lint-js fails on any root dep, and dependency-review.yml
+# runs on every PR at fail-on-severity: moderate. The nested package.json IS
+# committed (one exact-pinned devDependency); its install and its lockfile
+# are not. See tests/smoke/README.md.
+tests/smoke/node_modules/
+tests/smoke/package-lock.json
+
 # Release artifacts produced by .github/workflows/release.yml
 *.sigstore.bundle
 *.sha256

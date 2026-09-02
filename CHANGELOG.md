@@ -8,6 +8,201 @@ strict SemVer.
 
 ## [Unreleased]
 
+### Changed — publishing is a deliberate act again, not a side effect of merging (Sonomos #190)
+
+- **`.github/workflows/release.yml` is `workflow_dispatch`-only.** It ran on
+  every push to `main` and submitted to the Chrome Web Store, Edge Add-ons and
+  AMO with no human step at all, which meant an ordinary merge with a version
+  bump in it reached three public review queues unattended. Merging now ships
+  nothing; a release is somebody opening Actions → Release → "Run workflow" on
+  `main`. Every job and step name is unchanged — `RELEASE-POLICY.md`,
+  `CONTROL-CATALOG.md` and `ASVS-MAPPING.md` cite them verbatim.
+
+  **This is not an approval gate and the docs say so in those words.** The same
+  person can review, merge and dispatch. What it buys is that shipping is a
+  decision rather than a side effect, and that a mistake caught between merging
+  and dispatching is still fixable.
+
+- **The release gate now asks a question a dispatch can answer.**
+  `scripts/release-gate.mjs` compared `manifest.json`'s version against the
+  *parent commit's* — exactly right for a push trigger, and wrong for a
+  dispatch, where the tip of `main` is routinely not the bump commit. That gate
+  would have answered "unchanged, nothing to publish" on a perfectly good
+  release, making `force: true` the way every release was cut. An override used
+  every time is not an override; it is the normal path with a warning label on
+  it, and it would have silently disabled the one check standing between a
+  dispatch and three stores.
+
+  It now asks whether this repository already has a `v<version>` release tag —
+  a fact about the repository, true whenever it is asked. `release.yml` creates
+  that tag as part of publishing, and the local tag-push route
+  (`scripts/hooks/pre-push`) leaves the same mark, so the two publish paths
+  compose instead of racing.
+
+- **Fail-closed in four directions, all tested.** Already tagged; a **shallow**
+  clone, where a missing tag proves nothing rather than proving "not released"
+  (the `gate` job now checks out at `fetch-depth: 0` so this branch is not
+  taken); git unavailable or the tag list unreadable; and a dispatch on **any
+  ref but `main`**. The last is new with dispatch — unlike a push trigger, a
+  dispatch lets the operator pick the branch, and a release built from an
+  unreviewed one would be signed under a sigstore identity that does not match
+  the verification recipe `RELEASE-POLICY.md` publishes. `--force` deliberately
+  does **not** override that one: it is an override for the version question,
+  never a licence to ship a branch.
+
+- **`tests/release-gate.test.js` now asserts that no workflow in the repository
+  pairs a `push`, `pull_request` or `schedule` trigger with a store publish.**
+  Reinstating the old behaviour takes one line of YAML in a file nobody diffs
+  closely, so it is asserted rather than remembered. Parsed with a
+  purpose-built reader, because this repository ships zero dependencies.
+
+- **Every document that described the old model was corrected**, not just the
+  policy: `RELEASE-POLICY.md`, `AUTOMATED-RELEASE.md`, `RELEASE-PIPELINE.md`,
+  `CREDENTIALS.md`, `ASVS-MAPPING.md`, `CONTROL-CATALOG.md`, `CII-CHECKLIST.md`,
+  `RISK-REGISTER.md` (R-04 narrowed, R-15 explicitly **not** mitigated — one
+  person can still merge and dispatch), `MANAGEMENT-REVIEW.md`, `README.md` and
+  `HONEST.md`. "Merging is the release" appeared in eight places; leaving any of
+  them would have made the claim true somewhere.
+
+- **What dispatch-only does *not* fix, stated rather than smoothed over:** the
+  gate does not read the status of the checks that ran on the commit it is
+  building, so a red `main` can still be released from, and branch protection is
+  still not configured.
+
+### Added — `managed-schema.json`'s `allowedProviders` now does something
+
+- **It was a policy knob that did nothing.** The key was declared in the schema,
+  merged into settings by the service worker, shipped in every enterprise
+  template and documented in `DEPLOYMENT.md` — and read by no runtime code. Its
+  enum was worse than inert: `claude-ai`, `gemini`, `phind`, `openai-api`,
+  `bedrock-us-east-1` and thirty more, none of which the catalog has ever used,
+  so every value the schema suggested named a provider that does not exist. A
+  knob that does nothing is worse than an absent one, because a deployment
+  review counts it as a control.
+
+- **Wired, because the wiring was cheap.** `content/shim.js` already generates a
+  host → catalog-id map into the page world (`SONOMOS_WEB_PROVIDERS`) and
+  already decides scope in one place (`isScreenedHost`, which the user's
+  subtractive `disabledWebHosts` set runs through). `allowedProviders` joins
+  `SHIM_SETTING_KEYS`, rides the same config push, and is applied at the same
+  chokepoint. The enum is now the catalog's own provider ids, and
+  `tests/shim.test.js` fails if the schema and `shared/ai-surfaces.json` ever
+  disagree again.
+
+- **Semantics, chosen deliberately.** Empty or unset means every catalog surface
+  is screened — reading an empty allowlist as "screen nothing" would turn a
+  cleared policy into a total, silent loss of coverage. A non-empty list is
+  **subtractive**: nothing in it can screen a host the manifest does not already
+  declare. Matching is case-insensitive and trimmed, because managed policy is
+  hand-authored JSON pushed by an MDM. A host the catalog cannot attribute stays
+  **in** scope — an allowlist may only exclude what it can name.
+
+- **The cost is stated, in `HONEST.md` and in the schema.** A provider an admin
+  leaves out is not screened at all, so prompts to it leave the machine
+  unexamined — and no surface reports that. The popup has no notion of scope, so
+  a policy that excluded everything looks exactly like a healthy one.
+
+- **Two neighbouring keys are inert and are now documented as inert rather than
+  wired or removed:** `telemetryEnabled` (nothing consults it — the service
+  worker's `handleTelemetry` logs unconditionally) and `lockedSettings` (the
+  popup has no settings UI, so there is nothing to lock).
+
+### Fixed — the popup asserted the desktop app was down before it had asked
+
+- **`STATUS.UNKNOWN` read as "Offline — The Locke desktop app isn't running…
+  Open it to resume."** That status is the service worker's *initial* state and
+  the literal value `popup/popup.js` renders when the worker cannot be reached
+  at all, so every popup open passed through it — and on a machine where Locke
+  is running and screening, the sentence is simply false, with a remedy
+  attached. It also contradicted our own toolbar badge, which has always shown a
+  grey `?` for the same moment, and replaced `popup.html`'s honest "Checking…"
+  placeholder with a claim. It is a **`checking`** view now: it says nothing has
+  answered yet, and blames nothing. Same defect as the `NO_BRIDGE` correction
+  before it, one status over.
+
+- **`offline` said "isn't running" where it had only observed "isn't
+  answering".** That branch is reached from a host reporting `connected: false`
+  *and* from a bridge timeout, and a timeout is silence — the app may be running
+  and wedged, or merely slower than `bridgeTimeoutMs`.
+
+- **Every outage line overstated what was being held back.** "Requests to the AI
+  apps and search engines Locke screens are being held back" reads as all of
+  them. Only bodied requests are ever screened, and a prompt arriving as a
+  top-level navigation is not screened on any host — so a user reading that
+  during an outage concluded nothing of theirs was leaving, while an address-bar
+  search left anyway. The sentences now name the subset.
+
+- **"Screening is confirmed the first time you send"** became "the first time
+  you send something it screens": an out-of-scope send confirms nothing.
+
+### Added — a developer-run, in-browser smoke matrix (Sonomos #205)
+
+- **`npm run smoke`** builds `dist/`, loads the unpacked extension in Chrome and
+  Firefox, visits one catalog host, and asserts that `content/shim.js` installed
+  its `fetch` hook and that the extension reported `NO_BRIDGE` cleanly with no
+  console errors. Results land in
+  [`docs/testing/BROWSER-SMOKE.md`](docs/testing/BROWSER-SMOKE.md).
+
+- **It is not a workflow and it gates nothing.** Nothing in
+  `.github/workflows/` runs it, and `HONEST.md` says so where it used to say
+  there were no in-browser tests at all.
+
+- **Zero runtime dependencies stays zero, and so does the root manifest.** The
+  harness lives in a nested, opt-in `tests/smoke/package.json` with one pinned
+  devDependency; its install and its lockfile are gitignored, so
+  `ci.yml::lint-js`'s two tripwires stay true and Puppeteer's transitive closure
+  never enters the dependency graph `dependency-review.yml` diffs. Nothing there
+  can reach a store zip.
+
+- **A missing browser, a missing driver or no network is a SKIP, never a
+  failure**, and the "Setup" state an unauthorised unpacked ID produces is
+  asserted as the *expected* result — the claim being tested is that the
+  extension is honest about not being connected, not that it connects.
+
+- **What the harness cannot see is recorded as "not observable", not as a
+  pass.** Firefox's popup DOM and background state are unreadable over WebDriver
+  BiDi, and its console attribution is weaker than Chromium's; the results table
+  says so on the row it affects.
+
+### Fixed — the enterprise and contributor docs described a product from before 2.0.0
+
+- **`docs/enterprise/DEPLOYMENT.md` documented two things that no longer
+  exist**: "observe mode", and a `keystrokeGuardEnabled` managed key. Both were
+  removed in 2.0.0. The deployment guide is what an IT team reads before a
+  fleet rollout, so it described a passive-observation mode and a keystroke
+  guard that an admin could believe they were turning on.
+
+- **The managed-settings table now matches `MANAGED_KEYS` exactly**, and says
+  which keys are *enforced* (`allowedProviders`, `heartbeatSeconds`,
+  `debugLogging`, `enforceTimeoutMs`) and which are **accepted and inert**
+  (`telemetryEnabled`, `lockedSettings`), with an instruction not to cite the
+  inert ones in a deployment review or a compliance answer.
+  `managed-schema.json`'s own descriptions for those two said they worked; they
+  now say they do not, and why.
+
+- **Every enterprise template was corrected.** They shipped fictional
+  `allowedProviders` values, a dead `keystrokeGuardEnabled`, and
+  `lockedSettings` — a key that copies cleanly, applies cleanly, and shows
+  green in `chrome://policy` while doing nothing. The inert keys are removed
+  from the templates rather than annotated, because a comment does not survive
+  a copy-paste of the value; each template names them in its header as
+  deliberately absent instead. `debugLogging` and `enforceTimeoutMs` were in no
+  template at all and now are. The ADMX/ADML pair lost `KeystrokeGuardEnabled`
+  and `TelemetryEnabled`, gained the two missing enforced keys, and picked up
+  the `presentationTable` it never had — without which `heartbeatSeconds`'
+  input box would not render in GPMC.
+
+- **`DEPLOYMENT.md` also claimed the extension makes no outbound network
+  request.** It makes one: the loopback presence beacon, plus the
+  self-registration POST on the same origin.
+
+- **`CONTRIBUTING.md` said nothing runs in CI.** Eight of the nine workflows
+  now do; it enumerates them with verbatim job names, and keeps "running is not
+  gating" attached, because branch protection is still not configured. It also
+  still asserted the withdrawn two-person release rule, and a `preflight`
+  `native-host` check that was removed when the host manifest left this
+  repository.
+
 ### Added — the extension's source is now published
 
 - **The extension source is published as a separate public repository,

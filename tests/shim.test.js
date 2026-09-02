@@ -2582,3 +2582,242 @@ test('paths: a subdomain inherits the narrowing of its apex', async () => {
   await sandbox.fetch('https://ab.chatgpt.com/api/auth/session', { method: 'POST', body: '{}' });
   assert.equal(meshAsked, false);
 });
+
+// ── surfaces an ADMIN policy excluded (managed `allowedProviders`) ──
+//
+// `managed-schema.json` declared this key and `shared/constants.js` merged it
+// into settings, while no runtime code read it: an admin could push it,
+// `getSettings()` would hand it back, and every catalog surface carried on
+// being screened regardless. A policy knob that does nothing is worse than an
+// absent one, because a deployment review reads it as a control. These tests
+// are what makes it real.
+//
+// Same shape as `disabledWebHosts` above and deliberately so — SUBTRACTIVE,
+// arriving on the same SONOMOS_CONFIG channel, decided in the same
+// `isScreenedHost` chokepoint — but the opposite polarity, which is exactly
+// where the interesting mistakes are: an EMPTY allowlist has to mean
+// "everything", where an empty disable set means "nothing".
+
+// Two providers, so "allow one, exclude the other" is expressible at all.
+const TWO_PROVIDERS = {
+  SONOMOS_WEB_HOSTS: ['chat.openai.com', 'chatgpt.com', 'claude.ai'],
+  SONOMOS_WEB_PROVIDERS: {
+    'chat.openai.com': 'openai',
+    'chatgpt.com': 'openai',
+    'claude.ai': 'anthropic'
+  }
+};
+
+test('policy: a provider the allowlist omits passes through untouched', async () => {
+  let meshAsked = false;
+  const { sandbox, netCalls, deliver } = makeWorld(
+    () => { meshAsked = true; return allowVerdict; }, TWO_PROVIDERS
+  );
+
+  deliver({ type: 'SONOMOS_CONFIG', config: { allowedProviders: ['anthropic'] } });
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
+
+  assert.equal(meshAsked, false, 'openai is not on the policy allowlist');
+  assert.equal(netCalls.length, 1, 'the original request goes out untouched');
+});
+
+test('policy: a provider the allowlist names is screened exactly as before', async () => {
+  let meshAsked = false;
+  const { sandbox, deliver } = makeWorld(
+    () => { meshAsked = true; return allowVerdict; }, TWO_PROVIDERS
+  );
+
+  deliver({ type: 'SONOMOS_CONFIG', config: { allowedProviders: ['openai'] } });
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
+
+  assert.equal(meshAsked, true);
+});
+
+test('policy: the allowlist covers every host of the provider it names', async () => {
+  const captured = [];
+  const { sandbox, deliver } = makeWorld(
+    (msg) => { captured.push(msg); return allowVerdict; }, TWO_PROVIDERS
+  );
+
+  deliver({ type: 'SONOMOS_CONFIG', config: { allowedProviders: ['openai'] } });
+  await sandbox.fetch('https://chatgpt.com/backend-api/conversation', { method: 'POST', body: '{"q":1}' });
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
+
+  assert.equal(captured.length, 2, 'a provider id is not a hostname — it covers all of that provider');
+});
+
+test('policy: an EMPTY allowlist means no restriction, not "screen nothing"', async () => {
+  // The mistake this test exists for: reading `[]` as an empty Set of allowed
+  // providers would turn a cleared policy into a total, silent loss of
+  // coverage — every surface unscreened, nothing in the console, and nothing
+  // in the popup a user would read as a failure.
+  let meshAsked = false;
+  const { sandbox, deliver } = makeWorld(
+    () => { meshAsked = true; return allowVerdict; }, TWO_PROVIDERS
+  );
+
+  deliver({ type: 'SONOMOS_CONFIG', config: { allowedProviders: [] } });
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
+
+  assert.equal(meshAsked, true);
+});
+
+test('policy: clearing an applied allowlist puts the surface back in scope', async () => {
+  let meshAsked = false;
+  const { sandbox, deliver } = makeWorld(
+    () => { meshAsked = true; return allowVerdict; }, TWO_PROVIDERS
+  );
+
+  deliver({ type: 'SONOMOS_CONFIG', config: { allowedProviders: ['anthropic'] } });
+  deliver({ type: 'SONOMOS_CONFIG', config: { allowedProviders: [] } });
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
+
+  assert.equal(meshAsked, true);
+});
+
+test('policy: a config without the key leaves an applied allowlist alone', async () => {
+  let meshAsked = false;
+  const { sandbox, deliver } = makeWorld(
+    () => { meshAsked = true; return allowVerdict; }, TWO_PROVIDERS
+  );
+
+  deliver({ type: 'SONOMOS_CONFIG', config: { allowedProviders: ['anthropic'] } });
+  // A push whose managed read failed carries only the other knobs. It must not
+  // read as "no policy" and quietly re-scope a surface the admin excluded.
+  deliver({ type: 'SONOMOS_CONFIG', config: { enforceTimeoutMs: 30000 } });
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
+
+  assert.equal(meshAsked, false);
+});
+
+test('policy: ids are matched case-insensitively and trimmed', async () => {
+  // Managed policy is hand-authored JSON pushed by an MDM. A stray space or a
+  // capital letter costing an enterprise its screening would be a bad way to
+  // find that out.
+  let meshAsked = false;
+  const { sandbox, deliver } = makeWorld(
+    () => { meshAsked = true; return allowVerdict; }, TWO_PROVIDERS
+  );
+
+  deliver({ type: 'SONOMOS_CONFIG', config: { allowedProviders: ['  OpenAI '] } });
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
+
+  assert.equal(meshAsked, true);
+});
+
+test('policy: the allowlist is subtractive — it cannot put a non-catalog host in scope', async () => {
+  let meshAsked = false;
+  const { sandbox, netCalls, deliver } = makeWorld(
+    () => { meshAsked = true; return allowVerdict; }, TWO_PROVIDERS
+  );
+
+  // Whatever an admin — or a page forging this message — puts here, scope is
+  // still AI_HOSTS minus the excluded providers, never plus anything.
+  deliver({
+    type: 'SONOMOS_CONFIG',
+    config: { allowedProviders: ['openai', 'example-corp', 'not-a-provider', 42] }
+  });
+  await sandbox.fetch('https://example.com/api', { method: 'POST', body: '{"q":1}' });
+  assert.equal(meshAsked, false);
+  assert.equal(netCalls.length, 1);
+
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
+  assert.equal(meshAsked, true, 'the catalog provider named in the list stays screened');
+});
+
+test('policy: an allowlist naming nothing the catalog knows screens nothing, and says so', async () => {
+  // The typo case, and the reason the enum in managed-schema.json is pinned to
+  // the catalog by a test below. It fails toward LESS coverage, which is the
+  // direction that costs protection — so it has to be visible. The debug line
+  // names the applied policy rather than counting it, which is what lets an
+  // admin see "we shipped `claude-ai` and the catalog says `anthropic`".
+  let meshAsked = false;
+  const { sandbox, netCalls, deliver, logs } = makeDebugWorld(
+    () => { meshAsked = true; return allowVerdict; }, TWO_PROVIDERS
+  );
+
+  deliver({ type: 'SONOMOS_CONFIG', config: { allowedProviders: ['claude-ai'] } });
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
+
+  assert.equal(meshAsked, false);
+  assert.equal(netCalls.length, 1);
+  const applied = logs.filter((l) => l.line.includes('config-applied'));
+  assert.ok(applied.length >= 1);
+  assert.ok(
+    applied.at(-1).line.includes('claude-ai'),
+    'the applied policy must be nameable from the console, not just counted'
+  );
+});
+
+test('policy: a catalog host with no provider mapping stays screened', async () => {
+  // An allowlist may only exclude what it can NAME. A catalog entry the
+  // generator did not attribute is unattributable here too, and the safe
+  // answer is to keep screening it: wrong in the direction that costs a held
+  // request, never in the direction that lets a body out.
+  let meshAsked = false;
+  const { sandbox, deliver } = makeWorld(() => { meshAsked = true; return allowVerdict; }, {
+    SONOMOS_WEB_HOSTS: ['chat.openai.com', 'orphan.example'],
+    SONOMOS_WEB_PROVIDERS: { 'chat.openai.com': 'openai' }
+  });
+
+  deliver({ type: 'SONOMOS_CONFIG', config: { allowedProviders: ['anthropic'] } });
+  await sandbox.fetch('https://orphan.example/api', { method: 'POST', body: '{"q":1}' });
+
+  assert.equal(meshAsked, true);
+});
+
+test('policy: a surface the user disabled stays disabled even when the policy allows it', async () => {
+  // Two subtractive sets, and neither may re-admit what the other removed.
+  let meshAsked = false;
+  const { sandbox, netCalls, deliver } = makeWorld(
+    () => { meshAsked = true; return allowVerdict; }, TWO_PROVIDERS
+  );
+
+  deliver({
+    type: 'SONOMOS_CONFIG',
+    config: { allowedProviders: ['openai'], disabledWebHosts: ['chat.openai.com'] }
+  });
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
+
+  assert.equal(meshAsked, false);
+  assert.equal(netCalls.length, 1);
+});
+
+test('policy: until config arrives, an allowlist has not narrowed anything', async () => {
+  // The page-start race, from the policy side. The wait can only ever REMOVE a
+  // host from scope; running out of it resolves to "screened", which is the
+  // fully-protective answer.
+  let meshAsked = false;
+  const { sandbox } = makeWorld(
+    () => { meshAsked = true; return allowVerdict; }, TWO_PROVIDERS, { settleConfig: false }
+  );
+
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
+  assert.equal(meshAsked, true, 'no policy yet means every catalog surface is screened');
+});
+
+// The enum an admin writes against and the ids the shim matches have to be the
+// same list, and nothing generates one from the other. Before this change they
+// were not: the schema offered `claude-ai`, `gemini`, `phind` and thirty-odd
+// API-endpoint names, none of which the catalog has ever used, so every value
+// the schema suggested would have excluded the surface it named.
+test('policy: the managed-schema enum is exactly the catalog ids that have web hosts', async () => {
+  const schema = JSON.parse(
+    await readFile(new URL('../managed-schema.json', import.meta.url), 'utf8')
+  );
+  const catalog = JSON.parse(
+    await readFile(new URL('../shared/ai-surfaces.json', import.meta.url), 'utf8')
+  );
+
+  const declared = schema.properties.allowedProviders.items.enum;
+  const screenable = catalog.providers
+    .filter((p) => Array.isArray(p.web_hosts) && p.web_hosts.length > 0)
+    .map((p) => p.id);
+
+  assert.deepEqual(
+    [...declared].sort(),
+    [...screenable].sort(),
+    'an id in the schema that the catalog does not have silently narrows scope to nothing; ' +
+      'a catalog provider missing from the schema is one an admin cannot keep'
+  );
+});

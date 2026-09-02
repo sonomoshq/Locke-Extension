@@ -6,31 +6,21 @@
   "properties": {
     "allowedProviders": {
       "type": "array",
+      "maxItems": 64,
       "items": {
         "type": "string",
         "enum": [
-          "openai-api", "anthropic-api", "anthropic-claude-api",
-          "gemini-api", "vertex-api", "xai-api",
-          "mistral-api", "cohere-api", "deepseek-api",
-          "openrouter-api", "perplexity-api", "together-api",
-          "groq-api", "fireworks-api", "huggingface-api",
-          "deepinfra-api", "nebius-api", "octoai-api", "anyscale-api",
-          "runpod-api", "cerebras-api", "sambanova-api", "novita-api",
-          "lepton-api", "lambdalabs-api", "replicate-api", "ai21-api",
-          "minimax-api", "qwen-dashscope-api",
-          "bedrock-us-east-1", "bedrock-us-west-2",
-          "bedrock-eu-central-1", "bedrock-ap-northeast-1",
-          "chatgpt", "claude-ai", "gemini", "grok", "perplexity",
-          "google-search", "bing-search", "duckduckgo",
-          "kagi", "you", "brave", "phind"
+          "openai", "anthropic", "google", "xai", "meta",
+          "deepseek", "perplexity", "mistral", "qwen",
+          "microsoft", "duckduckgo", "kagi", "search"
         ]
       },
-      "description": "Whitelist of provider IDs the shim is allowed to operate on. Empty array or unset means all built-in providers are allowed."
+      "description": "Catalog provider IDs whose web surfaces this extension may screen. These are the `id` values in shared/ai-surfaces.json that have `web_hosts` — not product nicknames, and not API-endpoint identifiers. An empty array or an unset key means EVERY catalog surface is screened, which is the default. A non-empty list is SUBTRACTIVE: it can only remove surfaces from screening, never add one, because the content scripts are declared against the catalog at build time. Note what narrowing this costs: a surface excluded here is not screened at all, so prompts to it leave the machine unexamined. `search` covers the search engines that carry AI answers (www.google.com, www.bing.com, duckduckgo.com, kagi.com, you.com, search.brave.com); tests/shim.test.js pins this list against the catalog so the two cannot drift."
     },
     "telemetryEnabled": {
       "type": "boolean",
       "default": true,
-      "description": "Whether shape-only telemetry events (drift signals, mask success/failure counts — never request bodies) are logged to the service-worker console. No data leaves the device regardless."
+      "description": "ACCEPTED AND INERT — do not cite it as a control. No runtime code reads this key: background/service-worker.js::handleTelemetry writes its shape-only console.debug line unconditionally, and nothing else consults the value. A policy that sets it is stored and ignored. It is still declared here, and still in MANAGED_KEYS, so a fleet that already pushes it is not rejected; wiring it or removing it is a separate decision. Nothing leaves the device either way. To silence the healthy-path console lines, use debugLogging, which IS enforced."
     },
     "heartbeatSeconds": {
       "type": "integer",
@@ -54,7 +44,7 @@
     "lockedSettings": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Subset of the property names above that the user is not permitted to override via the popup UI. Names listed here render as read-only in the popup with a 'managed by your organisation' hint."
+      "description": "ACCEPTED AND INERT — do not cite it as a control. This once described a popup that rendered listed names as read-only with a 'managed by your organisation' hint. There is no such UI: popup/popup.html contains no form controls at all, it only reports connection and screening status, so there is nothing for this key to lock. Nothing reads it. It is still declared here, and still in MANAGED_KEYS, so a fleet that already pushes it is not rejected; wiring it or removing it is a separate decision. Note that managed values already win over local ones wherever a setting IS enforced (DEFAULTS < storage.local < storage.managed), which is the protection this key reads as offering."
     }
   }
 }

@@ -7,6 +7,11 @@ export const DEFAULTS = Object.freeze({
   // Enterprise-overridable defaults — see managed-schema.json. The
   // service worker merges (DEFAULTS < storage.local < storage.managed)
   // so an admin policy always wins.
+  //
+  // `allowedProviders` holds CATALOG PROVIDER IDS from
+  // `shared/ai-surfaces.json` (`openai`, `anthropic`, `google`, …) — not
+  // product nicknames. Empty means "every catalog surface is screened", which
+  // is both the default and the only safe reading of an unset policy.
   allowedProviders: [],
   telemetryEnabled: true,
   lockedSettings: [],
@@ -48,7 +53,32 @@ export const MANAGED_KEYS = Object.freeze([
 // The subset of settings the page-world shim needs. content-script.js reads
 // exactly these and posts them across as PAGE_MSG.CONFIG — nothing else about
 // the user's configuration crosses into a page's world.
-export const SHIM_SETTING_KEYS = Object.freeze(['debugLogging', 'enforceTimeoutMs']);
+//
+// `allowedProviders` is here because the shim is the only place that decides
+// what is in scope. It was declared in `managed-schema.json` and merged into
+// `settings` for a long time while no runtime code read it: an admin could push
+// it, `getSettings()` would return it, and screening carried on over every
+// catalog surface exactly as before. A policy knob that does nothing is worse
+// than an absent one — it reads as a control in a deployment review. It is
+// wired now (content/shim.js `isProviderAllowed`, tests/shim.test.js "policy:").
+//
+// Two of its neighbours in MANAGED_KEYS are still in that state and are
+// documented as inert rather than quietly left to look live:
+// `telemetryEnabled` (nothing consults it — `handleTelemetry` in
+// background/service-worker.js logs unconditionally) and `lockedSettings`
+// (there is no popup settings UI for anything to be locked in). See
+// docs/enterprise/DEPLOYMENT.md, which says so to the admin who would
+// otherwise set them.
+//
+// SUBTRACTIVE, like `disabledWebHosts` and for the same reason: it can only
+// ever REMOVE a catalog surface from screening. Nothing an admin (or a page
+// forging this message) puts in it can screen a host the manifest does not
+// already inject us on. See content/shim.js `isProviderAllowed`.
+export const SHIM_SETTING_KEYS = Object.freeze([
+  'debugLogging',
+  'enforceTimeoutMs',
+  'allowedProviders'
+]);
 
 // ── the one definition of "the same host" ───────────────────────────
 //

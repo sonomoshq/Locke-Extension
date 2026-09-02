@@ -2,7 +2,7 @@
   "_comment_about_this_file": [
     "Managed-policy template for Google Chrome / Chromium / Brave / Arc.",
     "Drop into one of the platform-specific paths below; values land in",
-    "chrome.storage.managed and override anything the user set in the popup.",
+    "chrome.storage.managed and override anything the user set locally.",
     "",
     "Linux:   /etc/opt/chrome/policies/managed/sonomos.json",
     "         (or /etc/chromium/policies/managed/sonomos.json for Chromium)",
@@ -14,9 +14,7 @@
     "         provided ADMX/ADML files in this directory.",
     "",
     "Replace <EXTENSION_ID> below with the actual 32-char Chrome extension",
-    "ID. For a Chrome Web Store install, the ID is on the listing page. For",
-    "a self-hosted install, see docs/enterprise/DEPLOYMENT.md for how to",
-    "compute it from the manifest 'key' field."
+    "ID. See docs/enterprise/DEPLOYMENT.md, 'Finding the extension ID'."
   ],
 
   "ExtensionInstallForcelist": [
@@ -29,10 +27,20 @@
       "update_url": "https://clients2.google.com/service/update2/crx",
       "runtime_blocked_hosts": [],
       "runtime_allowed_hosts": ["*://127.0.0.1/*"],
-      "_comment_about_self_hosted": [
-        "If you're hosting the extension off-store, change update_url to",
-        "your own crx update manifest (an XML file describing the .crx).",
-        "Chrome enterprise docs cover the format."
+      "_comment_about_runtime_hosts": [
+        "These two are Chrome's own per-extension host-blocking policy, not",
+        "a Sonomos setting. As written here they are a no-op: nothing is",
+        "blocked, so nothing needs allowing.",
+        "",
+        "READ THIS IF YOUR FLEET SETS runtime_blocked_hosts FLEET-WIDE. A",
+        "default policy that blocks extensions from a broad host pattern",
+        "applies to this extension too, and this extension's content scripts",
+        "are what screen prompts. Block the AI web surfaces and those scripts",
+        "never run: screening stops, the popup still reports a healthy",
+        "connection, and prompts go out unexamined. If you run such a policy,",
+        "runtime_allowed_hosts for this extension must also name the AI web",
+        "surfaces it is injected on (manifest.json content_scripts.matches),",
+        "not just the loopback origin the presence beacon uses."
       ]
     }
   },
@@ -40,17 +48,57 @@
   "3rdparty": {
     "extensions": {
       "<EXTENSION_ID>": {
-        "_comment": "These map 1:1 onto managed-schema.json. See that file for the authoritative property descriptions.",
-
-        "allowedProviders": [
-          "openai-api", "anthropic-api", "chatgpt", "claude", "gemini"
+        "_comment_about_settings": [
+          "These map 1:1 onto managed-schema.json at the repo root, which is",
+          "the authoritative description of every key, its type and its",
+          "bounds. Only the names in shared/constants.js::MANAGED_KEYS are",
+          "read at all; anything else here is ignored on arrival.",
+          "",
+          "The four keys below are the ones ENFORCED by code that runs today:",
+          "  allowedProviders  which catalog providers the shim screens",
+          "  heartbeatSeconds  desktop-app health-probe cadence, 10-600s",
+          "  debugLogging      healthy-path console lines only; a blocked or",
+          "                    unscreened send is warned about regardless",
+          "  enforceTimeoutMs  how long a HELD request waits for a verdict",
+          "                    before it is BLOCKED, 1000-120000ms",
+          "",
+          "Two further keys are accepted and then ignored, and are left out",
+          "of this template on purpose [documented 2026-09-01]:",
+          "`telemetryEnabled` (nothing consults it - the service worker's",
+          "handleTelemetry logs unconditionally) and `lockedSettings` (there",
+          "is no popup settings UI, so there is nothing for it to lock).",
+          "Setting either one changes no behaviour. Both are still declared",
+          "in managed-schema.json and still merged into settings, so a policy",
+          "that sets them is accepted rather than rejected - which is exactly",
+          "why they are named here. See docs/enterprise/DEPLOYMENT.md.",
+          "",
+          "allowedProviders holds CATALOG PROVIDER IDS from",
+          "shared/ai-surfaces.json - not product nicknames and not API",
+          "endpoint names. The accepted values are the enum in",
+          "managed-schema.json (allowedProviders.items.enum); read them",
+          "there, because tests/shim.test.js pins that enum against the",
+          "catalog and this file is not pinned to anything.",
+          "",
+          "`[]` (below) or an unset key means EVERY catalog surface is",
+          "screened. That is the default and the recommended setting. A",
+          "non-empty list is SUBTRACTIVE: it can only remove surfaces from",
+          "screening, never add one, because the content scripts are declared",
+          "against the catalog at build time. What narrowing costs, stated",
+          "plainly: a provider left off the list is not screened at all, so",
+          "prompts to it leave the machine unexamined. This knob reduces",
+          "protection; set it only where somebody has accepted that in",
+          "writing. Example - a fleet that holds traffic to two vendors and",
+          "has accepted the loss everywhere else:",
+          "    \"allowedProviders\": [\"openai\", \"anthropic\"]"
         ],
 
-        "telemetryEnabled": true,
+        "allowedProviders": [],
 
         "heartbeatSeconds": 30,
 
-        "lockedSettings": ["allowedProviders"]
+        "debugLogging": false,
+
+        "enforceTimeoutMs": 45000
       }
     }
   }

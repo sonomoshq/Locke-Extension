@@ -8,7 +8,12 @@
     "",
     "The CI tripwire 'no JS deps in package.json' relies on the",
     "dependencies + devDependencies blocks staying empty. Don't add",
-    "deps without first reviewing SECURITY.md A4 (supply-chain)."
+    "deps without first reviewing SECURITY.md A4 (supply-chain).",
+    "",
+    "`npm run smoke` is the one script here with a dependency, and it is",
+    "NOT declared above: the harness lives in its own nested, opt-in",
+    "package (tests/smoke/package.json, gitignored install) so this file",
+    "and package-lock.json stay exactly as dep-free as the tripwire says."
   ],
   "name": "locke-extension",
   "version": "2.0.0",
@@ -17,6 +22,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js",
+    "smoke": "node tests/smoke/run.mjs",
     "generate": "node scripts/generate-surfaces.mjs",
     "validate": "node scripts/validate-store.mjs",
     "package": "node scripts/package.mjs",
