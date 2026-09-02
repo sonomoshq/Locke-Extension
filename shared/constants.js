@@ -1,4 +1,13 @@
 // Copyright © 2026 Sonomos, Inc. All rights reserved.
+
+// INFRASTRUCTURE_REASONS is GENERATED, not declared — see the block further
+// down that used to hold the literal, and scripts/generate-vocab.mjs.
+// Re-exported from here because this is where every consumer already imports
+// it from, and moving that would be churn with no reader on the other end.
+import { INFRASTRUCTURE_REASONS } from './vocab.generated.js';
+
+export { INFRASTRUCTURE_REASONS };
+
 export const DEFAULTS = Object.freeze({
   heartbeatSeconds: 30,
   backoffMaxSeconds: 300,
@@ -242,17 +251,46 @@ export const STATUS = Object.freeze({
 // Degradation is one-way and safe: an UNMATCHED reason is read as a policy
 // refusal, which still blocks. Drift costs a worse message, never a send.
 //
-// `content/shim.js` carries a byte-identical copy — a MAIN-world classic
-// script cannot import an ES module — and tests/constants.test.js fails if the
-// two ever drift.
-export const INFRASTRUCTURE_REASONS = Object.freeze([
-  'engine unavailable',
-  'guard unreachable',
-  'engine saturated',
-  'rate limit exceeded',
-  'engine protocol failure',
-  'bridge protocol failure'
-]);
+// ── where the list comes from ───────────────────────────────────────
+//
+// It is NOT declared here any more. `INFRASTRUCTURE_REASONS` is imported at the
+// top of this file from `shared/vocab.generated.js`, which
+// `scripts/generate-vocab.mjs` compiles from `shared/vocab.json` — the copy of
+// `Service-Mesh/sonomos-vocab/vocab.json` that Locke's
+// `scripts/sync-surfaces.sh` vendors into this repo.
+//
+// The chain, and what holds each link:
+//
+//   sonomos_vocab::INFRASTRUCTURE_REASON_FRAGMENTS   the one declaration
+//     ↓  pinned entry-for-entry and IN ORDER by that crate's
+//        `vocab_json_matches_the_enums`
+//   Service-Mesh/sonomos-vocab/vocab.json            canonical, machine-readable
+//     ↓  vendored by Locke `scripts/sync-surfaces.sh`, held identical by its
+//        `--check` mode, which Locke's `vendored-vocab` fleet pin runs on every
+//        gated push
+//   shared/vocab.json                                this repo's copy
+//     ↓  `npm run generate`, and `tests/constants.test.js` pins the export back
+//        to the JSON so a hand-edit of the generated file is caught
+//   shared/vocab.generated.js → what you import from here
+//
+// Until this landed, the fragments were declared here as a literal and the only
+// thing holding them to the Rust was a test in a THIRD repo: Extension-Bridge
+// read a constants.js off the filesystem and regexed the array out of it. It
+// was the wrong mechanism — no repo can declare, version or fetch
+// `../<Neighbour>`, so it was green only on a machine with the whole fleet
+// checked out beside it — and it was also aimed at the wrong repo: the path it
+// read was `../Depreciated-Desktop-Extension/shared/constants.js`, this
+// extension's home before the 2026-08-31 rename. It had been comparing Rust to
+// a copy in a repo that ships no extension. There is nothing here to drift now.
+//
+// Deleting all of this stays easy, which the note above says is the plan: it is
+// this import, the generated file, two tests and one Locke sync target. No
+// consumer changes, because `isInfrastructureBlock` reads the cause first and
+// only falls through to these strings.
+//
+// `content/shim.js` carries a byte-identical copy — a MAIN-world classic script
+// cannot import an ES module, generated or not — and tests/constants.test.js
+// fails if the two ever drift.
 
 // Which fragment matched, or null. Returning the fragment (rather than a bare
 // boolean) means anything we persist or display is a string from OUR closed

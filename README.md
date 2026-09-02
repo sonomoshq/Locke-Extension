@@ -193,6 +193,7 @@ read-only (see [`LICENSE`](LICENSE)).
 | `content/shim.js` | MAIN-world fetch/XHR interception of AI web surfaces; holds, synthesizes the raw request, enforces the verdict |
 | `content/content-script.js` | Isolated-world round-trip relay: shim ⇄ service worker |
 | `content/web-surfaces.generated.js` | Generated `SONOMOS_WEB_HOSTS` global (run `npm run generate`) |
+| `shared/vocab.generated.js` | Generated `INFRASTRUCTURE_REASONS`, from the vendored `shared/vocab.json` (run `npm run generate`) |
 | `popup/` | Extension action popup (connection status) |
 | `shared/` | Shared constants, browser-API polyfill, health client, `ai-surfaces.json` catalog |
 | `scripts/store-build.mjs` | Per-target staging + the store-rule checks `npm run validate` / `npm run package` gate on |

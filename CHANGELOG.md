@@ -8,6 +8,44 @@ strict SemVer.
 
 ## [Unreleased]
 
+### Changed — `INFRASTRUCTURE_REASONS` is generated from the shared vocabulary, not declared here
+
+`shared/constants.js` declared the six prose fragments that separate "screening
+is down, retry" from "this request was held back". Rust declared them too, in
+`sonomos_vocab::INFRASTRUCTURE_REASON_FRAGMENTS`, and the only thing holding the
+two together was a test in a third repo — Extension-Bridge opened a
+`constants.js` off the filesystem and regexed the array out of it.
+
+- **The list is now vendored and generated.** Canonical lives in
+  `Service-Mesh/sonomos-vocab/vocab.json`, pinned entry-for-entry and in order
+  against the Rust. Locke's `scripts/sync-surfaces.sh` vendors it to
+  `shared/vocab.json`; `scripts/generate-vocab.mjs` (`npm run generate`) compiles
+  that into `shared/vocab.generated.js`; `shared/constants.js` re-exports it.
+  This repo holds no literal of its own to drift.
+- **The old pin could not survive a fresh clone.** No repo can declare, version
+  or fetch `../<Neighbour>`, so it was green only on a machine with the whole
+  fleet checked out side by side. No cargo dependency could replace it either —
+  what it reached for was JavaScript.
+- **It was also reading the wrong repo.** The path was
+  `../Depreciated-Desktop-Extension/shared/constants.js`, this extension's home
+  before the 2026-08-31 rename, after which only the native-messaging host
+  stayed there. It had been comparing Rust against a copy in a repo that ships
+  no browser extension: passing, and protecting nothing that runs.
+- **Two tests replace it**, both in `tests/constants.test.js`: the export equals
+  the vendored JSON (catches a hand-edit of the generated file, or a `generate`
+  nobody re-ran), and the values are still the six we expect (catches canonical
+  changing and arriving here unreviewed). Locke's `vendored-vocab` fleet pin
+  fails a push if `shared/vocab.json` ever stops matching canonical.
+- **`shared/vocab.json` is a build input, not payload** — excluded from store
+  zips alongside `shared/ai-surfaces.json`. The generated file ships.
+- **`content/shim.js` keeps its inlined copy.** A MAIN-world classic script
+  cannot import an ES module, generated or not; it stays pinned to
+  `INFRASTRUCTURE_REASONS`, so it is now transitively pinned to canonical.
+
+None of this makes the set harder to delete, which `constants.js` still says is
+the plan once every peer sends a real `blockCause`: it is one import, one
+generated file, two tests and one Locke sync target, with no consumer to rewrite.
+
 ### Changed — publishing is a deliberate act again, not a side effect of merging (Sonomos #190)
 
 - **`.github/workflows/release.yml` is `workflow_dispatch`-only.** It ran on

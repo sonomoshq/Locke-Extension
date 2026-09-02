@@ -1,0 +1,21 @@
+{
+  "_comment": "CANONICAL machine-readable form of the sonomos-vocab CONSTANTS, for consumers that cannot import the Rust crate (Desktop-Frontend TS, Locke-Extension / Depreciated-Desktop-Extension JS, Inspector). Mostly enums — one key per closed set of wire tags — plus, since v5, one key that is NOT an enum: infrastructure_reason_fragments is a list of PROSE SUBSTRINGS, matched with contains()/includes() against a peer's free-text reason, not a set of values anyone emits. It is here for the same reason the enums are (a non-Rust consumer classifies the same receipts and cannot import INFRASTRUCTURE_REASON_FRAGMENTS), and it is called out because the two kinds read alike and are not alike: an unknown enum tag is a decoder artifact, an unmatched fragment is just a reason that means something else. Every key is maintained by hand NEXT TO the Rust and pinned entry-for-entry, in order, by the crate's vocab_json_matches_the_enums test — no key here can drift from its Rust definition without failing CI. Vendored copies are synced by Locke scripts/sync-surfaces.sh and verified by its --check mode (Locke fleet pin vendored-vocab), same discipline as ai-surfaces.json: do NOT hand-edit a vendored copy. Values are wire/DB strings or match fragments, not display labels — presentation stays in each UI (separate detection from presentation).",
+  "version": 5,
+  "span_origins": ["user", "context", "system", "tool", "assistant", "other"],
+  "surfaces": ["proxy", "extension"],
+  "query_kinds": ["chat", "file_upload", "image", "other"],
+  "decisions": ["allow", "redact", "block"],
+  "block_causes": ["policy", "infrastructure", "unspecified"],
+  "infrastructure_reason_fragments": ["engine unavailable", "guard unreachable", "engine saturated", "rate limit exceeded", "engine protocol failure", "bridge protocol failure"],
+  "item_kinds": ["text", "file"],
+  "item_outcomes": ["redacted", "clean", "unsupported"],
+  "scan_tiers": ["full", "degraded"],
+  "unscreened_reasons": ["engine_unsupported", "engine_error"],
+  "signals": ["cancel", "saturated", "epoch_changed", "draining"],
+  "roles": ["system", "developer", "user", "assistant", "tool", "other"],
+  "content_types": ["text", "file"],
+  "file_categories": ["text", "document", "image", "audio", "video", "archive", "binary"],
+  "media_sources": ["declared", "filename", "sniffed", "unknown"],
+  "parsers": ["utf8", "pdf_text", "ocr", "none"],
+  "parse_statuses": ["ok", "partial", "failed", "not_attempted"]
+}

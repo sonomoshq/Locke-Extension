@@ -43,9 +43,12 @@ const DIRS = ['background', 'content', 'popup', 'shared'];
 
 // Build inputs that live inside a staged directory but have no runtime
 // consumer. `shared/ai-surfaces.json` is the vendored catalog that
-// `npm run generate` compiles into content/web-surfaces.generated.js; nothing
-// loads it at runtime, so it is a build input, not payload.
-const EXCLUDE = new Set(['shared/ai-surfaces.json']);
+// `npm run generate` compiles into content/web-surfaces.generated.js;
+// `shared/vocab.json` is the vendored sonomos-vocab data it compiles into
+// shared/vocab.generated.js. Nothing loads either at runtime — the GENERATED
+// files are the payload — so both are build inputs, and shipping them only
+// hands a store reviewer extra surface to ask about.
+const EXCLUDE = new Set(['shared/ai-surfaces.json', 'shared/vocab.json']);
 
 // Strictest limit across the three stores wins, so one tree passes all of
 // them: name 45 (Edge), short_name 12 (Chrome), description 132 (Chrome).
