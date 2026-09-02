@@ -12,7 +12,7 @@
 // survives untouched, and a run against a missing document writes only the
 // table (the prose is a human's to add).
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir, release, type } from 'node:os';
 import { relative } from 'node:path';
 
@@ -103,7 +103,15 @@ export function writeReport({ rows, catalogHost, out, repoRoot }) {
 
   if (!out) return { table: [...header, ...body].join('\n'), written: null };
 
-  let document = existsSync(out) ? readFileSync(out, 'utf8') : '';
+  // Read-and-tolerate-ENOENT rather than exists-then-read: the check/use
+  // pair is a TOCTOU window (CodeQL js/file-system-race).
+  let document;
+  try {
+    document = readFileSync(out, 'utf8');
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+    document = '';
+  }
   const start = document.indexOf(BEGIN);
   const finish = document.indexOf(END);
   if (start !== -1 && finish !== -1 && finish > start) {
