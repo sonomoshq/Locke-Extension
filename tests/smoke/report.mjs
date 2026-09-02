@@ -37,7 +37,11 @@ function redact(text) {
 
 // A markdown table cell cannot contain a raw `|`, and a newline ends the row.
 function cell(text) {
-  return redact(text).replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ').trim();
+  return redact(text)
+    .replace(/\\/g, '\\\\')
+    .replace(/\|/g, '\\|')
+    .replace(/\s*\n\s*/g, ' ')
+    .trim();
 }
 
 /**
