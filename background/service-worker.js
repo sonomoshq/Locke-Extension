@@ -12,6 +12,7 @@ import {
   hostMatches,
   MANAGED_KEYS,
   MSG,
+  NATIVE_CALL_TIMEOUT_MS,
   NATIVE_HOST,
   PRESENCE_INTERVAL_SECONDS,
   PRESENCE_URL,
@@ -748,12 +749,35 @@ async function captureViaHost(requestB64, provider) {
   // Base64 length, not the payload: enough to tell "a 4 MB upload timed out"
   // from "a 2 KB prompt was rejected".
   const b64Bytes = requestB64.length;
+  // A host that neither answers nor exits (the mesh-restart transition: the
+  // bridge accepts but nothing behind it replies yet) would leave this await
+  // pending for the worker's whole lifetime and hang every capture behind it.
+  // Bound it: on timeout we abandon the call and fail the send closed with a
+  // distinct code, so the next capture gets a fresh host — no manual reload.
+  const NATIVE_TIMEOUT = Symbol('native-timeout');
+  let timeoutTimer;
+  const timeout = new Promise((resolve) => {
+    timeoutTimer = setTimeout(() => resolve(NATIVE_TIMEOUT), NATIVE_CALL_TIMEOUT_MS);
+  });
   try {
-    const response = await sendNativeMessagePromise({
+    const native = sendNativeMessagePromise({
       type: BRIDGE_MSG.CAPTURE,
       requestB64,
       ...(provider ? { provider } : {})
     });
+    const response = await Promise.race([native, timeout]);
+    if (response === NATIVE_TIMEOUT) {
+      const ms = Date.now() - startedAt;
+      relayWarn('native-timeout', { ms, b64Bytes });
+      // No verdict arrived, but nothing was learned about the screener itself
+      // — UNCONFIRMED, the same reading the shim's fail-closed block carries.
+      noteScreening(evidenceFromRelayFailure('native-timeout'), null);
+      // The host may be missing or refusing rather than merely slow; ask for a
+      // re-registration the same way the no-bridge path does (throttled, so a
+      // no-op if one went out recently).
+      void requestHostRegistration();
+      return { ok: false, code: 'native-timeout' };
+    }
     const ms = Date.now() - startedAt;
     if (!response || typeof response !== 'object') {
       relayWarn('bridge-empty', { ms, b64Bytes });
@@ -816,6 +840,8 @@ async function captureViaHost(requestB64, provider) {
     relayWarn('native-call-failed', { ms, b64Bytes, detail: clip(detail) });
     noteScreening(evidenceFromRelayFailure('bridge-error'), null);
     return { ok: false, code: 'bridge-error', message: detail };
+  } finally {
+    clearTimeout(timeoutTimer);
   }
 }
 

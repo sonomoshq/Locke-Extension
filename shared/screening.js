@@ -145,7 +145,8 @@ const RELAY_FAILURES_PROVING_NO_VERDICT = Object.freeze([
   'bridge-unknown-response', // ...or with a frame type this build doesn't know
   'bridge-error',            // native messaging itself failed
   'capture-error',           // the worker threw relaying it
-  'bad-request'              // the host rejected our frame as malformed
+  'bad-request',             // the host rejected our frame as malformed
+  'native-timeout'           // the host neither answered nor exited in time
 ]);
 
 // Did this receipt's request go out WITHOUT a complete screen?
