@@ -194,6 +194,27 @@ export const PRESENCE_INTERVAL_SECONDS = 30;
 // here so the producer cadence can be checked against it.
 export const PRESENCE_STALE_MS = 45_000;
 
+// How long the service worker waits for the native messaging host to answer a
+// held capture before it gives up and fails the send closed.
+//
+// The host, when it can reach the desktop app, is bound by the app's own
+// extension-bridge peer budget (24 s) and answers — allow, redact, or an
+// `error` receipt — well inside it. This ceiling is NOT that budget: it is the
+// backstop for a host that neither answers NOR exits, which is what a
+// mesh-restart transition produces (the bridge socket exists and accepts, but
+// nothing behind it replies yet, so the host blocks and `sendNativeMessage`'s
+// callback never fires). Without a bound the worker awaits that call for its
+// whole MV3 lifetime (up to ~5 min), and EVERY subsequent capture queues behind
+// it — the page hangs until the user reloads the extension by hand.
+//
+// 30 s: above the desktop's 24 s budget so a slow-but-valid screen is never
+// false-blocked, and below content/shim.js's 45 s enforce ceiling so the worker
+// owns the specific `native-timeout` diagnosis instead of the shim's generic
+// give-up. On timeout the worker abandons the call (a late reply lands in a
+// dead callback, harmless) and answers `{ ok: false, code: 'native-timeout' }`,
+// so the next capture spawns a fresh host and screening resumes with no reload.
+export const NATIVE_CALL_TIMEOUT_MS = 30_000;
+
 export const STATUS = Object.freeze({
   CONNECTED: 'connected',
   WARMING: 'warming',

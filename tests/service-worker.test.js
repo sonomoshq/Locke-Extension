@@ -1,7 +1,7 @@
 // Copyright © 2026 Sonomos, Inc. All rights reserved.
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { DEFAULTS, PRESENCE_INTERVAL_SECONDS, PRESENCE_STALE_MS, PRESENCE_URL, REGISTRATION_MIN_INTERVAL_MS, REGISTRATION_URL } from '../shared/constants.js';
+import { DEFAULTS, NATIVE_CALL_TIMEOUT_MS, PRESENCE_INTERVAL_SECONDS, PRESENCE_STALE_MS, PRESENCE_URL, REGISTRATION_MIN_INTERVAL_MS, REGISTRATION_URL } from '../shared/constants.js';
 
 // background/service-worker.js had no test at all, and three of the things in it
 // are boundaries rather than plumbing:
@@ -24,6 +24,10 @@ import { DEFAULTS, PRESENCE_INTERVAL_SECONDS, PRESENCE_STALE_MS, PRESENCE_URL, R
 const store = { local: {}, session: {} };
 let managedThrows = true;
 let nativeHandler = null;      // (payload) => response, or throws
+// A host that launches and then blocks forever — it neither calls back nor
+// exits, so runtime.lastError never sets. This is the mesh-restart transition
+// the native timeout exists for; `nativeHandler` returns it to trigger that.
+const HANG = Symbol('native host hangs — cb never fires');
 const sessionSets = [];
 
 const areaFor = (name) => ({
@@ -77,6 +81,7 @@ globalThis.chrome = {
         chrome.runtime.lastError = null;
         return undefined;
       }
+      if (response === HANG) return undefined; // launched, then silent
       cb(response);
       return undefined;
     }
@@ -192,6 +197,33 @@ test('service-worker: a frame type we do not know is a failure', async () => {
   const answer = await deliver(captureMsg, TRUSTED);
   assert.equal(answer.ok, false);
   assert.equal(answer.code, 'bridge-unknown-response');
+});
+
+test('service-worker: a host that never answers fails the send closed at the native timeout', async (t) => {
+  // The failure this exists for: the native host launches but neither replies
+  // nor exits (a mesh-restart transition — the bridge accepts, nothing behind
+  // it answers yet). Without a bound the worker awaits it for its whole
+  // lifetime and every later capture hangs behind it, which is the page that
+  // "hangs until you reload the extension".
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  nativeHandler = () => HANG;
+
+  const answered = deliver(captureMsg, TRUSTED);
+  let settled = false;
+  answered.then(() => { settled = true; });
+
+  // One tick short of the ceiling: still held, the send has NOT been decided.
+  t.mock.timers.tick(NATIVE_CALL_TIMEOUT_MS - 1);
+  await Promise.resolve();
+  assert.equal(settled, false, 'the send must still be held one tick before the ceiling');
+
+  // Cross the ceiling: the worker gives up and fails closed, with its own code
+  // rather than the shim's generic give-up, so the next capture — a fresh host
+  // — recovers on its own and the user never has to reload.
+  t.mock.timers.tick(2);
+  const answer = await answered;
+  assert.equal(answer.ok, false, 'a hung host must fail the send closed');
+  assert.equal(answer.code, 'native-timeout');
 });
 
 test('service-worker: a missing native host is told apart from a broken one', async () => {
