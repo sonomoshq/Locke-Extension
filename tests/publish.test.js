@@ -320,6 +320,54 @@ test('edge: operation classification', () => {
   assert.equal(failed.errorCode, 'InProgressSubmission');
 });
 
+test('edge: a real submission reports whether the certification notes were cut', async () => {
+  const { dir, path } = fixtureZip();
+  try {
+    const impl = fakeFetch([
+      { match: (url, init) => url.endsWith('/submissions/draft/package') && init.method === 'POST',
+        reply: { status: 202, headers: { Location: 'op-package-1' } } },
+      { match: (url) => url.includes('/draft/package/operations/op-package-1'),
+        reply: { body: { status: 'Succeeded' } } },
+      { match: (url, init) => url.endsWith('/submissions') && init.method === 'POST',
+        reply: { status: 202, headers: { Location: 'op-submit-1' } } },
+      { match: (url) => url.includes('/submissions/operations/op-submit-1'),
+        reply: { body: { status: 'Succeeded' } } }
+    ]);
+    const long = 'notes '.repeat(2000); // 12,000 chars, well past MAX_NOTES_CHARS
+    const logged = [];
+    const result = await edge.publish({
+      zipPath: path, version: '2.0.1', releaseNotes: long, env: ENV, fetchImpl: impl,
+      log: (m) => logged.push(m), pollIntervalMs: 1, pollTimeoutMs: 1000
+    });
+    assert.equal(result.ok, true, result.message);
+    assert.equal(result.status, 'submitted');
+    // Used to be recorded on the dry-run branch only; the real path lost it.
+    assert.equal(result.data.notesTruncated, true);
+    assert.ok(logged.some((m) => /certification notes were cut/.test(m)));
+    // And what actually went over the wire was the trimmed text.
+    const submit = impl.calls.find((c) => c.url.endsWith('/submissions') && c.method === 'POST');
+    assert.equal(JSON.parse(submit.body).notes.length, edge.MAX_NOTES_CHARS);
+
+    // Short notes: submitted as-is, flag false.
+    const impl2 = fakeFetch([
+      { match: (url, init) => url.endsWith('/submissions/draft/package') && init.method === 'POST',
+        reply: { status: 202, headers: { Location: 'op-package-2' } } },
+      { match: (url) => url.includes('/operations/op-package-2'), reply: { body: { status: 'Succeeded' } } },
+      { match: (url, init) => url.endsWith('/submissions') && init.method === 'POST',
+        reply: { status: 202, headers: { Location: 'op-submit-2' } } },
+      { match: (url) => url.includes('/operations/op-submit-2'), reply: { body: { status: 'Succeeded' } } }
+    ]);
+    const short = await edge.publish({
+      zipPath: path, version: '2.0.1', releaseNotes: 'Short and sweet.', env: ENV, fetchImpl: impl2,
+      log: () => {}, pollIntervalMs: 1, pollTimeoutMs: 1000
+    });
+    assert.equal(short.status, 'submitted');
+    assert.equal(short.data.notesTruncated, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('edge: a submission already in certification is skipped, and CreateNotAllowed is fatal', () => {
   // Republishing during certification cancels the in-flight review and
   // restarts the 7-business-day clock — colliding is worse than waiting.
