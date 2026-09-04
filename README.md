@@ -21,7 +21,7 @@ your device**. Nothing is scanned in a cloud, because nothing goes to one.
 | | |
 |---|---|
 | 🏠 **Product** | [sonomos.ai/locke](https://sonomos.ai/locke) — what Locke is and how to get it |
-| 📖 **Help & guides** | [support.sonomos.ai](https://sonomos.ai/support) — how the desktop app and this extension work together |
+| 📖 **Help & guides** | [sonomos.ai/support](https://sonomos.ai/support) — how the desktop app and this extension work together |
 | 🔒 **Security & trust** | [trust.sonomos.ai](https://trust.sonomos.ai) — security posture, and [`SECURITY.md`](SECURITY.md) for reporting |
 | 💬 **Questions** | [GitHub Discussions](https://github.com/sonomoshq/Locke-Extension/discussions), or [sonomos.ai](https://sonomos.ai) for anything else |
 | 📚 **How it works** | [the wiki](https://github.com/sonomoshq/Locke-Extension/wiki), [`HONEST.md`](HONEST.md) for exactly what is and isn't covered |
