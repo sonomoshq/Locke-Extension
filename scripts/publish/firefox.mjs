@@ -52,6 +52,13 @@ const CHANNEL = 'listed';
 // add-on already has.
 const LICENSE = 'MPL-2.0';
 
+// AMO's hard ceiling on `release_notes` per locale. Not documented on the API
+// page; learned from the 400 that failed the 2.0.1 release:
+//   {"release_notes":["Ensure this field has no more than 3000 characters."]}
+// Lower than Edge's self-imposed 5000, and these notes are PUBLIC on the
+// listing, so the cut lands on a line boundary rather than mid-sentence.
+export const MAX_RELEASE_NOTES_CHARS = 3000;
+
 // ── JWT ───────────────────────────────────────────────────────────────
 
 const b64url = (input) =>
@@ -334,6 +341,24 @@ function messageStrings(value, out = []) {
 }
 
 /**
+ * Fit release notes under AMO's ceiling without cutting a sentence in half.
+ *
+ * Returns { text, truncated } like edge.mjs's truncateNotes, and for the same
+ * reason: whether the notes were cut has to reach the publish report. The cut
+ * is made at the last line break before the limit so the public listing ends
+ * on a whole bullet; if the notes have no line break early enough, a hard cut
+ * is the fallback, because sending nothing is worse.
+ */
+export function truncateReleaseNotes(notes, max = MAX_RELEASE_NOTES_CHARS) {
+  const text = String(notes ?? '').trim();
+  if (text.length <= max) return { text, truncated: false };
+  const head = text.slice(0, max);
+  const cut = head.lastIndexOf('\n');
+  const kept = (cut > max / 2 ? head.slice(0, cut) : head).trimEnd();
+  return { text: kept, truncated: true };
+}
+
+/**
  * True when a failed createVersion response means "this version is already on
  * AMO" — a re-run of an already-finished release, which is a skip, not a
  * failure that should fail the release job.
@@ -466,11 +491,16 @@ export async function publish({
       });
     }
 
+    const { text: notes, truncated: notesTruncated } = truncateReleaseNotes(releaseNotes);
+    if (notesTruncated) {
+      say(`release notes were cut to ${notes.length} characters at a line boundary — AMO rejects more than ${MAX_RELEASE_NOTES_CHARS}`);
+    }
+
     say(`creating version ${target} for ${guid}…`);
     const res = await createVersion({
       guid,
       uuid: upload.uuid,
-      releaseNotes,
+      releaseNotes: notes || undefined,
       minVersion,
       token,
       fetchImpl
@@ -511,7 +541,8 @@ export async function publish({
       version: created.version ?? target,
       id: created.id,
       url: created.url ?? upload.url,
-      channel: created.channel ?? CHANNEL
+      channel: created.channel ?? CHANNEL,
+      notesTruncated
     });
   } catch (err) {
     // Includes network failures, poll timeouts and upload rejections. The

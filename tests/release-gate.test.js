@@ -312,6 +312,16 @@ test('release.yml tells a skipped store apart from a shipped one, and says when 
   assert.match(text, /r\.releaseNotes === false/);
 });
 
+test('release.yml pins SOURCE_DATE_EPOCH to the tagged commit on a re-drive, in both jobs', () => {
+  const text = readFileSync(new URL('release.yml', WORKFLOW_DIR), 'utf8');
+  // A --force re-drive rebuilds from a later HEAD. Pinning to the existing
+  // tag's commit time is what makes the re-driven zip byte-identical to the
+  // one the release attested (when the runtime payload is unchanged).
+  const pins = text.match(/git rev-parse -q --verify "refs\/tags\/\$tag\^\{commit\}"/g) ?? [];
+  assert.equal(pins.length, 2, 'both the release and store-publish jobs must pin the same way');
+  assert.doesNotMatch(text, /git log -1 --pretty=%ct HEAD\)/, 'no job may still pin unconditionally to HEAD');
+});
+
 test('release.yml checks out deeply enough for the gate to read tags', () => {
   // fetch-depth: 2 was right for the parent-commit comparison and is wrong now:
   // the gate reads the tag set, and a shallow checkout makes it refuse.

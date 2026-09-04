@@ -437,6 +437,31 @@ test('firefox: a duplicate version is already-published, not a failure', () => {
   assert.equal(firefox.isAlreadyPublished({ status: 400, json: { license: ['Invalid license.'] } }), false);
 });
 
+test('firefox: release notes are cut under AMO\'s 3000-character ceiling on a line boundary', () => {
+  const { truncateReleaseNotes, MAX_RELEASE_NOTES_CHARS } = firefox;
+  assert.equal(MAX_RELEASE_NOTES_CHARS, 3000);
+
+  assert.deepEqual(truncateReleaseNotes('short'), { text: 'short', truncated: false });
+  assert.deepEqual(truncateReleaseNotes(undefined), { text: '', truncated: false });
+  // Exactly at the limit is not a truncation.
+  const exact = 'x'.repeat(MAX_RELEASE_NOTES_CHARS);
+  assert.deepEqual(truncateReleaseNotes(exact), { text: exact, truncated: false });
+
+  // What 2.0.1 sent: a bulleted summary that ran past the limit. The cut
+  // must land at the end of a whole bullet, never mid-sentence.
+  const bullet = '- A bullet of release notes that is long enough to matter.\n';
+  const long = bullet.repeat(80); // ~4,800 chars
+  const cut = truncateReleaseNotes(long);
+  assert.equal(cut.truncated, true);
+  assert.ok(cut.text.length <= MAX_RELEASE_NOTES_CHARS);
+  assert.ok(cut.text.endsWith('matter.'), `ends on a whole line: …${cut.text.slice(-20)}`);
+  assert.equal(cut.text.length, bullet.length * Math.floor(MAX_RELEASE_NOTES_CHARS / bullet.length) - 1);
+
+  // No usable line break: hard cut rather than sending nothing.
+  const wall = 'y'.repeat(4000);
+  assert.deepEqual(truncateReleaseNotes(wall), { text: 'y'.repeat(MAX_RELEASE_NOTES_CHARS), truncated: true });
+});
+
 test('firefox: preflight demands the AMO-mandatory manifest keys', () => {
   const result = firefox.preflight({ env: ENV });
   assert.equal(result.ok, true, result.problems.join('; '));

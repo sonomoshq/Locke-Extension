@@ -153,11 +153,25 @@ jobs:
       # gives byte-identical zips. Note the LICENCE limits who may act on
       # that: it grants no right to build, so reproducibility is a property
       # Sonomos verifies internally and publishes the recipe for.
+      #
+      # On a --force re-drive the tag already exists and points at the commit
+      # that was released. Pin to THAT commit's time, not HEAD's: the runtime
+      # payload (background/, content/, popup/, shared/, icons, manifest) is
+      # what the zip holds, so if only tooling or docs changed since, the
+      # re-drive hands the failed store the byte-identical zip the release
+      # attested rather than a same-version zip with different timestamps.
       - name: Pin SOURCE_DATE_EPOCH to the release commit
         run: |
-          epoch="$(git log -1 --pretty=%ct HEAD)"
+          tag="v${{ needs.gate.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null; then
+            ref="refs/tags/$tag"
+            echo "tag $tag exists — re-drive: pinning to the released commit $(git rev-parse "$ref")"
+          else
+            ref="HEAD"
+            echo "commit $(git rev-parse HEAD)"
+          fi
+          epoch="$(git log -1 --pretty=%ct "$ref")"
           echo "SOURCE_DATE_EPOCH=$epoch" >> "$GITHUB_ENV"
-          echo "commit $(git rev-parse HEAD)"
           echo "SOURCE_DATE_EPOCH=$epoch ($(date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ'))"
 
       - name: Build extension zip (reproducible)
@@ -337,8 +351,18 @@ jobs:
       # Rebuild rather than download: the build is reproducible by
       # construction, so rebuilding from the same commit is a free check
       # that what we publish is what this commit makes.
+      # Same rule as the release job: an existing tag means a re-drive, and
+      # the zip must match the bytes that tag's release attested.
       - name: Pin SOURCE_DATE_EPOCH to the release commit
-        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct HEAD)" >> "$GITHUB_ENV"
+        run: |
+          tag="v${{ needs.gate.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null; then
+            ref="refs/tags/$tag"
+          else
+            ref="HEAD"
+          fi
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct "$ref")" >> "$GITHUB_ENV"
+          echo "pinned to $ref ($(git rev-parse "$ref"))"
 
       # scripts/publish.mjs runs preflight itself (including `credentials`)
       # and uploads to every selected store, writing per-store status to

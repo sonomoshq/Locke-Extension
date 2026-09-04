@@ -89,9 +89,12 @@ consumer — shipping either only hands a reviewer extra surface to ask about.
    Store reviewers read these — and AMO shows release notes on the public
    listing — so write a short reviewer-facing summary at the top and end it
    with a line containing only `<!-- store-notes-end -->`; everything below
-   that line stays in the changelog and is never sent.  Edge cuts
-   certification notes at 5000 characters and reports the cut in the
-   publish report as `notesTruncated`.
+   that line stays in the changelog and is never sent.  **Keep the summary
+   under 3000 characters**: AMO rejects a longer `release_notes` with an
+   HTTP 400 (learned the hard way on 2.0.1), and Edge cuts certification
+   notes at 5000.  Both publishers now cut to fit rather than fail, and
+   record the cut in the publish report as `notesTruncated`, but a cut is a
+   worse listing than a summary written to length.
 3. **PR.**  Open the bump against `main`.
 4. **Review.**  A CODEOWNER who is not the PR author reviews and approves.
    Read this as reviewing a *release*, because it is the last look anybody
