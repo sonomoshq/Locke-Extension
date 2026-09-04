@@ -8,6 +8,15 @@ strict SemVer.
 
 ## [Unreleased]
 
+### Added — `store-credentials-check` workflow
+
+`release.yml` has no dry-run input on purpose, which left no way to confirm the
+ten store secrets and the `EDGE_API_KEY_ISSUED` variable short of a real
+publish. A new `workflow_dispatch`-only workflow runs the same preflight and
+`scripts/publish.mjs --dry-run` under the `store-publish` environment with the
+same secret mapping, and writes a per-store result to the run summary. Nothing
+is uploaded. Documented in `docs/store/AUTOMATED-RELEASE.md`.
+
 ### Changed — `INFRASTRUCTURE_REASONS` is generated from the shared vocabulary, not declared here
 
 `shared/constants.js` declared the six prose fragments that separate "screening
