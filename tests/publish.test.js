@@ -417,3 +417,43 @@ test('publish: release notes come from the CHANGELOG section for this version', 
   // The placeholder `npm run bump` writes is not release notes.
   assert.equal(releaseNotesFor('2.0.2', '## [2.0.2] — 2026-09-01\n\n<!-- TODO: describe this release before tagging. -->\n'), null);
 });
+
+test('publish: the bump placeholder lands on top of the inherited [Unreleased] body and must not hide it', () => {
+  // This is the exact layout `npm run bump` produces when [Unreleased] was
+  // not empty: heading, placeholder, then a thousand lines of real notes.
+  const changelog = `## [Unreleased]
+
+## [2.0.2] — 2026-09-01
+
+<!-- TODO: describe this release before tagging. -->
+
+### Fixed — a real thing
+- Real.
+
+## [2.0.1] — 2026-08-20
+`;
+  assert.match(releaseNotesFor('2.0.2', changelog), /^### Fixed — a real thing\n- Real\.$/);
+  // Several stacked comments are still just comments.
+  assert.equal(releaseNotesFor('2.0.2', '## [2.0.2] — d\n\n<!-- a -->\n<!-- b -->\n'), null);
+});
+
+test('publish: <!-- store-notes-end --> ends the store-facing notes; the rest of the section stays in the changelog', () => {
+  const changelog = `## [2.0.2] — 2026-09-01
+
+**Summary.** What a reviewer should read.
+
+<!-- store-notes-end -->
+
+### Fixed — the long engineering log
+- Line the reviewer should not get.
+
+## [2.0.1] — 2026-08-20
+`;
+  const notes = releaseNotesFor('2.0.2', changelog);
+  assert.equal(notes, '**Summary.** What a reviewer should read.');
+  assert.doesNotMatch(notes, /engineering log/);
+  // Marker directly under the placeholder: nothing above it, so no notes.
+  assert.equal(releaseNotesFor('2.0.2', '## [2.0.2] — d\n\n<!-- TODO -->\n\n<!-- store-notes-end -->\n\n### Fixed\n- x\n'), null);
+  // The marker is only honoured on its own line, so prose mentioning it is safe.
+  assert.match(releaseNotesFor('2.0.2', '## [2.0.2] — d\n\nThe `<!-- store-notes-end -->` marker is documented here.\n'), /documented here/);
+});

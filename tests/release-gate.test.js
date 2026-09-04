@@ -301,6 +301,17 @@ test('release.yml is dispatch-only and still has its inputs', () => {
   assert.match(text, /stores:/, 'the per-store input must survive');
 });
 
+test('release.yml tells a skipped store apart from a shipped one, and says when no notes went out', () => {
+  const text = readFileSync(new URL('release.yml', WORKFLOW_DIR), 'utf8');
+  // Every publisher returns ok:true, status:'skipped' for "already in review"
+  // and "already at this version"; labelling that "shipped" is a lie in the
+  // one place the operator reads.
+  assert.match(text, /s\.status === "skipped" \? "skipped"/);
+  // publish.mjs writes releaseNotes:false when the CHANGELOG section was
+  // empty or placeholder-only; the summary is the only place it surfaces.
+  assert.match(text, /r\.releaseNotes === false/);
+});
+
 test('release.yml checks out deeply enough for the gate to read tags', () => {
   // fetch-depth: 2 was right for the parent-commit comparison and is wrong now:
   // the gate reads the tag set, and a shallow checkout makes it refuse.

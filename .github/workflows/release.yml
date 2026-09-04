@@ -402,7 +402,12 @@ jobs:
                 for (const s of rows) {
                   const name = s.label ?? s.store ?? "(unknown)";
                   const ok = s.ok ?? s.success ?? (s.status === "ok");
-                  console.log(`- ${ok ? "shipped" : "FAILED"}: ${name}${s.message ? " — " + s.message : ""}`);
+                  const mark = s.status === "skipped" ? "skipped" : ok ? "shipped" : "FAILED";
+                  console.log(`- ${mark}: ${name}${s.message ? " — " + s.message : ""}`);
+                }
+                if (r.releaseNotes === false) {
+                  console.log("");
+                  console.log("**No release notes were sent.** The CHANGELOG section for this version was empty or held only the bump placeholder; AMO and Edge reviewers saw none.");
                 }
               '
             else
