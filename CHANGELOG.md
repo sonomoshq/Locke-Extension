@@ -8,6 +8,140 @@ strict SemVer.
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-09-04
+
+**Summary.** 2.0.1 makes the extension work on Firefox (2.0.0 blocked every
+in-scope AI request there), closes the remaining ways a request could leave the
+browser unscreened (attachment uploads to object storage on another host,
+`sendBeacon`/`fetchLater`, and frames and subdomains the manifest did not
+cover), and stops the popup and toolbar badge reporting "Active" on anything
+short of a real screened request. Blocked requests now say which kind of block
+they are and give advice that is true. For reviewers: the Firefox
+data-collection declaration is `none`, the privacy policy links to the
+extension-specific policy, the only outbound requests are to loopback, and the
+source is published under a view-only licence.
+
+**Fixed**
+- Firefox: every in-scope AI request was blocked because the content-script
+  relay expected a promise from `chrome.runtime.sendMessage`; the relay now
+  handles both messaging dialects, and settings (including admin policy) are
+  read the same way so they no longer fall back to defaults on Firefox.
+- Attachments an AI web app uploads to pre-signed object storage on an
+  unrelated host were never seen; a cross-origin object write from a covered
+  page is now held and screened (scope is initiator as well as destination),
+  with no host permission added.
+- The popup and badge could show "Screening: Active" from a connection alone,
+  from a reachability probe, or after a fail-open send; "Active" now requires
+  a real screened-request receipt, and a fail-open send reads as unconfirmed
+  and marks the badge.
+- Frames with no URL of their own (`about:blank`, `srcdoc`, `blob:`) and
+  subdomains of catalog hosts (e.g. `www.perplexity.ai`) got no hooks; the
+  manifest now declares `match_about_blank` / `match_origin_as_fallback` and
+  subdomain match patterns, and the shim-to-content-script channel works in
+  opaque-origin frames.
+- A blocked request was indistinguishable from the site breaking and often
+  carried wrong advice ("start the app" when it was running); every block now
+  names Sonomos, its kind, and a remedy that is true, and a blocked XHR no
+  longer hangs the page.
+- Popup status no longer claims the desktop app is down before it has asked,
+  no longer says "isn't running" for a timeout, and no longer tells users to
+  install an extension that is installed; the enforce timeout is back to 45 s
+  (2.0.0 had silently dropped it to 5 s).
+- Two page-shim fixes: on a managed profile, a request fired before the admin
+  policy arrived was screened even for a provider the policy excluded; and a
+  redacted resend of `fetch(new Request(url), init)` dropped `init`, which
+  could fail the request without naming the block.
+
+**Added**
+- The extension source is published as a separate public repository,
+  `sonomoshq/Locke-Extension`, under a view-only licence.
+- `data_collection_permissions: { required: ["none"] }` under
+  `browser_specific_settings.gecko`, the AMO data-collection declaration.
+- The `allowedProviders` managed policy is now enforced (subtractive; empty or
+  unset screens every catalog surface); `telemetryEnabled` and
+  `lockedSettings` are documented as accepted but inert.
+- In-scope `navigator.sendBeacon` and `fetchLater()` requests carrying a body
+  are refused rather than sent unscreened.
+- The popup reports how many items of personal information were redacted this
+  session and how many requests went out under the user's fail-open setting;
+  withheld attachments are counted separately.
+- Every fail-closed branch emits a `[sonomos] reason=… action=block` console
+  line (shape only: never body, query string or header values), configurable
+  via the new `debugLogging` and `enforceTimeoutMs` settings; the native host
+  now answers `screening-timeout` after 25 s.
+
+**Changed**
+- Privacy policy URL is now `https://sonomos.ai/locke/privacy`, the
+  extension-specific policy.
+- Injection host list resynced from the catalog: removed `phind.com`,
+  `www.phind.com`, `chat.lechat.fr`, `leo.brave.com`, `brave.com`,
+  `grok.x.ai`; added `copilot.microsoft.com`, `grok.com`, `duck.ai`,
+  `assistant.kagi.com` (27 to 24 hosts).
+- Store packages ship PNG icons only and exclude the build inputs
+  `shared/ai-surfaces.json` and `shared/vocab.json`; the Firefox package also
+  drops the Chrome-only `storage.managed_schema` pointer; packaging is
+  deterministic on every OS.
+- Documentation corrected: the extension's only outbound requests are the
+  loopback presence beacon and self-registration POST (`http://127.0.0.1/*`
+  host permission), not "none".
+- Publishing is a manual `workflow_dispatch` rather than a side effect of
+  merging to `main` (Sonomos #190); the release gate checks for an existing
+  `v<version>` tag and refuses any ref but `main`.
+
+<!-- store-notes-end -->
+
+The detailed engineering log for everything above follows. Only the summary
+above the marker is sent to the stores.
+
+### Fixed — the page-start config wait re-checked only half the chokepoint
+
+`content/shim.js` runs at `document_start`; `SONOMOS_CONFIG` cannot. For the
+first moments of a page load the disable set is empty and the admin allowlist
+is unrestricted, so an in-scope request may wait once for the first config
+and ask again. The comment above that wait says it exists for a surface the
+user switched off "or one an admin policy excluded" — but the re-check after
+the wait called `isDisabledHost` alone, never `isProviderAllowed`. On a
+managed profile with `allowedProviders: ["anthropic"]`, the first bodied POST
+on `chatgpt.com` was held and screened anyway, and with the desktop app down
+it was blocked: the site broke in the one configuration the admin had told
+Locke to leave alone. Both the fetch and the XHR wait now re-ask
+`isScreenedHost`, the whole chokepoint. Strictly subtractive, as before.
+
+### Fixed — a redacted resend of `fetch(Request, init)` dropped `init`
+
+`fetch(new Request(url), { method: 'POST', body })` is a legal call shape:
+`init` overrides the Request. `resendFetch` rebuilt the redacted request from
+the Request alone, so a GET-shaped Request plus a POST `init` came back as a
+GET with a body, which throws — outside the hook's `try`, so no `[sonomos]`
+line named the failure and the user saw the site's own error. When it did not
+throw, the page's `signal`, `credentials`, `mode` and `keepalive` were silently
+lost on the resend. The Request branch now spreads `init` exactly as the
+non-Request branch always did.
+
+### Fixed — release notes were discarded whenever the bump placeholder sat above them
+
+`npm run bump` inserts its `<!-- TODO -->` placeholder directly under the new
+version heading, which puts it **on top of** whatever was under `[Unreleased]`.
+`scripts/publish.mjs` judged a section by its first four characters, so a
+version whose author had written a thousand lines of notes before bumping
+shipped with *no* release notes at AMO and a bare `Locke Extension X.Y.Z` as
+Edge certification notes, and nothing said so: the publish report recorded
+`releaseNotes: false` and the run summary never printed it. This release
+would have been the first casualty.
+
+- **Leading HTML comments are stripped before the section is judged**, so a
+  forgotten placeholder can no longer hide real notes; a section that is only
+  comments is still "no notes".
+- **A line containing only `<!-- store-notes-end -->` ends the store-facing
+  notes.** Everything below it stays in the changelog and is never sent. The
+  whole section used to go verbatim: AMO shows release notes on the public
+  listing and Edge cuts certification notes at 5000 characters, so a 74,000
+  character engineering log was the wrong thing to send either of them.
+- **Edge now records `notesTruncated` on a real submission**, not only on a
+  dry run, and logs the cut.
+- **The run summary labels a `skipped` store as skipped**, not "shipped", and
+  says outright when no release notes were sent.
+
 ### Added — `store-credentials-check` workflow
 
 `release.yml` has no dry-run input on purpose, which left no way to confirm the

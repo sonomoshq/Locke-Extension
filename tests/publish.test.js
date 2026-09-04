@@ -320,6 +320,54 @@ test('edge: operation classification', () => {
   assert.equal(failed.errorCode, 'InProgressSubmission');
 });
 
+test('edge: a real submission reports whether the certification notes were cut', async () => {
+  const { dir, path } = fixtureZip();
+  try {
+    const impl = fakeFetch([
+      { match: (url, init) => url.endsWith('/submissions/draft/package') && init.method === 'POST',
+        reply: { status: 202, headers: { Location: 'op-package-1' } } },
+      { match: (url) => url.includes('/draft/package/operations/op-package-1'),
+        reply: { body: { status: 'Succeeded' } } },
+      { match: (url, init) => url.endsWith('/submissions') && init.method === 'POST',
+        reply: { status: 202, headers: { Location: 'op-submit-1' } } },
+      { match: (url) => url.includes('/submissions/operations/op-submit-1'),
+        reply: { body: { status: 'Succeeded' } } }
+    ]);
+    const long = 'notes '.repeat(2000); // 12,000 chars, well past MAX_NOTES_CHARS
+    const logged = [];
+    const result = await edge.publish({
+      zipPath: path, version: '2.0.1', releaseNotes: long, env: ENV, fetchImpl: impl,
+      log: (m) => logged.push(m), pollIntervalMs: 1, pollTimeoutMs: 1000
+    });
+    assert.equal(result.ok, true, result.message);
+    assert.equal(result.status, 'submitted');
+    // Used to be recorded on the dry-run branch only; the real path lost it.
+    assert.equal(result.data.notesTruncated, true);
+    assert.ok(logged.some((m) => /certification notes were cut/.test(m)));
+    // And what actually went over the wire was the trimmed text.
+    const submit = impl.calls.find((c) => c.url.endsWith('/submissions') && c.method === 'POST');
+    assert.equal(JSON.parse(submit.body).notes.length, edge.MAX_NOTES_CHARS);
+
+    // Short notes: submitted as-is, flag false.
+    const impl2 = fakeFetch([
+      { match: (url, init) => url.endsWith('/submissions/draft/package') && init.method === 'POST',
+        reply: { status: 202, headers: { Location: 'op-package-2' } } },
+      { match: (url) => url.includes('/operations/op-package-2'), reply: { body: { status: 'Succeeded' } } },
+      { match: (url, init) => url.endsWith('/submissions') && init.method === 'POST',
+        reply: { status: 202, headers: { Location: 'op-submit-2' } } },
+      { match: (url) => url.includes('/operations/op-submit-2'), reply: { body: { status: 'Succeeded' } } }
+    ]);
+    const short = await edge.publish({
+      zipPath: path, version: '2.0.1', releaseNotes: 'Short and sweet.', env: ENV, fetchImpl: impl2,
+      log: () => {}, pollIntervalMs: 1, pollTimeoutMs: 1000
+    });
+    assert.equal(short.status, 'submitted');
+    assert.equal(short.data.notesTruncated, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('edge: a submission already in certification is skipped, and CreateNotAllowed is fatal', () => {
   // Republishing during certification cancels the in-flight review and
   // restarts the 7-business-day clock — colliding is worse than waiting.
@@ -416,4 +464,44 @@ test('publish: release notes come from the CHANGELOG section for this version', 
   assert.equal(releaseNotesFor('9.9.9', changelog), null);
   // The placeholder `npm run bump` writes is not release notes.
   assert.equal(releaseNotesFor('2.0.2', '## [2.0.2] — 2026-09-01\n\n<!-- TODO: describe this release before tagging. -->\n'), null);
+});
+
+test('publish: the bump placeholder lands on top of the inherited [Unreleased] body and must not hide it', () => {
+  // This is the exact layout `npm run bump` produces when [Unreleased] was
+  // not empty: heading, placeholder, then a thousand lines of real notes.
+  const changelog = `## [Unreleased]
+
+## [2.0.2] — 2026-09-01
+
+<!-- TODO: describe this release before tagging. -->
+
+### Fixed — a real thing
+- Real.
+
+## [2.0.1] — 2026-08-20
+`;
+  assert.match(releaseNotesFor('2.0.2', changelog), /^### Fixed — a real thing\n- Real\.$/);
+  // Several stacked comments are still just comments.
+  assert.equal(releaseNotesFor('2.0.2', '## [2.0.2] — d\n\n<!-- a -->\n<!-- b -->\n'), null);
+});
+
+test('publish: <!-- store-notes-end --> ends the store-facing notes; the rest of the section stays in the changelog', () => {
+  const changelog = `## [2.0.2] — 2026-09-01
+
+**Summary.** What a reviewer should read.
+
+<!-- store-notes-end -->
+
+### Fixed — the long engineering log
+- Line the reviewer should not get.
+
+## [2.0.1] — 2026-08-20
+`;
+  const notes = releaseNotesFor('2.0.2', changelog);
+  assert.equal(notes, '**Summary.** What a reviewer should read.');
+  assert.doesNotMatch(notes, /engineering log/);
+  // Marker directly under the placeholder: nothing above it, so no notes.
+  assert.equal(releaseNotesFor('2.0.2', '## [2.0.2] — d\n\n<!-- TODO -->\n\n<!-- store-notes-end -->\n\n### Fixed\n- x\n'), null);
+  // The marker is only honoured on its own line, so prose mentioning it is safe.
+  assert.match(releaseNotesFor('2.0.2', '## [2.0.2] — d\n\nThe `<!-- store-notes-end -->` marker is documented here.\n'), /documented here/);
 });

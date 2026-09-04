@@ -527,10 +527,14 @@ export async function publish({
     }
 
     say('[edge] submitted for certification (not live yet — certification can take up to 7 business days)');
+    if (notesTruncated) {
+      say(`[edge] certification notes were cut at ${MAX_NOTES_CHARS} characters — the reviewer saw the top of the CHANGELOG section only`);
+    }
     return result(true, 'submitted', `submitted ${version ?? zipPath} to ${label} for certification`, {
       productId,
       version,
       zipPath,
+      notesTruncated,
       packageOperationId: upload.operationId,
       submissionOperationId: submitted.operationId
     });

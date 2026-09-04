@@ -80,11 +80,18 @@ consumer — shipping either only hands a reviewer extra surface to ask about.
    refuses to run if those sites already disagree, because the rewrite only
    replaces strings that currently equal the manifest's version.  It
    deliberately does **not** commit and does **not** tag.
-2. **Write the changelog entry.**  The bump inserts a `TODO` placeholder;
-   `scripts/publish.mjs` reads that section and sends it as AMO release notes
-   and Edge certification notes, and a section that still holds the
-   placeholder comment is treated as *no notes at all*.  Store reviewers read
-   these.
+2. **Write the changelog entry.**  The bump inserts a `TODO` placeholder
+   **above** whatever was under `[Unreleased]`, which becomes this version's
+   body.  `scripts/publish.mjs` reads that section, drops any leading HTML
+   comments (a forgotten placeholder never hides the notes beneath it), and
+   sends what is left as AMO release notes and Edge certification notes.  A
+   section that is empty apart from the placeholder is *no notes at all*.
+   Store reviewers read these — and AMO shows release notes on the public
+   listing — so write a short reviewer-facing summary at the top and end it
+   with a line containing only `<!-- store-notes-end -->`; everything below
+   that line stays in the changelog and is never sent.  Edge cuts
+   certification notes at 5000 characters and reports the cut in the
+   publish report as `notesTruncated`.
 3. **PR.**  Open the bump against `main`.
 4. **Review.**  A CODEOWNER who is not the PR author reviews and approves.
    Read this as reviewing a *release*, because it is the last look anybody

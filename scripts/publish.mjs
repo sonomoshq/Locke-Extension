@@ -56,6 +56,14 @@ function parseArgs(argv) {
 }
 
 /**
+ * Marks where the store-facing notes end inside a CHANGELOG version section.
+ * Edge cuts certification notes at 5000 characters and AMO shows release
+ * notes on the public listing, so a section that also carries the full
+ * engineering log needs a line that says "reviewers stop here".
+ */
+export const NOTES_END = /^<!--\s*store-notes-end\s*-->[^\S\n]*$/m;
+
+/**
  * The CHANGELOG section for this version, used as AMO release notes and Edge
  * certification notes. Store reviewers read these; "see git log" does not
  * survive a review.
@@ -71,12 +79,27 @@ export function releaseNotesFor(version, changelog) {
   // at the first line break.
   const start = heading.index + heading[0].length;
   const next = /^##\s/m.exec(changelog.slice(start));
-  const body = changelog.slice(start, next ? start + next.index : undefined).trim();
+  let body = changelog.slice(start, next ? start + next.index : undefined);
 
-  // `npm run bump` opens the section with a TODO placeholder. Shipping that
-  // to a store reviewer as release notes is worse than sending none.
-  if (!body || body.startsWith('<!--')) return null;
-  return body;
+  // Everything under a version heading is the changelog; only the part above
+  // `<!-- store-notes-end -->` is what a store reviewer or an AMO listing
+  // visitor should read. Without the marker the whole section goes, as it
+  // always has. Cut here FIRST: the marker is itself an HTML comment, and the
+  // comment-stripping below would otherwise eat it when nothing but the bump
+  // placeholder sits above it.
+  const cut = NOTES_END.exec(body);
+  if (cut) body = body.slice(0, cut.index);
+
+  // `npm run bump` opens the section with a TODO placeholder — and it lands
+  // ON TOP of whatever was under [Unreleased], which becomes this version's
+  // body. Shipping the placeholder to a store reviewer is worse than sending
+  // none, but so is discarding a thousand lines of real notes because the
+  // first four characters were `<!--`. Strip leading comments, then judge
+  // what is left.
+  body = body.replace(/^\s*(?:<!--[\s\S]*?-->\s*)+/, '');
+
+  body = body.trim();
+  return body || null;
 }
 
 async function loadPublisher(store) {

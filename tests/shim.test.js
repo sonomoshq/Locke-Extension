@@ -292,6 +292,35 @@ test('redact: shim re-issues the rebuilt body BYTES with the rebuilt Content-Typ
   assert.equal(init.method, 'POST');
 });
 
+test('redact: fetch(Request, init) resends with init honoured, not dropped', async () => {
+  // fetch(new Request(url), { method: 'POST', body }) is a legal call shape:
+  // init overrides the Request. The resend used to rebuild from the Request
+  // alone, producing a GET with a body — a TypeError thrown outside the
+  // hook's try/catch, so nothing named the block — and even when it did not
+  // throw, the page's credentials/mode/signal were lost on the resend.
+  const rebuiltBody = Buffer.from('{"prompt":"[REDACTED]"}');
+  const { sandbox, netCalls } = makeWorld(() => rebuiltVerdict(
+    ['POST /backend-api/conversation HTTP/1.1', 'Host: chat.openai.com', 'content-type: application/json'],
+    rebuiltBody
+  ));
+
+  const req = new sandbox.Request(AI_URL);
+  await sandbox.fetch(req, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer t' },
+    body: '{"prompt":"ssn 123-45-6789"}'
+  });
+
+  assert.equal(netCalls.length, 1);
+  const [resent] = netCalls[0];
+  assert.ok(resent instanceof sandbox.Request, 'the Request branch resends a Request');
+  assert.equal(resent.method, 'POST');
+  assert.equal(resent.credentials, 'include', 'init fields survive the resend');
+  assert.equal(resent.headers.get('authorization'), 'Bearer t');
+  assert.deepEqual(Buffer.from(await resent.arrayBuffer()), rebuiltBody, 'with the rebuilt body');
+});
+
 test('block: the held request never leaves', async () => {
   const { sandbox, netCalls, logs } = makeWorld(() => (
     { ok: true, receipt: { decision: 'block', reason: 'policy', redactedCount: 0 } }
@@ -670,7 +699,7 @@ test('diagnostics never leak the body, the query string, or a header value', asy
 
 // ── XMLHttpRequest ─────────────────────────────────────────────────
 
-function makeXhrWorld(onCapture, { headerSetThrows = false, settleConfig = true } = {}) {
+function makeXhrWorld(onCapture, { headerSetThrows = false, settleConfig = true, extraGlobals = {} } = {}) {
   // Minimal XHR stand-in installed BEFORE the shim runs, so the shim wraps
   // its prototype exactly as it would the real one. `dispatchEvent` records
   // what the page would have observed: a real XHR whose send() was never
@@ -688,7 +717,7 @@ function makeXhrWorld(onCapture, { headerSetThrows = false, settleConfig = true 
     abort() { this.aborted = true; }
     dispatchEvent(event) { this.events.push(event.type); return true; }
   }
-  return makeWorld(onCapture, { XMLHttpRequest: FakeXHR }, { settleConfig });
+  return makeWorld(onCapture, { XMLHttpRequest: FakeXHR, ...extraGlobals }, { settleConfig });
 }
 
 test('XHR: allow releases the held body; the raw request carries the page headers', async () => {
@@ -2368,6 +2397,42 @@ test('XHR: a send made before the config lands is released when the surface is o
   await waitFor(() => xhr.sent.length === 1);
   assert.equal(meshAsked, false);
   assert.deepEqual(xhr.sent, ['{"q":"hi"}'], 'the held body is released exactly as the page wrote it');
+  assert.equal(xhr.aborted, false);
+});
+
+test('a request made before the config lands passes through once the admin allowlist excludes the provider', async () => {
+  let meshAsked = false;
+  const { sandbox, netCalls, deliver } = makeWorld(
+    () => { meshAsked = true; return allowVerdict; }, TWO_PROVIDERS, { settleConfig: false }
+  );
+
+  // Same race as the disable set, other half of the chokepoint: the allowlist
+  // arrives in the same config, and the re-check after the wait used to ask
+  // only about disabledWebHosts — so an excluded provider's first POST was
+  // held and screened, and blocked outright with the desktop app down.
+  const inFlight = sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
+  deliver({ type: 'SONOMOS_CONFIG', config: { allowedProviders: ['anthropic'] } });
+  await inFlight;
+
+  assert.equal(meshAsked, false, 'a provider the admin excluded is never asked about, however early the request');
+  assert.equal(netCalls.length, 1, 'the original request goes out untouched');
+  assert.equal(netCalls[0][1].body, '{"q":1}');
+});
+
+test('XHR: a send made before the config lands is released when the admin allowlist excludes the provider', async () => {
+  let meshAsked = false;
+  const { sandbox, deliver } = makeXhrWorld(
+    () => { meshAsked = true; return allowVerdict; }, { settleConfig: false, extraGlobals: TWO_PROVIDERS }
+  );
+
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"hi"}');
+  deliver({ type: 'SONOMOS_CONFIG', config: { allowedProviders: ['anthropic'] } });
+
+  await waitFor(() => xhr.sent.length === 1);
+  assert.equal(meshAsked, false);
+  assert.deepEqual(xhr.sent, ['{"q":"hi"}']);
   assert.equal(xhr.aborted, false);
 });
 
