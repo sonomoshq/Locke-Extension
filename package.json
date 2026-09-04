@@ -16,7 +16,7 @@
     "and package-lock.json stay exactly as dep-free as the tripwire says."
   ],
   "name": "locke-extension",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
