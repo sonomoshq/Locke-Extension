@@ -72,6 +72,17 @@ the `store-publish` job, which is scoped to the `store-publish` environment.
 Optional repository **variables** (not secrets): `EDGE_API_KEY_ISSUED` (the ISO
 date the Edge key was generated) and `EDGE_EXTENSION_ID`.
 
+**Check them before you need them.** GitHub validates nothing about a secret
+beyond storing it, and `release.yml` has no dry-run input. Run the
+`store-credentials-check` workflow (Actions → store-credentials-check → Run
+workflow) after entering or rotating any of the above: it runs the same
+preflight and the same publishers in `--dry-run` mode against the same secrets
+and uploads nothing. For Chrome that mints a real access token and reads the
+item's status, so it proves the whole OAuth chain; for Edge and Firefox it
+proves presence and the `EDGE_API_KEY_ISSUED` countdown, not that the store
+will accept the key. Each Chrome run spends a refresh-token round trip, so do
+not schedule it.
+
 ### 2. Two credential expiries that will break this pipeline
 
 These are the reason an automated pipeline here is not fire-and-forget. Neither
