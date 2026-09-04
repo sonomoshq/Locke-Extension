@@ -1605,7 +1605,12 @@
     const headers = new Headers(baseHeaders || {});
     if (contentType) headers.set('content-type', contentType);
     if (isRequest) {
-      return origFetch.call(window, new Request(input, { body: bodyBytes, headers }));
+      // `init` still applies when `input` is a Request — it overrides the
+      // Request's own fields, and fetch(new Request(url), { method: 'POST',
+      // body }) is a legal call shape. Dropping it here rebuilt a GET with a
+      // body, which throws before any [sonomos] line could name the block,
+      // and silently lost the page's signal/credentials/mode on the resend.
+      return origFetch.call(window, new Request(input, { ...(init || {}), body: bodyBytes, headers }));
     }
     return origFetch.call(window, input, { ...(init || {}), body: bodyBytes, headers });
   }
@@ -1931,7 +1936,9 @@
         // and the request stays in scope, which is today's behaviour exactly.
         if (scope === SCOPE.AI && !configArrived) {
           await waitForFirstConfig();
-          if (isDisabledHost(url.hostname)) scope = null;
+          // Re-ask the WHOLE chokepoint, not just the disable set: the admin
+          // allowlist arrives in the same config and is just as subtractive.
+          if (!isScreenedHost(url.hostname)) scope = null;
         }
         if (scope) {
           if (scope === SCOPE.UPLOAD) markUpload(shape);
@@ -2149,7 +2156,7 @@
         // neither ever waits.
         if (scope === SCOPE.AI && !configArrived) {
           await waitForFirstConfig();
-          if (isDisabledHost(s.url.hostname)) { // switched off after all
+          if (!isScreenedHost(s.url.hostname)) { // switched off or policy-excluded after all
             say('debug', 'not-in-scope', { action: 'send' });
             origSend.call(xhr, body);
             return;

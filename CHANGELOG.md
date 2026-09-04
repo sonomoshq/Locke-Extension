@@ -47,6 +47,10 @@ source is published under a view-only licence.
   no longer says "isn't running" for a timeout, and no longer tells users to
   install an extension that is installed; the enforce timeout is back to 45 s
   (2.0.0 had silently dropped it to 5 s).
+- Two page-shim fixes: on a managed profile, a request fired before the admin
+  policy arrived was screened even for a provider the policy excluded; and a
+  redacted resend of `fetch(new Request(url), init)` dropped `init`, which
+  could fail the request without naming the block.
 
 **Added**
 - The extension source is published as a separate public repository,
@@ -88,6 +92,31 @@ source is published under a view-only licence.
 
 The detailed engineering log for everything above follows. Only the summary
 above the marker is sent to the stores.
+
+### Fixed — the page-start config wait re-checked only half the chokepoint
+
+`content/shim.js` runs at `document_start`; `SONOMOS_CONFIG` cannot. For the
+first moments of a page load the disable set is empty and the admin allowlist
+is unrestricted, so an in-scope request may wait once for the first config
+and ask again. The comment above that wait says it exists for a surface the
+user switched off "or one an admin policy excluded" — but the re-check after
+the wait called `isDisabledHost` alone, never `isProviderAllowed`. On a
+managed profile with `allowedProviders: ["anthropic"]`, the first bodied POST
+on `chatgpt.com` was held and screened anyway, and with the desktop app down
+it was blocked: the site broke in the one configuration the admin had told
+Locke to leave alone. Both the fetch and the XHR wait now re-ask
+`isScreenedHost`, the whole chokepoint. Strictly subtractive, as before.
+
+### Fixed — a redacted resend of `fetch(Request, init)` dropped `init`
+
+`fetch(new Request(url), { method: 'POST', body })` is a legal call shape:
+`init` overrides the Request. `resendFetch` rebuilt the redacted request from
+the Request alone, so a GET-shaped Request plus a POST `init` came back as a
+GET with a body, which throws — outside the hook's `try`, so no `[sonomos]`
+line named the failure and the user saw the site's own error. When it did not
+throw, the page's `signal`, `credentials`, `mode` and `keepalive` were silently
+lost on the resend. The Request branch now spreads `init` exactly as the
+non-Request branch always did.
 
 ### Fixed — release notes were discarded whenever the bump placeholder sat above them
 
