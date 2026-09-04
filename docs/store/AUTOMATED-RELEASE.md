@@ -162,6 +162,16 @@ varies by whether a human review is triggered.
 
 ## Re-driving a failed release
 
+A re-drive builds from `main`'s current HEAD, which by then usually carries
+the fix that made the re-drive necessary. When the `v<version>` tag already
+exists, both build steps pin `SOURCE_DATE_EPOCH` to the *tagged* commit rather
+than HEAD, so a re-drive after a tooling- or docs-only fix hands the failed
+store the byte-identical zip the release attested. If the fix touched the
+runtime payload (`background/`, `content/`, `popup/`, `shared/`, the icons or
+the manifest), the store gets those new bytes under the same version number;
+that is the moment to ask whether it should be a new version instead.
+
+
 Dispatch `release.yml` again, on `main`:
 
 - `force: true` — publish even though the version already carries a release
