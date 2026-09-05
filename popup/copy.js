@@ -117,7 +117,7 @@ export function viewFor(state) {
   const error = state?.error;
   // An error outranks UNKNOWN: a health check that threw told us something,
   // even though it left the status where it was.
-  if (error === 'bridge-error' || error === 'worker-error') return 'error';
+  if (error === 'bridge-error' || error === 'worker-error' || error === 'bridge-protocol-mismatch') return 'error';
   if (status === STATUS.CONNECTED || status === STATUS.WARMING) return 'online';
   if (status === STATUS.NO_BRIDGE) return 'setup';
   if (status === STATUS.UNKNOWN) return 'checking';
@@ -325,7 +325,11 @@ export function copyFor(state) {
     badge: STATUS_BADGE[view],
     screening,
     screeningLabel: SCREENING_LABEL[screening],
-    detail: detailFor(view, screening, recentCaptureEvent(state)),
+    detail: state?.error === 'worker-error'
+      ? `The browser extension did not answer, so ${SCREENED_REQUESTS} are being held back. Close and reopen this popup. If it still cannot connect, reload the extension in your browser’s extensions settings, then reload the affected page and retry.`
+      : state?.error === 'bridge-protocol-mismatch'
+        ? `The installed Locke components use incompatible versions, so ${SCREENED_REQUESTS} are being held back. Update or repair the Locke desktop app, restart it, then reopen this popup and retry.`
+        : detailFor(view, screening, recentCaptureEvent(state)),
     note: noteFor(state)
   };
 }

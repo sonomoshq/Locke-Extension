@@ -128,7 +128,7 @@ background/service-worker.js
     │  - presence beacon → desktop app (fixed 30 s, never backs off)
     │  - native-messaging client → the native messaging host
     │  - shape-only audit ring buffer (no bodies, no PII)
-    ▼  sendNativeMessage (4-byte length-prefixed JSON over stdio)
+    ▼  connectNative port (4-byte length-prefixed JSON over stdio)
 native messaging host  (ai.sonomos.desktop — installed by the desktop app)
     │  one connection per held request; forwards bytes, parses nothing
     ▼  no network hop; the browser never opens a socket to the app

@@ -1,6 +1,6 @@
 // Copyright © 2026 Sonomos, Inc. All rights reserved.
-import { ext } from './browser.js';
-import { BRIDGE_MSG, DEFAULTS, MAX_DISABLED_WEB_HOSTS, NATIVE_HOST, SCREENING, STATUS } from './constants.js';
+import { nativeRequest } from './native-client.js';
+import { BRIDGE_MSG, DEFAULTS, MAX_DISABLED_WEB_HOSTS, SCREENING, STATUS } from './constants.js';
 
 // Health is "can the native host reach the Locke desktop app?" The host
 // answers a `status` message with `{ type:'status', connected: bool,
@@ -143,37 +143,6 @@ export function disabledWebHostsFromStatus(payload) {
     .map((host) => host.replace(/\.+$/, '').toLowerCase());
 }
 
-function sendOne(request, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      reject(new Error('bridge-timeout'));
-    }, timeoutMs);
-
-    const finish = (err, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (err) reject(err); else resolve(value);
-    };
-
-    try {
-      const result = ext.runtime.sendNativeMessage(NATIVE_HOST, request, (response) => {
-        const lastError = ext.runtime.lastError;
-        if (lastError) finish(new Error(lastError.message || 'native-error'));
-        else finish(null, response);
-      });
-      if (result && typeof result.then === 'function') {
-        result.then((response) => finish(null, response)).catch((err) => finish(err));
-      }
-    } catch (err) {
-      finish(err instanceof Error ? err : new Error(String(err)));
-    }
-  });
-}
-
 // `applied` is what the extension is currently enforcing, sent so the host can
 // write the extension's half of the surface-override ack. Omitted entirely
 // when we have nothing to report — the host then
@@ -185,7 +154,7 @@ export async function checkHealth({ settings, applied } = {}) {
   try {
     const request = { type: BRIDGE_MSG.STATUS };
     if (applied) request.applied = applied;
-    const response = await sendOne(request, timeoutMs);
+    const response = await nativeRequest(request, timeoutMs, 'bridge-timeout');
     return {
       status: classify(response),
       httpStatus: null,
@@ -194,7 +163,9 @@ export async function checkHealth({ settings, applied } = {}) {
       disabledWebHosts: disabledWebHostsFromStatus(response),
       latencyMs: Math.round(performance.now() - start),
       timestamp: Date.now(),
-      error: response?.type === 'error' ? (response.code || 'bridge-error') : null
+      error: response?.code === 'bridge-protocol-mismatch'
+        ? 'bridge-protocol-mismatch'
+        : response?.type === 'error' ? (response.code || 'bridge-error') : null
     };
   } catch (err) {
     const kind = err?.message === 'bridge-timeout' ? 'timeout' : classifyLastError(err?.message);
