@@ -115,8 +115,9 @@ const banner =
   '// AUTO-GENERATED from shared/ai-surfaces.json by scripts/generate-surfaces.mjs.\n' +
   '// Do not edit by hand — run `npm run generate` after the vendored file changes.\n';
 
-// Classic-script form: the MAIN-world shim is injected as a classic content
-// script and can't import ES modules, so it reads this global instead.
+// Classic-script form: both content-script worlds load their own copy. The
+// shim uses it for capture; the isolated relay uses its trusted copy to
+// validate provider metadata received from the page.
 writeIfChanged(
   join(root, 'content/web-surfaces.generated.js'),
   banner +
@@ -141,7 +142,7 @@ writeIfChanged(
 
 // Rewrite the manifest's content_scripts matches for the AI page entries (those
 // that inject shim.js / content-script.js). Also ensure the generated globals
-// load *before* the MAIN-world shim.
+// load before each consumer, independently in MAIN and ISOLATED worlds.
 //
 // This used to claim it left "<all_urls> entries (the keystroke guard)"
 // untouched. There is no keystroke guard and there is no <all_urls> entry: the
@@ -160,7 +161,8 @@ for (const cs of contentScripts) {
   if (js.includes('content/shim.js') || js.includes('content/content-script.js')) {
     cs.matches = matches;
   }
-  if (js.includes('content/shim.js') && !cs.js.includes('content/web-surfaces.generated.js')) {
+  if ((js.includes('content/shim.js') || js.includes('content/content-script.js')) &&
+      !cs.js.includes('content/web-surfaces.generated.js')) {
     cs.js = ['content/web-surfaces.generated.js', ...cs.js];
   }
 }
