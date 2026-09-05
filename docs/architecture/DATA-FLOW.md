@@ -43,7 +43,7 @@ extension — the extension only applies the result. The failure posture is
 │  │  └─────┬──────┘  │                                            │
 │  │        │         │                                            │
 │  └────────┼─────────┘                                            │
-│           │ sendNativeMessage (4-byte length-prefixed JSON, stdio)│
+│           │ connectNative port (4-byte length-prefixed JSON, stdio)│
 │  ┌────────▼─────────┐                                            │
 │  │ native messaging │  installed by the Locke desktop app; one   │
 │  │ host             │  connection per held request; forwards     │

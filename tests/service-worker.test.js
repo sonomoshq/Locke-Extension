@@ -24,11 +24,12 @@ import { DEFAULTS, NATIVE_CALL_TIMEOUT_MS, PRESENCE_INTERVAL_SECONDS, PRESENCE_S
 const store = { local: {}, session: {} };
 let managedThrows = true;
 let nativeHandler = null;      // (payload) => response, or throws
-// A host that launches and then blocks forever — it neither calls back nor
+// A host that launches and then blocks forever — it neither replies nor
 // exits, so runtime.lastError never sets. This is the mesh-restart transition
 // the native timeout exists for; `nativeHandler` returns it to trigger that.
-const HANG = Symbol('native host hangs — cb never fires');
+const HANG = Symbol('native host hangs — port never replies');
 const sessionSets = [];
+const nativePorts = [];
 
 const areaFor = (name) => ({
   get: async (keys) => {
@@ -69,21 +70,30 @@ globalThis.chrome = {
     onInstalled: on('installed'),
     onStartup: on('startup'),
     sendMessage: () => Promise.resolve(),
-    sendNativeMessage: (host, payload, cb) => {
-      // The Chrome shape: a callback plus runtime.lastError. Throwing from the
-      // handler stands in for the host failing to launch at all.
-      let response;
-      try {
-        response = nativeHandler(payload);
-      } catch (e) {
-        chrome.runtime.lastError = { message: e.message };
-        cb(undefined);
-        chrome.runtime.lastError = null;
-        return undefined;
-      }
-      if (response === HANG) return undefined; // launched, then silent
-      cb(response);
-      return undefined;
+    connectNative: () => {
+      const messages = new Set();
+      const disconnects = new Set();
+      const port = {
+        onMessage: { addListener: (fn) => messages.add(fn), removeListener: (fn) => messages.delete(fn) },
+        onDisconnect: { addListener: (fn) => disconnects.add(fn), removeListener: (fn) => disconnects.delete(fn) },
+        closed: false,
+        messages,
+        disconnects,
+        disconnect() { this.closed = true; },
+        postMessage(payload) {
+          let response;
+          try { response = nativeHandler(payload); }
+          catch (e) {
+            chrome.runtime.lastError = { message: e.message };
+            for (const fn of disconnects) fn(port);
+            chrome.runtime.lastError = null;
+            return;
+          }
+          if (response !== HANG) for (const fn of messages) fn(response);
+        }
+      };
+      nativePorts.push(port);
+      return port;
     }
   },
   storage: {
@@ -224,6 +234,12 @@ test('service-worker: a host that never answers fails the send closed at the nat
   const answer = await answered;
   assert.equal(answer.ok, false, 'a hung host must fail the send closed');
   assert.equal(answer.code, 'native-timeout');
+  assert.ok(nativePorts.length > 0, 'capture owns a port it can cancel');
+  const port = nativePorts.at(-1);
+  assert.equal(port.closed, true, 'timeout must close the native port');
+  assert.equal(port.messages.size + port.disconnects.size, 0, 'no callbacks retained');
+  nativeHandler = () => ({ type: 'receipt', receipt: { decision: 'allow' } });
+  assert.equal((await deliver(captureMsg, TRUSTED)).ok, true, 'next request recovers');
 });
 
 test('service-worker: a missing native host is told apart from a broken one', async () => {
@@ -1009,4 +1025,34 @@ test('service-worker: a dead listener changes nothing — state, badge and calm 
       globalThis.fetch = realFetch;
     }
   });
+});
+
+
+test('recovery: a worker-eviction lock cannot return stale connected status', async () => {
+  await resetScreening();
+  store.session.connectionState = { status: 'connected', screening: 'available' };
+  store.session.inFlight = Date.now();
+  nativeHandler = () => ({ type: 'status', connected: false, screening: 'unavailable' });
+  const reply = await deliver({ type: 'requestCheck' }, TRUSTED);
+  assert.equal(reply.state.status, 'disconnected');
+  delete store.session.inFlight;
+});
+
+test('recovery: simultaneous popup checks share one live probe', async () => {
+  await resetScreening();
+  let probes = 0;
+  nativeHandler = () => { probes++; return { type: 'status', connected: false }; };
+  const replies = await Promise.all([
+    deliver({ type: 'requestCheck' }, TRUSTED),
+    deliver({ type: 'requestCheck' }, TRUSTED)
+  ]);
+  assert.equal(probes, 1);
+  assert.ok(replies.every((reply) => reply.state.status === 'disconnected'));
+});
+
+test('recovery: worker evaluation re-arms a lost health alarm', async () => {
+  alarmRegistry.delete(HEALTH_ALARM);
+  await import('../background/service-worker.js?recovery-wake');
+  await flush();
+  assert.ok(alarmRegistry.has(HEALTH_ALARM));
 });

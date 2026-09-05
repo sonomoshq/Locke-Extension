@@ -25,17 +25,42 @@ function render(state) {
   el.screeningNote.hidden = copy.note === null;
 }
 
-async function loadInitialState() {
-  const got = await ext.storage.session.get(STATE_KEY);
-  return got?.[STATE_KEY] ?? null;
+let pendingCheck = null;
+let recheckRequested = false;
+function requestCheck(invalidated = false) {
+  if (pendingCheck) {
+    if (invalidated) {
+      // The running probe may already have read older capture evidence.
+      recheckRequested = true;
+      render({ status: STATUS.UNKNOWN });
+    }
+    return pendingCheck;
+  }
+  pendingCheck = checkWorker().finally(() => {
+    pendingCheck = null;
+    if (recheckRequested) {
+      recheckRequested = false;
+      return requestCheck();
+    }
+  });
+  return pendingCheck;
 }
 
-async function requestCheck() {
+async function checkWorker() {
+  let timer;
   try {
-    const resp = await ext.runtime.sendMessage({ type: MSG.REQUEST_CHECK });
-    if (resp?.state) render(resp.state);
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('worker-timeout')), 10_000);
+    });
+    const resp = await Promise.race([
+      ext.runtime.sendMessage({ type: MSG.REQUEST_CHECK }), timeout
+    ]);
+    if (!resp?.state) throw new Error('worker-empty');
+    if (!recheckRequested) render(resp.state);
   } catch {
-    /* background may be restarting */
+    render({ status: STATUS.UNKNOWN, error: 'worker-error' });
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -44,7 +69,7 @@ async function requestCheck() {
 ext.storage.onChanged.addListener((changes, area) => {
   if (area !== 'session') return;
   if (changes[STATE_KEY]?.newValue) {
-    render(changes[STATE_KEY].newValue);
+    if (!recheckRequested) render(changes[STATE_KEY].newValue);
     return;
   }
   // Capture evidence moved while this popup was open — a send just failed, or
@@ -55,12 +80,12 @@ ext.storage.onChanged.addListener((changes, area) => {
   // while the page behind it was being told something else. Re-derive instead
   // of guessing: `requestCheck` is the one path that runs the live probe and
   // the stored evidence through `screeningFor` together.
-  if (changes[SCREENING_KEY]) requestCheck();
+  if (changes[SCREENING_KEY]) requestCheck(true);
 });
 
 ext.runtime.onMessage.addListener((message) => {
   if (message?.type === MSG.STATE_UPDATE && message.state) {
-    render(message.state);
+    if (!recheckRequested) render(message.state);
   }
 });
 
@@ -83,8 +108,7 @@ document.addEventListener('securitypolicyviolation', (e) => {
   } catch { /* context invalidated */ }
 });
 
-(async () => {
-  const initial = await loadInitialState();
-  render(initial ?? { status: STATUS.UNKNOWN });
-  requestCheck();
-})();
+// Cached connection/screening evidence may predate a worker or app restart.
+// Ask now before displaying a positive status.
+render({ status: STATUS.UNKNOWN });
+requestCheck();

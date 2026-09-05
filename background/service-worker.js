@@ -1,5 +1,6 @@
 // Copyright © 2026 Sonomos, Inc. All rights reserved.
 import { ext } from '../shared/browser.js';
+import { nativeRequest } from '../shared/native-client.js';
 import { detectBrowser } from '../shared/browser-info.js';
 import { checkHealth, classifyLastError } from '../shared/health-client.js';
 import { WEB_HOSTS } from '../shared/web-surfaces.generated.js';
@@ -13,7 +14,6 @@ import {
   MANAGED_KEYS,
   MSG,
   NATIVE_CALL_TIMEOUT_MS,
-  NATIVE_HOST,
   PRESENCE_INTERVAL_SECONDS,
   PRESENCE_URL,
   REGISTRATION_MIN_INTERVAL_MS,
@@ -38,7 +38,6 @@ const ALARM_NAME = 'sonomos-desktop-heartbeat';
 // does. See PRESENCE_INTERVAL_SECONDS in shared/constants.js for why the two
 // were split.
 const PRESENCE_ALARM = 'sonomos-presence';
-const IN_FLIGHT_KEY = 'inFlight';
 const BACKOFF_KEY = 'backoff';
 // Session-storage timestamp of the last self-registration POST, the client
 // half of REGISTRATION_MIN_INTERVAL_MS.
@@ -396,21 +395,16 @@ async function applyBadge(status, screening = null, captureCode = null) {
   }
 }
 
-async function acquireLock() {
-  const got = await ext.storage.session.get(IN_FLIGHT_KEY);
-  const now = Date.now();
-  const existing = got?.[IN_FLIGHT_KEY];
-  if (existing && now - existing < 15_000) return false;
-  await ext.storage.session.set({ [IN_FLIGHT_KEY]: now });
-  return true;
+// A Promise belongs to this worker instance. Session storage outlives worker
+// eviction and cannot be a lock: no old task remains to release it on wake.
+let healthCheck = null;
+function runCheck(reason = 'alarm') {
+  if (healthCheck) return healthCheck;
+  healthCheck = performCheck(reason).finally(() => { healthCheck = null; });
+  return healthCheck;
 }
 
-async function releaseLock() {
-  await ext.storage.session.remove(IN_FLIGHT_KEY);
-}
-
-async function runCheck(_reason = 'alarm') {
-  if (!(await acquireLock())) return await getState();
+async function performCheck(_reason) {
   try {
     const settings = await getSettings();
     const prev = await getState();
@@ -506,8 +500,6 @@ async function runCheck(_reason = 'alarm') {
     await applyBadge(next.status, next.screening);
     broadcast(next);
     return next;
-  } finally {
-    await releaseLock();
   }
 }
 
@@ -667,24 +659,6 @@ function isTrustedSender(sender) {
   return sender && sender.id === ext.runtime.id;
 }
 
-function sendNativeMessagePromise(payload) {
-  return new Promise((resolve, reject) => {
-    try {
-      const maybePromise = ext.runtime.sendNativeMessage(NATIVE_HOST, payload, (response) => {
-        const err = ext.runtime.lastError;
-        if (err) reject(new Error(err.message || String(err)));
-        else resolve(response);
-      });
-      // Firefox returns a Promise and ignores the callback.
-      if (maybePromise && typeof maybePromise.then === 'function') {
-        maybePromise.then(resolve, reject);
-      }
-    } catch (e) {
-      reject(e);
-    }
-  });
-}
-
 // ── Capture relay ───────────────────────────────────────────────────
 //
 // One held AI request from a content script — the shim's synthesized raw HTTP
@@ -749,35 +723,12 @@ async function captureViaHost(requestB64, provider) {
   // Base64 length, not the payload: enough to tell "a 4 MB upload timed out"
   // from "a 2 KB prompt was rejected".
   const b64Bytes = requestB64.length;
-  // A host that neither answers nor exits (the mesh-restart transition: the
-  // bridge accepts but nothing behind it replies yet) would leave this await
-  // pending for the worker's whole lifetime and hang every capture behind it.
-  // Bound it: on timeout we abandon the call and fail the send closed with a
-  // distinct code, so the next capture gets a fresh host — no manual reload.
-  const NATIVE_TIMEOUT = Symbol('native-timeout');
-  let timeoutTimer;
-  const timeout = new Promise((resolve) => {
-    timeoutTimer = setTimeout(() => resolve(NATIVE_TIMEOUT), NATIVE_CALL_TIMEOUT_MS);
-  });
   try {
-    const native = sendNativeMessagePromise({
+    const response = await nativeRequest({
       type: BRIDGE_MSG.CAPTURE,
       requestB64,
       ...(provider ? { provider } : {})
-    });
-    const response = await Promise.race([native, timeout]);
-    if (response === NATIVE_TIMEOUT) {
-      const ms = Date.now() - startedAt;
-      relayWarn('native-timeout', { ms, b64Bytes });
-      // No verdict arrived, but nothing was learned about the screener itself
-      // — UNCONFIRMED, the same reading the shim's fail-closed block carries.
-      noteScreening(evidenceFromRelayFailure('native-timeout'), null);
-      // The host may be missing or refusing rather than merely slow; ask for a
-      // re-registration the same way the no-bridge path does (throttled, so a
-      // no-op if one went out recently).
-      void requestHostRegistration();
-      return { ok: false, code: 'native-timeout' };
-    }
+    }, NATIVE_CALL_TIMEOUT_MS, 'native-timeout');
     const ms = Date.now() - startedAt;
     if (!response || typeof response !== 'object') {
       relayWarn('bridge-empty', { ms, b64Bytes });
@@ -818,6 +769,11 @@ async function captureViaHost(requestB64, provider) {
     return { ok: false, code: 'bridge-unknown-response' };
   } catch (e) {
     const ms = Date.now() - startedAt;
+    if (e?.message === 'native-timeout') {
+      relayWarn('native-timeout', { ms, b64Bytes });
+      noteScreening(evidenceFromRelayFailure('native-timeout'), null);
+      return { ok: false, code: 'native-timeout' };
+    }
     // This is `runtime.lastError.message` — see sendNativeMessagePromise.
     const detail = e?.message || String(e);
     // The SAME classifier the health check uses, deliberately, instead of the
@@ -840,8 +796,6 @@ async function captureViaHost(requestB64, provider) {
     relayWarn('native-call-failed', { ms, b64Bytes, detail: clip(detail) });
     noteScreening(evidenceFromRelayFailure('bridge-error'), null);
     return { ok: false, code: 'bridge-error', message: detail };
-  } finally {
-    clearTimeout(timeoutTimer);
   }
 }
 
@@ -857,6 +811,15 @@ refreshDebugFlag();
 // lost to an extension update and a desktop app that says "not installed"
 // until the browser restarts.
 ensurePresenceAlarm();
+// Browser alarms can be lost across an update/restart. Re-arm only a missing
+// health alarm, preserving the countdown and backoff on ordinary wakes.
+async function ensureHealthAlarm() {
+  try {
+    if (await ext.alarms.get(ALARM_NAME)) return;
+    await ext.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
+  } catch { /* startup/install handlers also arm it */ }
+}
+ensureHealthAlarm();
 
 ext.runtime.onInstalled.addListener(async () => {
   await setState(initialState());
