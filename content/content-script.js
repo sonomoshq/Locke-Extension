@@ -39,6 +39,12 @@
   // knob, and never merged into `settings`, because nothing here may edit it.
   const DISABLED_WEB_HOSTS_KEY = 'disabledWebHosts';
 
+  // Loaded by the manifest in THIS isolated world, independently of the
+  // page's mutable MAIN-world globals. Provider labels are untrusted page
+  // input; only identities from this shipped catalog may leave the relay.
+  // Missing catalog data costs attribution, never screening.
+  const providerIds = new Set(Object.values(globalThis.SONOMOS_WEB_PROVIDERS || {}));
+
   // The `targetOrigin` both posts below use — '*', and deliberately. The full
   // reasoning lives next to the same constant in content/shim.js: the target
   // is this very window, `location.origin` names the frame URL's origin rather
@@ -96,12 +102,11 @@
     if (!data || data.type !== CAPTURE || typeof data.callId !== 'number' ||
         typeof data.requestB64 !== 'string') return;
 
-    // Which catalog surface the shim attributed this to. Metadata, not
-    // content: a short id from a list the extension ships. A page cannot
-    // forge its way past screening with it — it only ever labels which surface
-    // a capture is attributed to — but a non-string is still dropped rather
-    // than relayed, so only the shim's own shape gets through.
-    const provider = typeof data.provider === 'string' && data.provider ? data.provider : null;
+    // A page can put arbitrary content in this field. Keep only an exact
+    // catalog identity; do not log, truncate or otherwise preserve unknown
+    // labels. The request and verdict still travel normally without a label.
+    const provider = typeof data.provider === 'string' && providerIds.has(data.provider)
+      ? data.provider : null;
 
     const reply = (verdict) => {
       try {

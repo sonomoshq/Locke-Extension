@@ -30,7 +30,11 @@ import vm from 'node:vm';
 // the browser runs it: the real source evaluated in a vm context standing in
 // for the content-script world.
 
-const CS_SRC = await readFile(new URL('../content/content-script.js', import.meta.url), 'utf8');
+const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
+const isolatedEntry = manifest.content_scripts.find((cs) => cs.js.includes('content/content-script.js'));
+const isolatedScripts = await Promise.all(isolatedEntry.js.map(async (path) => ({
+  path, source: await readFile(new URL(`../${path}`, import.meta.url), 'utf8')
+})));
 
 const VERDICT = { ok: true, receipt: { decision: 'allow', redactedCount: 0 } };
 const PAYLOAD_B64 = Buffer.from('POST /x HTTP/1.1\r\n\r\nssn 123-45-6789').toString('base64');
@@ -154,7 +158,9 @@ function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   const innerWindow = vm.runInContext('window', sandbox);
-  vm.runInContext(CS_SRC, sandbox, { filename: 'content/content-script.js' });
+  for (const { path, source } of isolatedScripts) {
+    vm.runInContext(source, sandbox, { filename: path });
+  }
 
   // Post a message INTO the isolated world the way the MAIN-world shim does.
   const fromPage = (data, source = innerWindow) => {
@@ -473,3 +479,30 @@ test('content-script: a malformed provider claim is dropped, not relayed', async
     );
   }
 });
+
+for (const dialect of ['chromium', 'firefox']) {
+  test(`content-script (${dialect}): unknown provider content never crosses the relay boundary`, async () => {
+    const world = makeWorld({ dialect });
+    const claims = ['synthetic@example.invalid', 'google\nsynthetic-secret', '未知の秘密', 'future-provider', 'Google'];
+    for (const [index, provider] of claims.entries()) {
+      world.fromPage({ ...capture(index + 20), provider });
+      await settle();
+      assert.deepEqual(plain(world.relayed[index]), {
+        type: 'capture', requestB64: PAYLOAD_B64
+      }, 'rejecting metadata must preserve the request to screen');
+      assert.equal(world.verdicts()[index].data.verdict, VERDICT,
+        'an unknown label must neither bypass screening nor discard its verdict');
+      assert.ok(!JSON.stringify(world.logs).includes(provider), 'provider content must not be logged');
+    }
+  });
+
+  test(`content-script (${dialect}): canonical identities for aliased and split hosts keep their labels`, async () => {
+    const world = makeWorld({ dialect });
+    for (const [index, provider] of ['openai', 'anthropic', 'duckduckgo', 'kagi', 'search'].entries()) {
+      world.fromPage({ ...capture(index + 40), provider });
+      await settle();
+      assert.equal(world.relayed[index].provider, provider);
+      assert.equal(world.relayed[index].requestB64, PAYLOAD_B64);
+    }
+  });
+}
