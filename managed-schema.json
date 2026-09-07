@@ -37,8 +37,8 @@
     "enforceTimeoutMs": {
       "type": "integer",
       "minimum": 1000,
-      "maximum": 120000,
-      "default": 45000,
+      "maximum": 300000,
+      "default": 200000,
       "description": "How long the page-side shim holds an outbound AI request waiting for the Locke desktop app's verdict before failing closed and blocking it. Must exceed worst-case screening time on the slowest machine it is deployed to, or healthy sends will be blocked."
     },
     "lockedSettings": {

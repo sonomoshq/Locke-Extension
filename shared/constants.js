@@ -35,10 +35,12 @@ export const DEFAULTS = Object.freeze({
   // blocked or unscreened send are unconditional — that is the case a user
   // needs explained, and it must never depend on having flipped a flag first.
   debugLogging: false,
-  // Matches the Locke desktop app's own 45 s verdict ceiling. Rationale in
-  // content/shim.js, where the value is also inlined as the default the shim
-  // holds until a config push arrives.
-  enforceTimeoutMs: 45_000
+  // Clears the native host's 180 s CAPTURE_DEADLINE (Extension-Bridge
+  // src/messages.rs, raised from 25 s on 2026-09-07 so one cold pass over a
+  // long conversation can finish). Rationale in content/shim.js, where the
+  // value is also inlined as the default the shim holds until a config push
+  // arrives.
+  enforceTimeoutMs: 200_000
 });
 
 // Property names that storage.managed is allowed to override. Anything
@@ -206,13 +208,15 @@ export const PRESENCE_STALE_MS = 45_000;
 // whole MV3 lifetime (up to ~5 min), and EVERY subsequent capture queues behind
 // it — the page hangs until the user reloads the extension by hand.
 //
-// 30 s: above the desktop's 24 s budget so a slow-but-valid screen is never
-// false-blocked, and below content/shim.js's 45 s enforce ceiling so the worker
-// owns the specific `native-timeout` diagnosis instead of the shim's generic
-// give-up. On timeout the worker closes the native port, releases its callbacks
-// and answers `{ ok: false, code: 'native-timeout' }`,
-// so the next capture spawns a fresh host and screening resumes with no reload.
-export const NATIVE_CALL_TIMEOUT_MS = 30_000;
+// 190 s: above the native host's 180 s CAPTURE_DEADLINE (and the guard's
+// 170 s budget behind it) so a slow-but-valid screen is never false-blocked,
+// and below content/shim.js's 200 s enforce ceiling so the worker owns the
+// specific `native-timeout` diagnosis instead of the shim's generic give-up.
+// Inside Chrome's ~5 min hard cap on a worker kept alive by a pending call.
+// On timeout the worker closes the native port, releases its callbacks and
+// answers `{ ok: false, code: 'native-timeout' }`, so the next capture spawns
+// a fresh host and screening resumes with no reload.
+export const NATIVE_CALL_TIMEOUT_MS = 190_000;
 
 export const STATUS = Object.freeze({
   CONNECTED: 'connected',
