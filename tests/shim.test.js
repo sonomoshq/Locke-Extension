@@ -1433,33 +1433,43 @@ test('a blocked XHR reaches DONE and says so before the error event', async () =
   assert.deepEqual(xhr.eventStates, [4, 4, 4]);
 });
 
-test('an onreadystatechange-only page is released by a blocked XHR', async () => {
-  // The page this whole change exists for: no `error` listener anywhere, the
-  // only completion signal is the handler. It must run, and it must see DONE.
+test('the readystatechange a blocked XHR fires is observed at DONE, with the reason set', async () => {
+  // The page this whole change exists for has no `error` listener at all: its
+  // only completion signal is `onreadystatechange` testing `readyState === 4`.
+  //
+  // WHAT THIS TEST CAN AND CANNOT SHOW, stated plainly, because the previous
+  // version of it overstated. A real XMLHttpRequest invokes `onreadystatechange`
+  // itself as part of dispatching the event; this fake does not implement event
+  // handlers at all, so wiring the property here and calling it from a patched
+  // `dispatchEvent` would be the TEST invoking the handler and then asserting
+  // the handler ran. That proves nothing about the shim.
+  //
+  // What the shim is actually responsible for is dispatching a
+  // `readystatechange` event at a point where `readyState` already reads 4 and
+  // the reason is already on the object. That is what is asserted, straight off
+  // the event, with no handler fabricated in between. The browser's own
+  // handler-invocation is the browser's contract, not ours.
   const { sandbox } = makeXhrWorld(() => (
     { ok: true, receipt: { decision: 'block', reason: 'US SSN detected', blockCause: 'policy' } }
   ));
   const xhr = new sandbox.XMLHttpRequest();
-  const seen = [];
-  // Dispatch on the fake routes through dispatchEvent; wire the handler the
-  // way a page does, so the property name itself is part of the contract.
+  const observed = [];
   const realDispatch = xhr.dispatchEvent.bind(xhr);
   xhr.dispatchEvent = (event) => {
-    if (event.type === 'readystatechange' && typeof xhr.onreadystatechange === 'function') {
-      xhr.onreadystatechange();
-    }
+    observed.push({
+      type: event.type,
+      readyState: xhr.readyState,
+      blocked: xhr.sonomosBlocked === true
+    });
     return realDispatch(event);
-  };
-  xhr.onreadystatechange = () => {
-    seen.push({ readyState: xhr.readyState, blocked: xhr.sonomosBlocked === true });
   };
   xhr.open('POST', 'https://chat.openai.com/api/chat', true);
   xhr.send('{"q":"hi"}');
 
-  await waitFor(() => seen.length > 0);
+  await waitFor(() => observed.length >= 3);
   assert.deepEqual(
-    seen, [{ readyState: 4, blocked: true }],
-    'the handler ran exactly once, at DONE, with our reason already on the object'
+    observed[0], { type: 'readystatechange', readyState: 4, blocked: true },
+    'the first event a page can see is the state change, and the state is already DONE'
   );
   assert.deepEqual(xhr.sent, [], 'and nothing was sent');
 });
@@ -1498,9 +1508,131 @@ test('the DONE state a block reports cannot be rewritten by the page', async () 
   // Deliberately NOT synthesized, and this pins it: a fabricated `status` /
   // `statusText` / `responseText` would make our refusal read as a response
   // from the site's own server.
-  assert.equal(xhr.status, undefined);
-  assert.equal(xhr.statusText, undefined);
-  assert.equal(xhr.responseText, undefined);
+  //
+  // Asserted as "the shim defined no OWN property", not as "reading it gives
+  // undefined". The second is a fact about this harness — the fake XHR simply
+  // has no `status` — and would keep passing if the shim started stamping
+  // `status: 0` on the instance while the real XMLHttpRequest.prototype
+  // accessor still answered. The own-property descriptor is the thing under
+  // our control and therefore the thing worth pinning.
+  for (const prop of ['status', 'statusText', 'responseText']) {
+    assert.equal(
+      Object.getOwnPropertyDescriptor(xhr, prop), undefined,
+      `the shim must not define an own '${prop}' — that attributes our refusal to the site`
+    );
+  }
+  // readyState, by contrast, IS ours and must be an own property.
+  assert.equal(Object.getOwnPropertyDescriptor(xhr, 'readyState')?.value, 4);
+});
+
+
+// ── a refused XHR must not poison the next one ─────────────────────
+//
+// `open()` on a used XHR object is how a page RESTARTS a request — retry loops
+// and jQuery-era wrappers do it routinely. blockXhr leaves own properties
+// behind on purpose (the reason has to outlive the events), so without a clear
+// on `open` the reused object reports DONE while the real request sits at
+// OPENED. A page waiting on `readyState === 4` then reads the NEXT, legitimate
+// response as complete-and-empty, and still sees our reason for a send we
+// never refused.
+
+test('a reused XHR is not left reporting DONE from the request before it', async () => {
+  let verdict = { ok: true, receipt: { decision: 'block', reason: 'US SSN detected', blockCause: 'policy' } };
+  const { sandbox } = makeXhrWorld(() => verdict);
+
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"hi"}');
+  await waitFor(() => xhr.readyState === 4);
+  assert.equal(xhr.sonomosBlocked, true);
+
+  // The page retries on the same object.
+  verdict = allowVerdict;
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+
+  // The shim's stamp is a NON-WRITABLE 4. On a real XHR deleting it uncovers
+  // the prototype accessor again; on this fake, `open()` immediately writes its
+  // own plain `readyState = 1` over the hole. Either way what must be gone is
+  // the frozen 4 — assert that, not the absence of any descriptor at all, which
+  // would only be a fact about the fake.
+  const desc = Object.getOwnPropertyDescriptor(xhr, 'readyState');
+  assert.notEqual(desc?.value, 4, 'the stale DONE must not survive into the next request');
+  assert.notEqual(desc?.writable, false, 'nor the non-writable stamp that made it permanent');
+  assert.equal(xhr.readyState, 1, 'the object reports the state the real XHR is in: OPENED');
+  for (const prop of ['sonomosBlocked', 'sonomosBlockReason', 'sonomosBlockKind', 'sonomosBlockMessage']) {
+    assert.equal(
+      Object.getOwnPropertyDescriptor(xhr, prop), undefined,
+      `${prop} must not survive into a request it does not describe`
+    );
+  }
+
+  // And the retry is a real, allowed send — not something the stale state ate.
+  xhr.send('{"q":"hi"}');
+  await waitFor(() => xhr.sent.length > 0);
+  assert.deepEqual(xhr.sent, ['{"q":"hi"}']);
+});
+
+test('a fresh XHR that was never blocked is untouched by the clear', async () => {
+  // The clear runs on every open(), including the overwhelming majority that
+  // follow no block at all. It must not disturb an ordinary object.
+  const { sandbox } = makeXhrWorld(() => allowVerdict);
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  assert.equal(xhr.readyState, 1);
+  assert.equal(Object.getOwnPropertyDescriptor(xhr, 'sonomosBlocked'), undefined);
+  xhr.send('{"q":"hi"}');
+  await waitFor(() => xhr.sent.length > 0);
+  assert.deepEqual(xhr.sent, ['{"q":"hi"}']);
+});
+
+// ── a throwing page handler must not eat the events after it ───────
+//
+// The three dispatches shared one try. That was survivable while `error` came
+// first; putting `readystatechange` in front of it meant a page handler that
+// throws on the FIRST event swallowed `error` AND `loadend` — the two events
+// that actually release a waiting page. The hang the sequence exists to prevent,
+// reintroduced by the fix for it.
+
+test('a handler that throws on readystatechange still gets error and loadend', async () => {
+  const { sandbox } = makeXhrWorld(() => (
+    { ok: true, receipt: { decision: 'block', reason: 'pii' } }
+  ));
+  const xhr = new sandbox.XMLHttpRequest();
+  const realDispatch = xhr.dispatchEvent.bind(xhr);
+  xhr.dispatchEvent = (event) => {
+    realDispatch(event);
+    // A page whose readystatechange handler throws. Its bug — but the remaining
+    // events are ours to deliver.
+    if (event.type === 'readystatechange') throw new Error('the page handler threw');
+    return true;
+  };
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"hi"}');
+
+  await waitFor(() => xhr.events.length >= 3);
+  assert.deepEqual(
+    xhr.events, ['readystatechange', 'error', 'loadend'],
+    'every event still fires, in order, whatever a handler does'
+  );
+});
+
+test('a handler that throws on every event does not stop the sequence', async () => {
+  const { sandbox } = makeXhrWorld(() => (
+    { ok: true, receipt: { decision: 'block', reason: 'pii' } }
+  ));
+  const xhr = new sandbox.XMLHttpRequest();
+  const realDispatch = xhr.dispatchEvent.bind(xhr);
+  xhr.dispatchEvent = (event) => {
+    realDispatch(event);
+    throw new Error('every handler throws');
+  };
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"hi"}');
+
+  await waitFor(() => xhr.events.length >= 3);
+  assert.deepEqual(xhr.events, ['readystatechange', 'error', 'loadend']);
+  // readyState is set before any dispatch, so it survives all of it.
+  assert.equal(xhr.readyState, 4);
 });
 
 // ── an XHR block must be attributable to us ────────────────────────
