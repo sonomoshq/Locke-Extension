@@ -8,6 +8,96 @@ strict SemVer.
 
 ## [Unreleased]
 
+## [2.0.2] — 2026-09-08
+
+**Summary.** 2.0.2 raises the fail-closed verdict ceiling so a cold screen of a
+long conversation can finish instead of being blocked for taking too long, and
+documents a coverage limit that had gone unstated since it landed: on
+`chatgpt.com`, `claude.ai` and `www.perplexity.ai` only a short list of paths is
+screened, so other bodied requests on those hosts — `claude.ai`'s attachment
+upload among them — are not held. For reviewers: nothing about this release
+weakens fail-closed, no permission was added or widened, the only outbound
+requests are still to loopback, the Firefox data-collection declaration is still
+`none`, and `HONEST.md` now states the path limit in full.
+
+**Fixed**
+- A blocked `XMLHttpRequest` left `readyState` at `OPENED` and fired no
+  `readystatechange`, so a page driving XHR through `onreadystatechange` — the
+  older of the two idioms, and still common — waited forever on a request we had
+  already refused. A refused XHR now transitions to `DONE` and fires
+  `readystatechange` before `error` and `loadend`, which is what the page sees
+  from a network failure.
+- `HONEST.md` and `README.md` both claimed a same-origin bodied request to a
+  covered AI host is held. On the three hosts the catalog narrows by path, it is
+  not. Both documents now say which paths are screened and what that leaves
+  unscreened; a test fails if either drifts from the generated file again.
+- The 2026-09-07 ceiling raise had not reached the documentation: `HONEST.md`
+  and `docs/architecture/DATA-FLOW.md` still quoted 45 s / 25 s, and the Group
+  Policy template capped `enforceTimeoutMs` at 120000 — below the value the
+  extension now ships, so an admin using the template could not express the
+  default.
+
+**Added**
+- The popup reports how many requests were **blocked** this session beside the
+  count of items redacted, and the toolbar badge shows the blocked count for ten
+  seconds after a block. A block was previously visible only as a failed request
+  on the page and a line on a console nobody has open. The badge stays empty when
+  healthy and every existing badge state still wins over the count.
+
+**Changed**
+- The fail-closed verdict ceiling is 200 s (was 45 s), behind the service
+  worker's 190 s native-call timeout and the native host's 180 s capture
+  deadline, so a slow-but-valid screen is no longer refused for being slow and
+  each hop still reports its own specific reason. The managed
+  `enforceTimeoutMs` range is 1000–300000, default 200000.
+- Native host requests are cancellable, and live browser connection status
+  recovers rather than staying stuck after a failed round trip.
+- A provider label supplied by the page is validated against the trusted
+  catalog copy before a capture is relayed, so a hostile page cannot mislabel
+  which surface its traffic is attributed to.
+- Vendored `sonomos-vocab` v6, which carries the screening-progress envelope.
+
+<!-- store-notes-end -->
+
+### Fixed — a refused XHR no longer leaves the page waiting
+
+`blockXhr` aborted before `send()` was ever forwarded, which per spec fires
+nothing at all, and then dispatched `error` + `loadend` by hand. That is the
+right pair of events, but it left `readyState` at `1`: a page whose only
+completion signal is `onreadystatechange` never learned the request was over.
+The transition is now made explicitly — own `readyState` of `4` shadowing the
+prototype getter, then `readystatechange`, then `error`, then `loadend` — which
+is the order and the state a network-failed XHR presents. Still deliberately
+NOT synthesized: `status`, `statusText`, `responseText`. Making our refusal look
+like a response from the site's own server attributes it to them.
+
+### Added — a block is now visible somewhere other than a console
+
+`tallyFromReceipt` counts a `block` decision, the service worker accumulates it
+in the session screening state beside the redacted and unchecked counts, and the
+popup renders it. The badge shows the count for `BLOCK_BADGE_MS` (10 s) after
+the most recent block, derived from a timestamp rather than a timer so an
+evicted worker cannot leave a stale number on the toolbar.
+
+Scope, stated precisely: this counts blocks the desktop app **decided** — a
+receipt with `decision: 'block'`. A request blocked because the chain was broken
+(no verdict, a relay failure, a timeout) is not a policy block and is already
+surfaced by its own machinery, `lastCaptureFailure`, which names the failure
+instead of counting it.
+
+### Changed — host_permissions still carries no port, deliberately
+
+Reviewed again this release and left as it is. `http://127.0.0.1/*` cannot be
+narrowed to `http://127.0.0.1:18795/*`: Firefox treats a match pattern with an
+explicit port as matching **nothing** (Bugzilla 1362809, 1468162), so the
+narrower spelling would silently remove the host permission on one of the three
+targets. The extension-pages CSP pins `connect-src` to
+`http://127.0.0.1:18795`, which is the control that actually bounds the port,
+and it is asserted by test. A new test additionally pins that the presence and
+self-registration POSTs send a real `Origin` header — neither uses
+`mode: 'no-cors'` — because the desktop app's presence listener authenticates
+the extension by that header.
+
 ## [2.0.1] — 2026-09-04
 
 **Summary.** 2.0.1 makes the extension work on Firefox (2.0.0 blocked every
@@ -34,7 +124,10 @@ source is published under a view-only licence.
 - A blocked request looked like the site breaking and often carried wrong
   advice; every block now names Sonomos, its kind, and a remedy that is true.
 - Popup status no longer claims the desktop app is down before asking, and the
-  enforce timeout is back to 45 s.
+  enforce timeout is back to 45 s. `[amended 2026-09-08: this was true of the
+  v2.0.1 tag, where the shim shipped 45_000 and the worker 30_000. It stopped
+  being true of main on 2026-09-07 and was left standing here in the block store
+  reviewers read. 2.0.2 ships 200 s — see that entry.]`
 - On a managed profile, a request fired before the admin policy arrived was
   screened even for an excluded provider; and a redacted resend of
   `fetch(new Request(url), init)` dropped `init`.
