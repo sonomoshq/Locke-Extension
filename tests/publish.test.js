@@ -1,9 +1,10 @@
 // Copyright © 2026 Sonomos, Inc. All rights reserved.
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { multipart, poll, request } from '../scripts/lib/http.mjs';
 import { STORES, credentialsFor, parseEnvFile, redact, secretValues } from '../scripts/lib/creds.mjs';
@@ -529,4 +530,69 @@ test('publish: <!-- store-notes-end --> ends the store-facing notes; the rest of
   assert.equal(releaseNotesFor('2.0.2', '## [2.0.2] — d\n\n<!-- TODO -->\n\n<!-- store-notes-end -->\n\n### Fixed\n- x\n'), null);
   // The marker is only honoured on its own line, so prose mentioning it is safe.
   assert.match(releaseNotesFor('2.0.2', '## [2.0.2] — d\n\nThe `<!-- store-notes-end -->` marker is documented here.\n'), /documented here/);
+});
+
+// ── the release-notes length gate ───────────────────────────────────
+//
+// `truncateReleaseNotes` already cuts an over-long slice to fit AMO's 3000
+// characters at a line boundary, which is the right RUNTIME behaviour and is
+// exactly why nothing ever noticed the length creeping up: the upload succeeds
+// and the end of the notes silently vanishes from the public listing, at 2am,
+// mid-publish, with a `say()` line for company.
+//
+// 2.0.2's slice measured 2899 of 3000 — one ordinary entry away from cutting.
+// So preflight now judges the length while there is still time to edit, and
+// these pin where the two thresholds sit.
+
+test('preflight: notes over AMO\'s ceiling are a problem, not a warning', async () => {
+  const { assessReleaseNotes } = await import('../scripts/preflight.mjs');
+  const { MAX_RELEASE_NOTES_CHARS } = firefox;
+
+  const over = assessReleaseNotes('x'.repeat(MAX_RELEASE_NOTES_CHARS + 1), '2.0.2');
+  assert.equal(over.level, 'problem');
+  assert.match(over.message, /TRUNCATED/, 'the message must say what actually happens');
+  assert.match(over.message, /store-notes-end/, 'and name the fix');
+
+  // Exactly at the ceiling is fine — AMO rejects MORE than the limit.
+  assert.equal(assessReleaseNotes('x'.repeat(MAX_RELEASE_NOTES_CHARS), '2.0.2').level, 'warn');
+});
+
+test('preflight: notes inside the last tenth warn but do not block a release', async () => {
+  const { assessReleaseNotes, NOTES_WARN_RATIO } = await import('../scripts/preflight.mjs');
+  const { MAX_RELEASE_NOTES_CHARS } = firefox;
+  const threshold = Math.floor(MAX_RELEASE_NOTES_CHARS * NOTES_WARN_RATIO);
+
+  assert.equal(assessReleaseNotes('x'.repeat(threshold), '2.0.2').level, 'ok',
+    'at the threshold is still clear — a warning at 2am must mean something');
+  const near = assessReleaseNotes('x'.repeat(threshold + 2), '2.0.2');
+  assert.equal(near.level, 'warn');
+  assert.match(near.message, new RegExp(String(threshold + 2)), 'the actual count, so it can be judged');
+});
+
+test('preflight: a version with no usable notes is a problem', async () => {
+  const { assessReleaseNotes } = await import('../scripts/preflight.mjs');
+  // `releaseNotesFor` returns null for a missing section AND for one holding
+  // nothing but `npm run bump`'s TODO placeholder. Both would send a store
+  // reviewer an empty certification note.
+  for (const notes of [null, '']) {
+    const result = assessReleaseNotes(notes, '9.9.9');
+    assert.equal(result.level, 'problem', String(notes));
+    assert.match(result.message, /\[9\.9\.9\]/, 'the message names the version it looked for');
+  }
+});
+
+test('preflight: the shipped CHANGELOG passes its own gate', async () => {
+  // The one that would have caught this release. Reads the real files, so it
+  // fails the moment an entry grows past the line rather than at publish time.
+  const { assessReleaseNotes } = await import('../scripts/preflight.mjs');
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const version = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8')).version;
+  const changelog = readFileSync(join(root, 'CHANGELOG.md'), 'utf8');
+  const notes = releaseNotesFor(version, changelog);
+  assert.ok(notes, `CHANGELOG.md must carry a usable [${version}] section`);
+  assert.equal(
+    assessReleaseNotes(notes, version).level, 'ok',
+    `the store-facing [${version}] notes are ${notes.length} characters — move ` +
+    '`<!-- store-notes-end -->` up'
+  );
 });

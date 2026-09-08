@@ -31,12 +31,6 @@ requests are still to loopback, the Firefox data-collection declaration is still
   covered AI host is held. On the three hosts the catalog narrows by path, it is
   not. Both documents now say which paths are screened and what that leaves
   unscreened; a test fails if either drifts from the generated file again.
-- The 2026-09-07 ceiling raise had not reached the documentation: `HONEST.md`
-  and `docs/architecture/DATA-FLOW.md` still quoted 45 s / 25 s, and the Group
-  Policy template capped `enforceTimeoutMs` at 120000 — below the value the
-  extension now ships, so an admin using the template could not express the
-  default.
-
 **Added**
 - The popup reports how many requests were **blocked** this session beside the
   count of items redacted, and the toolbar badge shows the blocked count for ten
@@ -58,6 +52,15 @@ requests are still to loopback, the Firefox data-collection declaration is still
 - Vendored `sonomos-vocab` v6, which carries the screening-progress envelope.
 
 <!-- store-notes-end -->
+
+### Fixed — the documentation the ceiling raise left behind
+
+`HONEST.md` and `docs/architecture/DATA-FLOW.md` still quoted the pre-2026-09-07
+45 s / 25 s numbers, and two Group Policy templates were not merely stale but
+unusable: `Sonomos.admx` capped `enforceTimeoutMs` at 120000, below the 200000
+the extension now ships, so an admin using the supplied template could not
+express the shipped default. The adml and the Chrome plist still advertised
+45000. All corrected; the historical mentions are kept and marked as history.
 
 ### Fixed — a refused XHR no longer leaves the page waiting
 
@@ -93,10 +96,12 @@ explicit port as matching **nothing** (Bugzilla 1362809, 1468162), so the
 narrower spelling would silently remove the host permission on one of the three
 targets. The extension-pages CSP pins `connect-src` to
 `http://127.0.0.1:18795`, which is the control that actually bounds the port,
-and it is asserted by test. A new test additionally pins that the presence and
-self-registration POSTs send a real `Origin` header — neither uses
-`mode: 'no-cors'` — because the desktop app's presence listener authenticates
-the extension by that header.
+and it is asserted by test. Two new tests additionally pin that neither the
+presence POST nor the self-registration POST sets a `fetch` `mode`,
+`credentials`, or a second header — `mode: 'no-cors'` would strip the `Origin`
+header the desktop app authenticates the extension by. The header itself is the
+browser's to attach and no test here can observe it; what is pinned is that
+nothing in our own request options prevents it.
 
 ## [2.0.1] — 2026-09-04
 

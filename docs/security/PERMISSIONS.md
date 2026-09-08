@@ -68,17 +68,8 @@ The control that actually bounds the port is the extension-pages CSP,
 which pins `connect-src` to `http://127.0.0.1:18795`, so in practice
 only that port is reachable; both the portless pattern and the pinned
 CSP are asserted by `tests/manifest.test.js`.
-`[reviewed again 2026-09-08]`
-
-**How the desktop app knows it is us.** Both POSTs on this origin
-(`/heartbeat` and `/register-extension`) are identified by the
-request's `Origin` header — `chrome-extension://<id>` or
-`moz-extension://<uuid>` — which the browser sets and a page cannot
-forge, and the app answers CORS for that exact origin rather than with
-a wildcard. Neither call sets a `fetch` `mode`, which is what keeps
-the header present: `mode: "no-cors"` would strip it, silently, while
-the fire-and-forget calls carried on looking fine.
-`tests/service-worker.test.js` pins that neither init grows one. The Locke desktop app runs a presence listener on port
+`[reviewed again 2026-09-08]` The Locke desktop app runs a presence
+listener on port
 18795; on a fixed 30-second presence tick — its own alarm, NOT the
 health check's, which backs off to 5 minutes when the desktop app is
 down — the service worker POSTs `/heartbeat` with `{ "browser":
@@ -89,6 +80,18 @@ against a listener that calls a heartbeat stale at 45 seconds. The payload is ex
 no identifiers — and the call is fire-and-forget: the app not
 running is the normal case and every failure is swallowed
 (`sendPresenceBeacon` in `background/service-worker.js`).
+
+**How the desktop app knows it is us.** Both POSTs on this origin
+(`/heartbeat` and `/register-extension`) are identified by the
+request's `Origin` header — `chrome-extension://<id>` or
+`moz-extension://<uuid>` — which the browser sets and a page cannot
+forge, and the app answers CORS for that exact origin rather than with
+a wildcard. Neither call sets a `fetch` `mode`, which is what keeps
+the header present: `mode: "no-cors"` would strip it, silently, while
+the fire-and-forget calls carried on looking fine. The header itself is
+the browser's to attach and no test in this repo can observe it; what
+`tests/service-worker.test.js` pins is that neither request's options
+grow a `mode`, `credentials`, or a second header.
 
 **Could we do without it?** Only by giving up the desktop app's
 "extension connected" UI — the app would have no way to know the
