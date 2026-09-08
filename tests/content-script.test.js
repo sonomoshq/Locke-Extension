@@ -284,7 +284,7 @@ for (const dialect of ['chromium', 'firefox']) {
     await settle();
 
     const config = world.configs()[0].data.config;
-    assert.equal(config.enforceTimeoutMs, 45000, 'the shim default holds');
+    assert.equal(config.enforceTimeoutMs, 200000, 'the shim default holds');
     assert.equal(config.debugLogging, false);
   });
 }

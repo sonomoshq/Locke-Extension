@@ -401,7 +401,7 @@
   //
   // In practice the wait is invisible even when it is taken in full, because
   // the only requests that take it are ones about to be held for screening
-  // against a 45 s enforce ceiling (DEFAULT_ENFORCE_TIMEOUT_MS below). It is
+  // against a 200 s enforce ceiling (DEFAULT_ENFORCE_TIMEOUT_MS below). It is
   // never paid by an out-of-scope request: hosts the catalog does not name
   // cannot be affected by a subtractive set, so they are answered without ever
   // consulting it.
@@ -719,13 +719,17 @@
   //
   // The ordering is the point. A ceiling here that fired FIRST would replace
   // every specific diagnosis below it with one generic "gave up".
-  const DEFAULT_ENFORCE_TIMEOUT_MS = 45_000;
+  // 200 s: outlasts the native host's 180 s CAPTURE_DEADLINE and the
+  // worker's 190 s NATIVE_CALL_TIMEOUT_MS, so every specific diagnosis below
+  // it fires first. Raised from 45 s on 2026-09-07 with the rest of the
+  // chain, so one cold pass over a long conversation can finish.
+  const DEFAULT_ENFORCE_TIMEOUT_MS = 200_000;
   // Clamp bounds for a pushed value. A hostile page can post SONOMOS_CONFIG
   // too; both extremes of this knob are self-harm (a page that wants its
   // request unscreened can simply not send it), so a sane range is the whole
   // defence needed.
   const MIN_ENFORCE_TIMEOUT_MS = 1_000;
-  const MAX_ENFORCE_TIMEOUT_MS = 120_000;
+  const MAX_ENFORCE_TIMEOUT_MS = 300_000;
   // Matches shared/constants.js MAX_DISABLED_WEB_HOSTS and the caps the native
   // host and the desktop writer apply. A MAIN-world script cannot import it.
   const MAX_DISABLED_HOSTS = 64;

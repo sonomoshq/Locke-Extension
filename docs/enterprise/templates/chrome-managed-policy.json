@@ -60,7 +60,7 @@
           "  debugLogging      healthy-path console lines only; a blocked or",
           "                    unscreened send is warned about regardless",
           "  enforceTimeoutMs  how long a HELD request waits for a verdict",
-          "                    before it is BLOCKED, 1000-120000ms",
+          "                    before it is BLOCKED, 1000-300000ms",
           "",
           "Two further keys are accepted and then ignored, and are left out",
           "of this template on purpose [documented 2026-09-01]:",
@@ -98,7 +98,7 @@
 
         "debugLogging": false,
 
-        "enforceTimeoutMs": 45000
+        "enforceTimeoutMs": 200000
       }
     }
   }

@@ -600,7 +600,7 @@ test('config: the enforce ceiling is clamped against a hostile page', async () =
 // from here, so this pin holds the extension's end still — the literal, and
 // the agreement between the shim's inlined copy and the shared default — and
 // an accidental edit to either copy fails the suite.
-const DEFAULT_ENFORCE_CEILING_MS = 45_000;
+const DEFAULT_ENFORCE_CEILING_MS = 200_000;
 
 test('config: the default enforce ceiling is pinned, and both copies agree', () => {
   const shimMatch = /const DEFAULT_ENFORCE_TIMEOUT_MS = (\d[\d_]*);/.exec(SHIM_SRC);

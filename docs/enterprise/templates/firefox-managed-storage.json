@@ -25,7 +25,7 @@
     "debugLogging (healthy-path console lines only - a blocked or",
     "unscreened send is warned about regardless) and enforceTimeoutMs (how",
     "long a HELD request waits for a verdict before it is BLOCKED,",
-    "1000-120000ms).",
+    "1000-300000ms).",
     "",
     "Accepted and then ignored, so deliberately absent from this template",
     "[documented 2026-09-01]: telemetryEnabled (nothing consults it) and",
@@ -49,6 +49,6 @@
     "allowedProviders": [],
     "heartbeatSeconds": 30,
     "debugLogging": false,
-    "enforceTimeoutMs": 45000
+    "enforceTimeoutMs": 200000
   }
 }

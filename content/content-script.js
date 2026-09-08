@@ -32,7 +32,7 @@
   // `allowedProviders: []` means "no restriction", matching DEFAULTS. It is a
   // real default rather than an omission, so a profile with nothing stored
   // screens every catalog surface — the safe direction for a subtractive knob.
-  const SHIM_DEFAULTS = { debugLogging: false, enforceTimeoutMs: 45000, allowedProviders: [] };
+  const SHIM_DEFAULTS = { debugLogging: false, enforceTimeoutMs: 200000, allowedProviders: [] };
   // Desktop-owned, not a setting: the service worker writes it from the native
   // host's status reply (shared/constants.js DISABLED_WEB_HOSTS_KEY). Read from
   // storage.local only — never storage.managed, because it is not a policy

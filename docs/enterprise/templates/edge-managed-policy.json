@@ -60,7 +60,7 @@
 
         "debugLogging": false,
 
-        "enforceTimeoutMs": 45000
+        "enforceTimeoutMs": 200000
       }
     }
   }
