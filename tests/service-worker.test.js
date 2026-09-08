@@ -1386,3 +1386,53 @@ test('recovery: worker evaluation re-arms a lost health alarm', async () => {
   await flush();
   assert.ok(alarmRegistry.has(HEALTH_ALARM));
 });
+
+// ── a crashing host must not leave the popup reading Active ─────────
+//
+// The host emits `{"type":"error","code":"host-panic"}` when a handler panics,
+// and `bridge-protocol-mismatch` when Extension-Bridge reports a wire-version
+// mismatch. `captureViaHost` passes the code straight to
+// `evidenceFromRelayFailure`, which returned null for both — no evidence at all
+// — so the last good receipt kept standing and the popup went on claiming
+// Active while every capture in the browser was failing.
+
+for (const code of ['host-panic', 'bridge-protocol-mismatch']) {
+  test(`service-worker: a stream of ${code} failures takes Active down`, async () => {
+    await resetScreening();
+
+    // Earn a real Active first, or the test proves nothing: the defect was
+    // specifically that this receipt kept speaking for the failures after it.
+    nativeHandler = () => ({ type: 'receipt', receipt: { decision: 'allow', redactedCount: 0 } });
+    await deliver(captureMsg, TRUSTED);
+    await flush();
+    nativeHandler = guardIsUp;
+    const healthy = await deliver({ type: 'requestCheck' }, TRUSTED);
+    assert.equal(healthy.state.screening, 'available', 'a genuine screen happened');
+
+    // Now the host crashes on every capture. The desktop app is still reachable
+    // — `guardIsUp` would say so — which is exactly the situation in which the
+    // popup used to keep its green.
+    nativeHandler = () => ({ type: 'error', code, message: 'boom' });
+    for (let i = 0; i < 3; i++) {
+      const answer = await deliver(captureMsg, TRUSTED);
+      assert.equal(answer.ok, false, 'fail-closed: no verdict, no send');
+      assert.equal(answer.code, code, 'and the code reaches the shim, which needs it for its copy');
+      await flush();
+      await flush();
+    }
+
+    nativeHandler = guardIsUp;
+    const { state } = await deliver({ type: 'requestCheck' }, TRUSTED);
+    assert.equal(
+      state.screening, 'unconfirmed',
+      'three failed captures in a row may not read as protection'
+    );
+    // UNCONFIRMED, not UNAVAILABLE: neither code implicates the screener, and
+    // the popup must not send the user to restart the part that was working.
+    assert.notEqual(state.screening, 'unavailable');
+    // Named, so the popup can say WHICH event it is reasoning from.
+    assert.equal(state.lastCaptureFailure?.code, code);
+    // And not counted as a policy block — nothing was decided.
+    assert.equal(store.session.screeningState.blockedSends ?? 0, 0);
+  });
+}

@@ -7,6 +7,8 @@ import {
   captureFailureToName,
   evidenceFromReceipt,
   evidenceFromRelayFailure,
+  RELAY_FAILURES_PROVING_NO_SCREEN,
+  RELAY_FAILURES_PROVING_NO_VERDICT,
   screeningFor,
   tallyFromReceipt
 } from '../shared/screening.js';
@@ -252,13 +254,96 @@ test('a relay failure that says nothing about screening still says a capture fai
   // which meant a browser blocking every single request went on rendering
   // whatever the last good receipt said.
   for (const code of ['no-bridge', 'bridge-empty', 'bridge-unknown-response',
-                      'bridge-error', 'capture-error', 'bad-request']) {
+                      'bridge-error', 'capture-error', 'bad-request',
+                      'native-timeout', 'host-panic', 'bridge-protocol-mismatch']) {
     assert.deepEqual(
       evidenceFromRelayFailure(code, NOW),
       { state: SCREENING.UNCONFIRMED, fragment: null, at: NOW, code },
       code
     );
   }
+});
+
+// ── the two codes that were in neither list ─────────────────────────
+//
+// `host-panic` (a handler in the native host panicked) and
+// `bridge-protocol-mismatch` (Extension-Bridge answered a wire-version mismatch,
+// surfaced by the host under that code) are recent host additions. Neither was
+// in either relay-failure list, so `evidenceFromRelayFailure` returned null —
+// NO evidence — and the last good receipt kept standing. A browser crashing the
+// host on every single capture went on reading "Active" off a receipt from
+// before the crash, indefinitely. That is the exact failure the UNCONFIRMED
+// list was created to fix, recurring through codes added after it.
+
+test('neither new host code yields the silence that leaves a stale Active standing', () => {
+  for (const code of ['host-panic', 'bridge-protocol-mismatch']) {
+    assert.notEqual(
+      evidenceFromRelayFailure(code, NOW), null,
+      `${code} must produce evidence — null lets the previous receipt speak for it`
+    );
+  }
+});
+
+test('neither new host code blames the screener for something it did not do', () => {
+  // UNCONFIRMED, not UNAVAILABLE, and the distinction decides what the popup
+  // tells the user to go and fix. A panic is OUR component crashing before it
+  // could ask the desktop app; a version mismatch is a skew between installed
+  // components. In both cases the screener may be perfectly healthy, so
+  // "screening is unavailable" would send the user to restart the one part that
+  // was working.
+  for (const code of ['host-panic', 'bridge-protocol-mismatch']) {
+    assert.equal(evidenceFromRelayFailure(code, NOW).state, SCREENING.UNCONFIRMED, code);
+    assert.notEqual(evidenceFromRelayFailure(code, NOW).state, SCREENING.UNAVAILABLE, code);
+  }
+});
+
+test('a stream of host panics takes a stale Active down', () => {
+  // The whole point, end to end at the level the popup reads: a good receipt,
+  // then nothing but panics. The status must not stay Active on the strength of
+  // the receipt that came before the crash.
+  const good = evidenceFromReceipt({ decision: 'allow' }, NOW);
+  assert.equal(screeningFor(STATUS.CONNECTED, good, NOW), SCREENING.AVAILABLE);
+
+  let evidence = good;
+  for (let i = 1; i <= 5; i++) {
+    evidence = evidenceFromRelayFailure('host-panic', NOW + i) ?? evidence;
+  }
+  assert.equal(
+    screeningFor(STATUS.CONNECTED, evidence, NOW + 5), SCREENING.UNCONFIRMED,
+    'five failed captures in a row may not read as protection'
+  );
+  // And the popup can NAME it, rather than showing a bare "cannot tell".
+  assert.equal(captureFailureToName(evidence, NOW + 5)?.code, 'host-panic');
+});
+
+test('a stream of protocol mismatches takes a stale Active down too', () => {
+  const good = evidenceFromReceipt({ decision: 'redact' }, NOW);
+  assert.equal(screeningFor(STATUS.CONNECTED, good, NOW), SCREENING.AVAILABLE);
+
+  let evidence = good;
+  for (let i = 1; i <= 5; i++) {
+    evidence = evidenceFromRelayFailure('bridge-protocol-mismatch', NOW + i) ?? evidence;
+  }
+  assert.equal(screeningFor(STATUS.CONNECTED, evidence, NOW + 5), SCREENING.UNCONFIRMED);
+  assert.equal(captureFailureToName(evidence, NOW + 5)?.code, 'bridge-protocol-mismatch');
+});
+
+test('every relay-failure code the extension knows produces evidence', () => {
+  // The drift pin. A code in either list that yields null is the defect above,
+  // and the only way it recurs is a code being added to one place and not the
+  // other. Reading the lists rather than restating them means a new code is
+  // covered the moment it is declared.
+  for (const code of RELAY_FAILURES_PROVING_NO_SCREEN) {
+    assert.equal(evidenceFromRelayFailure(code, NOW)?.state, SCREENING.UNAVAILABLE, code);
+  }
+  for (const code of RELAY_FAILURES_PROVING_NO_VERDICT) {
+    assert.equal(evidenceFromRelayFailure(code, NOW)?.state, SCREENING.UNCONFIRMED, code);
+  }
+  // And the two lists must stay disjoint — a code in both would be classified
+  // by list order rather than by meaning.
+  const overlap = RELAY_FAILURES_PROVING_NO_SCREEN
+    .filter((c) => RELAY_FAILURES_PROVING_NO_VERDICT.includes(c));
+  assert.deepEqual(overlap, [], 'a code cannot both prove no screen and say nothing about it');
 });
 
 test('a screened request whose reply was too big is not doubt about screening', () => {

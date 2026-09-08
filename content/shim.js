@@ -1142,7 +1142,16 @@
     'bridge-empty': 'bridge-unreadable-reply',
     'bridge-unknown-response': 'bridge-unreadable-reply',
     'capture-error': 'relay-error',
-    'bad-request': 'relay-rejected'
+    'bad-request': 'relay-rejected',
+    // `[added 2026-09-08]` Both were falling through to `native-call-failed`,
+    // whose sentence is "the Locke desktop app could not be reached. Start it."
+    // Nothing was unreachable in either case — see the notes in `decide()`.
+    'host-panic': 'connector-crashed',
+    'bridge-protocol-mismatch': 'bridge-version-mismatch',
+    // Found by the drift pin added with the two above: `native-timeout` was
+    // falling back too. "Could not be reached" is nearly true of a 190 s hang,
+    // but "Start it" is not — the browser DID start the host; it is stuck.
+    'native-timeout': 'connector-no-answer'
   };
 
   // Map the round-trip result → what we do with the page's request, AND the
@@ -1237,6 +1246,21 @@
       //     channel this failed on.
       //   `bad-request`             — the host rejected our frame as
       //     malformed. Also ours, and also a version skew.
+      //   `host-panic`              — a handler inside our native-messaging
+      //     host PANICKED on this request. Our component, crashed. The desktop
+      //     app may be entirely healthy; we died before we could ask it. The
+      //     default sentence told the user to start an app that was very likely
+      //     already running, which is the wrong-advice shape three of the codes
+      //     above were already pulled out to stop.
+      //   `bridge-protocol-mismatch` — Extension-Bridge answered a wire-version
+      //     mismatch and the host surfaced it under this code. A skew between
+      //     installed Locke components; retrying the same request cannot clear
+      //     it, and again nothing was unreachable.
+      //
+      // Both of those last two are recent host additions that landed here with
+      // no entry, which is the whole reason this is a table with a documented
+      // fallback rather than an if-chain — and why the fallback's sentence being
+      // wrong for an unlisted code is a bug and not a cosmetic issue.
       //
       // `bridge-error` (native messaging itself failed — the port died, the
       // host exited) keeps `native-call-failed`: there the app really is the
@@ -1462,6 +1486,30 @@
     // skew — and not something retrying the same request will clear.
     'relay-rejected': ['unavailable',
       'the Locke desktop app rejected this request as malformed, so nothing was screened — this is NOT a sensitive-data block. Update Locke; report this if it persists.'],
+    // A handler inside Locke's own native-messaging host PANICKED on this
+    // request. Emphatically not "the app could not be reached", which is what
+    // this used to say: the host was reached, it ran, and it crashed. There is
+    // nothing for the user to start and nothing they did wrong, so the copy says
+    // it is a fault in Locke and asks them to report it — with the wire code,
+    // which `blockMessage` interpolates because it is the one thing a bug report
+    // actually needs.
+    'connector-crashed': ['unavailable',
+      'Locke’s browser connector failed while handling this request, so nothing was screened — this is NOT a sensitive-data block, and nothing was sent. This is a fault in Locke itself, not something you can fix: retry, and report it if it keeps happening.'],
+    // The installed Locke components disagree about their message format
+    // (Extension-Bridge's wire version vs the host's). Same "nothing was
+    // unreachable" point as the crash above, but a different fix: retrying the
+    // same request cannot clear a skew, so the advice is to update or repair.
+    'bridge-version-mismatch': ['unavailable',
+      'the installed Locke components disagree about their message format, so this request could not be screened — this is NOT a sensitive-data block, and nothing was sent. Update or repair the Locke desktop app, then retry; report it if it persists.'],
+    // The service worker's own NATIVE_CALL_TIMEOUT_MS (190 s) expired: the host
+    // was started and then neither answered nor exited. Distinct from
+    // `native-call-failed` in the one way that matters to the user — the process
+    // exists, so "Start it" is wrong advice — and distinct from
+    // `verdict-timeout`, which is the shim's ceiling one hop further out. Same
+    // observation, different hop, and the reason string has to say which so a
+    // support log can tell them apart.
+    'connector-no-answer': ['unavailable',
+      'the Locke desktop app did not answer in time, so nothing was screened — this is NOT a sensitive-data block, and nothing was sent. Check that the Locke desktop app is running and not busy, then try again.'],
     // The native host DID answer the browser — this is NOT "no-bridge" — it
     // only failed to reach the screening service beneath it. Telling the user to
     // "start" an app that just replied to them is wrong, and it is exactly
@@ -1553,6 +1601,13 @@
       help = `screening is unavailable, so this request could not be checked (${f.guardReason}). This is NOT a sensitive-data block — try again shortly.`;
     } else if (reason === 'native-call-failed' && f.code) {
       help = `the Locke desktop app could not be reached (${f.code}). Start it, then try again.`;
+    } else if (reason === 'connector-crashed' && f.code) {
+      // The code is the only part of this a bug report needs and the only part
+      // the fixed sentence cannot carry, so it is named inline — same shape as
+      // the `native-call-failed` branch above.
+      help = `Locke’s browser connector failed while handling this request (${f.code}), so nothing was screened — this is NOT a sensitive-data block, and nothing was sent. This is a fault in Locke itself, not something you can fix: retry, and report it with that code if it keeps happening.`;
+    } else if (reason === 'bridge-version-mismatch' && f.code) {
+      help = `the installed Locke components disagree about their message format (${f.code}), so this request could not be screened — this is NOT a sensitive-data block, and nothing was sent. Update or repair the Locke desktop app, then retry; report it with that code if it persists.`;
     } else if (reason === 'receipt-too-large' && f.bytes) {
       // The whole point of naming both numbers: the user is being asked to
       // send less, and until this line existed nobody could tell them how much
