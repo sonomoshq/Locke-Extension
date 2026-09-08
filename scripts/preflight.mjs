@@ -14,7 +14,7 @@
 // shouldn't block a release at 2am.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,8 +22,10 @@ import { fileURLToPath } from 'node:url';
 import { buildAll, readManifest, root as ROOT } from './store-build.mjs';
 import { checkVersions } from './lib/version.mjs';
 import { STORES, credentialsFor, loadEnv } from './lib/creds.mjs';
+import { releaseNotesFor } from './publish.mjs';
+import { MAX_RELEASE_NOTES_CHARS } from './publish/firefox.mjs';
 
-const ALL_CHECKS = ['version', 'manifest', 'assets', 'credentials', 'headers', 'tests'];
+const ALL_CHECKS = ['version', 'manifest', 'assets', 'credentials', 'headers', 'notes', 'tests'];
 
 function parseArgs(argv) {
   const args = { checks: ALL_CHECKS, stores: STORES, tag: null, skipTests: false, json: false };
@@ -137,6 +139,78 @@ function checkHeaders(report) {
   }
 }
 
+// ── the release notes a store reviewer and an AMO visitor actually read ──
+//
+// `releaseNotesFor` slices this version's CHANGELOG section down to
+// `<!-- store-notes-end -->`. AMO rejects release notes over
+// MAX_RELEASE_NOTES_CHARS (3000), and `truncateReleaseNotes` already cuts to
+// fit at a line boundary rather than letting the upload fail — which is the
+// right runtime behaviour and the reason nothing ever noticed the length.
+//
+// Cutting is not free, though: it happens at 2am, mid-publish, and it silently
+// drops the end of the notes from the public listing. 2.0.2's slice measured
+// 2899 of 3000 characters, so the next entry of ordinary size would have
+// truncated with nothing but a `say()` line to show for it.
+//
+// So the length is asserted here instead, where there is still time to edit.
+// A PROBLEM at the hard cap (the upload would be altered), and a WARNING inside
+// the last 10% (the next release almost certainly will be). Both name the
+// marker, because moving `<!-- store-notes-end -->` up is the fix — the
+// engineering log below it is not meant to ship.
+export const NOTES_WARN_RATIO = 0.9;
+
+/**
+ * Judge one version's store-facing notes. Pure, and exported, so the boundaries
+ * can be tested without a CHANGELOG shaped to hit them.
+ *
+ * @param {string|null} notes - `releaseNotesFor(version, changelog)`
+ * @param {string} version
+ * @returns {{ level: 'ok'|'warn'|'problem', message: string|null }}
+ */
+export function assessReleaseNotes(notes, version) {
+  if (!notes) {
+    // No section, or one holding nothing but the bump placeholder. Either way a
+    // store reviewer would be sent an empty certification note.
+    return {
+      level: 'problem',
+      message: `CHANGELOG.md has no usable [${version}] section — a store review needs ` +
+        'release notes, and "see git log" does not survive one'
+    };
+  }
+  if (notes.length > MAX_RELEASE_NOTES_CHARS) {
+    return {
+      level: 'problem',
+      message: `the store-facing [${version}] notes are ${notes.length} characters, over ` +
+        `AMO's ${MAX_RELEASE_NOTES_CHARS} limit. They would be TRUNCATED on the public ` +
+        'listing. fix: move `<!-- store-notes-end -->` up so the engineering log stays ' +
+        'out of the slice'
+    };
+  }
+  if (notes.length > MAX_RELEASE_NOTES_CHARS * NOTES_WARN_RATIO) {
+    return {
+      level: 'warn',
+      message: `the store-facing [${version}] notes are ${notes.length} of ` +
+        `${MAX_RELEASE_NOTES_CHARS} characters — the next entry of ordinary size will be ` +
+        'truncated. Consider moving `<!-- store-notes-end -->` up now'
+    };
+  }
+  return { level: 'ok', message: null };
+}
+
+function checkNotes(report) {
+  const version = readManifest().version;
+  let changelog;
+  try {
+    changelog = readFileSync(join(ROOT, 'CHANGELOG.md'), 'utf8');
+  } catch {
+    report.problem('notes', 'CHANGELOG.md could not be read');
+    return;
+  }
+  const { level, message } = assessReleaseNotes(releaseNotesFor(version, changelog), version);
+  if (level === 'problem') report.problem('notes', message);
+  else if (level === 'warn') report.warn('notes', message);
+}
+
 function checkTests(report) {
   // Enumerate the files rather than passing `tests/`: on Node 24 the
   // directory form fails with "Cannot find module ...\tests" on Windows, and
@@ -176,6 +250,7 @@ export function runPreflight({ checks = ALL_CHECKS, stores = STORES, tag = null,
   if (checks.includes('assets')) checkAssets(report);
   if (checks.includes('credentials')) checkCredentials(report, env, stores);
   if (checks.includes('headers')) checkHeaders(report);
+  if (checks.includes('notes')) checkNotes(report);
   if (checks.includes('tests') && !skipTests) checkTests(report);
 
   return { ok: problems.length === 0, problems, warnings, version: readManifest().version };

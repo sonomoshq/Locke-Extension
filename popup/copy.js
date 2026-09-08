@@ -272,9 +272,16 @@ const wasWere = (n) => (n === 1 ? 'was' : 'were');
 
 // The session note, or null when there is nothing to report.
 //
-// Three counts, all sourced from real capture receipts
+// FOUR counts, all sourced from real capture receipts
 // (shared/screening.js `tallyFromReceipt`) and all rendered as plain fact —
 // no warning glyph, no "leak", no second person accusation:
+//
+//   blockedSends — requests the desktop app DECIDED to block, so nothing left
+//     the machine. Listed first below because it is the only one of the four
+//     whose consequence the user has already experienced: their send failed,
+//     and the site rendered our refusal as its own network error. A block with
+//     no reason string is NOT counted — that is a half-parsed receipt, an
+//     outage rather than a decision, and `lastCaptureFailure` names it instead.
 //
 //   redactedItems — the screener's own `redactedCount`: personal information it
 //     actually found and removed before your message left. This is the

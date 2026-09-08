@@ -162,12 +162,16 @@ verdict means no send. The residuals we accept and document:
   — under each provider's `capture_path_allowlist.hosts`; this repo
   carries a vendored copy at `shared/ai-surfaces.json` and regenerates
   the baked files with `npm run generate`. **Do not hand-edit
-  `content/web-surfaces.generated.js`.** A catalog update in this
-  release adds `claude.ai`'s upload path; the exact entries are the
-  catalog's to state, and this table is regenerated from the vendored
-  copy when that lands. `tests/honest-capture-paths.test.js` fails if
-  the table above and `SONOMOS_CAPTURE_PATHS` ever disagree, so this
-  document cannot silently drift from the code again.
+  `content/web-surfaces.generated.js`.** A catalog change adding
+  `claude.ai`'s upload path is **pending and is NOT in this release** —
+  the two paths in the table above are the whole of what `claude.ai`
+  screens today, and the upload gap described here is live in 2.0.2. The
+  exact entries are the catalog's to state; this table is regenerated
+  from the vendored copy when that change lands, and
+  `tests/honest-capture-paths.test.js` fails until it is, because it
+  compares the table above with `SONOMOS_CAPTURE_PATHS` at run time. So
+  this document cannot silently drift from the code again — in either
+  direction, including by promising a fix ahead of it shipping.
 - **A surface the user switched off in the desktop app is not
   screened, and that is the point.** The desktop app writes
   `~/.sonomos/surfaces.local.json`; the native host reads its
