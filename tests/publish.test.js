@@ -590,9 +590,14 @@ test('preflight: the shipped CHANGELOG passes its own gate', async () => {
   const changelog = readFileSync(join(root, 'CHANGELOG.md'), 'utf8');
   const notes = releaseNotesFor(version, changelog);
   assert.ok(notes, `CHANGELOG.md must carry a usable [${version}] section`);
-  assert.equal(
-    assessReleaseNotes(notes, version).level, 'ok',
-    `the store-facing [${version}] notes are ${notes.length} characters — move ` +
-    '`<!-- store-notes-end -->` up'
+  // `problem`, not `!== 'ok'`. The hard cap is the external constraint — over it
+  // AMO truncates the public listing — and that is what a test may fail a build
+  // for. The warn band is an early signal for a human deciding whether to move
+  // the marker before the NEXT release, and preflight prints it; turning it into
+  // a red test would mean trimming real notes to satisfy our own margin.
+  assert.notEqual(
+    assessReleaseNotes(notes, version).level, 'problem',
+    `the store-facing [${version}] notes are ${notes.length} characters and would be ` +
+    'TRUNCATED on the listing — move `<!-- store-notes-end -->` up'
   );
 });
