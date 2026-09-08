@@ -74,7 +74,15 @@ facts, because a reachable desktop app does not prove the screener behind it is 
   in-scope search hosts — from `shared/ai-surfaces.json` → `web_hosts`, baked into
   `content/web-surfaces.generated.js` as `SONOMOS_WEB_HOSTS`) and carries a body,
   the shim HOLDS it, captures the exact body bytes, synthesizes the raw HTTP
-  request, and enforces the verdict it gets back. It also holds a **cross-origin
+  request, and enforces the verdict it gets back — **except on a host the
+  catalog narrows to a list of paths.** `chatgpt.com`, `claude.ai` and
+  `www.perplexity.ai` each declare a `capture_path_allowlist`
+  (`SONOMOS_CAPTURE_PATHS` in the same generated file), and on those three
+  hosts a bodied request whose path is not on the list is **not held** — it
+  goes out as the page issued it. That currently includes `claude.ai`'s
+  same-origin attachment upload. The paths, and what the gap means, are in
+  [`HONEST.md`](HONEST.md) ("only a short list of PATHS is screened"); read
+  that before treating this bullet as a coverage claim. It also holds a **cross-origin
   object write initiated by one of those pages** — the pre-signed `PUT` an AI
   web app uses to send an attachment straight to S3 / GCS / Azure Blob, which
   never addresses an AI host and so was previously unscreened. That scope is
