@@ -128,7 +128,7 @@ verdict means no send. The residuals we accept and document:
   | Host | Paths screened — and nothing else on that host |
   | --- | --- |
   | `chatgpt.com` | `/backend-api/conversation`, `/backend-api/f/conversation`, `/backend-anon/conversation`, `/backend-anon/f/conversation`, `/unauth-mweb/conversation/updates` |
-  | `claude.ai` | `/api/organizations/*/chat_conversations/*/completion`, `/api/organizations/*/chat_conversations/*/retry_completion` |
+  | `claude.ai` | `/api/organizations/*/chat_conversations/*/completion`, `/api/organizations/*/chat_conversations/*/retry_completion`, `/api/*/upload`, `/api/organizations/*/convert_document` |
   | `www.perplexity.ai` | `/rest/sse/perplexity_ask` |
 
   The narrowing applies to subdomains too (most specific entry wins), so
@@ -137,10 +137,16 @@ verdict means no send. The residuals we accept and document:
   **The consequence, stated plainly.** On those three hosts a
   same-origin bodied request whose path is not in the list above is
   **not held, not screened, and not blocked** — it goes out exactly as
-  the page issued it. That includes **same-origin attachment uploads**:
-  `claude.ai`'s own `POST /api/<org>/upload` is not in the list, so an
-  attachment a user drags into Claude's web app on `claude.ai` today
-  leaves this machine unscreened. Earlier revisions of this document
+  the page issued it. Until this release that included **same-origin
+  attachment uploads**: `claude.ai`'s own `POST /api/<org>/upload` and
+  `POST /api/organizations/<org>/convert_document` were not in the list,
+  so an attachment a user dragged into Claude's web app on `claude.ai`
+  left this machine unscreened. The 2026-09-08 catalog revision adds
+  both, so they are now held like a completion; `chatgpt.com` and
+  `www.perplexity.ai` attachment paths are still NOT listed (their
+  uploads go to blob storage on unlisted hosts, which the initiator-
+  scoped upload rule below may or may not catch — see the residuals).
+  Earlier revisions of this document
   said flatly that same-origin `multipart/form-data` uploads back to
   the AI host "are captured as they always were", and `README.md` said
   any bodied fetch to an AI web surface is held. Both were written
@@ -162,12 +168,12 @@ verdict means no send. The residuals we accept and document:
   — under each provider's `capture_path_allowlist.hosts`; this repo
   carries a vendored copy at `shared/ai-surfaces.json` and regenerates
   the baked files with `npm run generate`. **Do not hand-edit
-  `content/web-surfaces.generated.js`.** A catalog change adding
-  `claude.ai`'s upload path is **pending and is NOT in this release** —
-  the two paths in the table above are the whole of what `claude.ai`
-  screens today, and the upload gap described here is live in 2.0.2. The
-  exact entries are the catalog's to state; this table is regenerated
-  from the vendored copy when that change lands, and
+  `content/web-surfaces.generated.js`.** The catalog change adding
+  `claude.ai`'s two attachment paths (`/api/*/upload`,
+  `/api/organizations/*/convert_document`) landed in the vendored copy
+  on 2026-09-08 and is what the table above reflects; the four paths in
+  the table are the whole of what `claude.ai` screens. This table is
+  regenerated from the vendored copy whenever the catalog changes, and
   `tests/honest-capture-paths.test.js` fails until it is, because it
   compares the table above with `SONOMOS_CAPTURE_PATHS` at run time. So
   this document cannot silently drift from the code again — in either
