@@ -387,10 +387,13 @@ verdict means no send. The residuals we accept and document:
   that previously always succeeded. Same-origin uploads (a
   `multipart/form-data` POST back to the AI host, which is what
   Claude's web app does) are captured as they always were **only if
-  their path is one the catalog's capture-path allow-list admits** —
-  and on `claude.ai` the upload endpoint is not one of them today. See
-  the capture-path allow-list bullet above, which is the limit that
-  governs here, and the upload-specific refusals two bullets down.
+  their path is one the catalog's capture-path allow-list admits.** On
+  `claude.ai` the two upload endpoints were added by the 2026-09-08
+  catalog revision and are now admitted; on a narrowed host whose upload
+  path is NOT listed — `chatgpt.com` today — a same-origin upload still
+  leaves unscreened. See the capture-path allow-list bullet above, which
+  is the limit that governs here, and the upload-specific refusals two
+  bullets down.
 - **On the upload path, an unexaminable file is blocked rather than
   withheld, and a checksum-committed body is never rewritten.**
   Withholding replaces an attachment the screener could not examine with
