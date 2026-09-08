@@ -1662,6 +1662,17 @@
   // The values are our closed-set reason and kind plus `blockMessage`'s fixed
   // sentence. No body, no header, no URL — the same rule as every console
   // line in this file.
+  // Every own property blockXhr stamps on a refused XHR, named once so the
+  // `open` wrapper can clear exactly these and nothing else. See the reuse note
+  // there for why clearing them is not optional.
+  const BLOCK_PROPS = Object.freeze([
+    'readyState',
+    'sonomosBlocked',
+    'sonomosBlockReason',
+    'sonomosBlockKind',
+    'sonomosBlockMessage'
+  ]);
+
   function blockXhr(xhr, reason, fields) {
     try { xhr.abort(); } catch { /* nothing more we can safely do */ }
     try {
@@ -1707,21 +1718,40 @@
       });
     } catch { /* a frozen or exotic XHR — the events below still stand */ }
 
+    let make = null;
+    let plain = null;
     try {
       if (typeof xhr.dispatchEvent !== 'function') return;
-      const make = typeof ProgressEvent === 'function'
+      make = typeof ProgressEvent === 'function'
         ? (type) => new ProgressEvent(type)
         : typeof Event === 'function' ? (type) => new Event(type) : null;
       if (!make) return;
       // `readystatechange` is a plain Event on a real XHR, never a
-      // ProgressEvent. The order is not cosmetic: a handler reading
-      // `readyState` must find 4 already there (set above), and `error` must
-      // not arrive ahead of the state change that accounts for it.
-      const plain = typeof Event === 'function' ? (type) => new Event(type) : make;
-      xhr.dispatchEvent(plain('readystatechange'));
-      xhr.dispatchEvent(make('error'));
-      xhr.dispatchEvent(make('loadend'));
-    } catch { /* the page's own handler threw, or events are unavailable */ }
+      // ProgressEvent.
+      plain = typeof Event === 'function' ? (type) => new Event(type) : make;
+    } catch { return; /* events are unavailable in this realm */ }
+
+    // ONE TRY PER DISPATCH, and this is load-bearing rather than tidy.
+    //
+    // The three used to share a single try. That was survivable while `error`
+    // came first; it stopped being survivable the moment `readystatechange` was
+    // put in front of it, because a page handler that throws on the FIRST event
+    // then swallowed `error` AND `loadend` — the two events that actually
+    // release a waiting page. A handler that throws is the page's own bug; a
+    // page left hanging because of it is ours, and it is the very hang this
+    // whole sequence exists to prevent.
+    //
+    // The order still matters: a handler reading `readyState` must find 4
+    // already there (set above), and `error` must not arrive ahead of the state
+    // change that accounts for it. Isolating the failures does not reorder
+    // them — every event still fires, in sequence, whatever any handler does.
+    const fire = (factory, type) => {
+      try { xhr.dispatchEvent(factory(type)); }
+      catch { /* the page's own handler threw — the remaining events still fire */ }
+    };
+    fire(plain, 'readystatechange');
+    fire(make, 'error');
+    fire(make, 'loadend');
   }
 
   // Header collection is best-effort: the page may pass headers as a Headers
@@ -2085,6 +2115,27 @@
     const origSend = XHR.prototype.send;
 
     XHR.prototype.open = function (method, url) {
+      // A refused XHR is not necessarily a dead one. `open()` on a used object
+      // is precisely how a page RESTARTS an XHR — jQuery-era wrappers and retry
+      // loops do it routinely — and blockXhr leaves own properties behind: a
+      // non-writable `readyState` of 4 shadowing the prototype accessor, plus
+      // the four `sonomos*` reason fields.
+      //
+      // Reused, that object lies twice. It reports DONE while the real request
+      // sits at OPENED, so a page waiting on `readyState === 4` sees completion
+      // that has not happened and reads the next LEGITIMATE response as empty;
+      // and it still carries our reason for a request we never refused, so a
+      // support engineer reading the object is told about the wrong send.
+      //
+      // Cleared here rather than in blockXhr on purpose: the reason properties
+      // must outlive the events — that is their entire job, since an XHR has no
+      // other channel that survives a dispatch — and `open()` is the exact
+      // moment the object stops describing the refused request and starts
+      // describing a new one. Before origOpen, so nothing observes the stale
+      // pair even briefly.
+      for (const prop of BLOCK_PROPS) {
+        try { delete this[prop]; } catch { /* non-configurable — nothing we can undo */ }
+      }
       try {
         // arguments[2] is the async flag; only `false` means a synchronous XHR,
         // which we can't defer (see send) and therefore fail closed.
