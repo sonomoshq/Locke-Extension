@@ -284,7 +284,7 @@ const pdf = { kind: 'file', media_type: 'application/pdf', reason: 'engine_unsup
 test('allow + unchecked flag: the bytes shipped', () => {
   assert.deepEqual(
     tallyFromReceipt({ decision: 'allow', unchecked: true, unscreened: [pdf] }),
-    { uncheckedSends: 1, withheldItems: 0, redactedItems: 0 }
+    { uncheckedSends: 1, withheldItems: 0, redactedItems: 0, blockedSends: 0 }
   );
 });
 
@@ -293,30 +293,65 @@ test('allow + items but no flag: still shipped — an allow can never be a withh
   // items alone keeps this honest against a bridge too old to send the flag.
   assert.deepEqual(
     tallyFromReceipt({ decision: 'allow', unscreened: [pdf] }),
-    { uncheckedSends: 1, withheldItems: 0, redactedItems: 0 }
+    { uncheckedSends: 1, withheldItems: 0, redactedItems: 0, blockedSends: 0 }
   );
 });
 
 test('redact + unchecked: the fail-open window let it out', () => {
   assert.deepEqual(
     tallyFromReceipt({ decision: 'redact', unchecked: true, unscreened: [pdf] }),
-    { uncheckedSends: 1, withheldItems: 0, redactedItems: 0 }
+    { uncheckedSends: 1, withheldItems: 0, redactedItems: 0, blockedSends: 0 }
   );
 });
 
 test('redact + items without the flag is a WITHHOLD, and must never count as a leak', () => {
   assert.deepEqual(
     tallyFromReceipt({ decision: 'redact', unchecked: false, unscreened: [pdf, pdf] }),
-    { uncheckedSends: 0, withheldItems: 2, redactedItems: 0 }
+    { uncheckedSends: 0, withheldItems: 2, redactedItems: 0, blockedSends: 0 }
   );
 });
 
-test('a clean screen and a block tally nothing', () => {
-  const none = { uncheckedSends: 0, withheldItems: 0, redactedItems: 0 };
+test('a clean screen tallies nothing', () => {
+  const none = { uncheckedSends: 0, withheldItems: 0, redactedItems: 0, blockedSends: 0 };
   assert.deepEqual(tallyFromReceipt({ decision: 'allow', unchecked: false }), none);
   assert.deepEqual(tallyFromReceipt({ decision: 'redact', unchecked: false }), none);
-  assert.deepEqual(tallyFromReceipt({ decision: 'block', reason: 'US SSN detected' }), none);
   assert.deepEqual(tallyFromReceipt(null), none);
+});
+
+// ── blockedSends: the one outcome the user could not see at all ─────
+//
+// This test used to assert a block tallies NOTHING. That was the defect, not
+// the contract: a block is the whole product working, and the only trace of it
+// was a failed request the site renders as its own network error plus a console
+// line nobody has open.
+
+test('a block is counted, and counted as nothing else', () => {
+  assert.deepEqual(
+    tallyFromReceipt({ decision: 'block', reason: 'US SSN detected' }),
+    { uncheckedSends: 0, withheldItems: 0, redactedItems: 0, blockedSends: 1 }
+  );
+});
+
+test('a block with no reason is still a block that happened', () => {
+  // `evidenceFromReceipt` calls this receipt UNCONFIRMED — we cannot say WHY it
+  // was blocked — but the block itself is not in doubt: the app said it refused
+  // and nothing left. "Something was blocked and we cannot tell you why" is
+  // true and worth surfacing; dropping it silently is not.
+  assert.deepEqual(
+    tallyFromReceipt({ decision: 'block' }),
+    { uncheckedSends: 0, withheldItems: 0, redactedItems: 0, blockedSends: 1 }
+  );
+});
+
+test('a block never borrows the other three counts from a malformed receipt', () => {
+  // Nothing left the machine, so there is nothing to have shipped unscreened,
+  // withheld, or redacted — whatever else the receipt claims.
+  assert.deepEqual(
+    tallyFromReceipt({
+      decision: 'block', unchecked: true, unscreened: [pdf, pdf], redactedCount: 7
+    }),
+    { uncheckedSends: 0, withheldItems: 0, redactedItems: 0, blockedSends: 1 }
+  );
 });
 
 // ── redactedItems: the evidence a redacted send actually happened ──
@@ -330,7 +365,7 @@ test('a clean screen and a block tally nothing', () => {
 test('redact with a positive redactedCount and nothing else unusual: the count is surfaced', () => {
   assert.deepEqual(
     tallyFromReceipt({ decision: 'redact', unchecked: false, redactedCount: 3 }),
-    { uncheckedSends: 0, withheldItems: 0, redactedItems: 3 }
+    { uncheckedSends: 0, withheldItems: 0, redactedItems: 3, blockedSends: 0 }
   );
 });
 
@@ -340,7 +375,7 @@ test('a redaction and a withhold in the same receipt are both counted, independe
   // other fired would be the exact defect this file exists to prevent.
   assert.deepEqual(
     tallyFromReceipt({ decision: 'redact', unchecked: false, redactedCount: 2, unscreened: [pdf] }),
-    { uncheckedSends: 0, withheldItems: 1, redactedItems: 2 }
+    { uncheckedSends: 0, withheldItems: 1, redactedItems: 2, blockedSends: 0 }
   );
 });
 
@@ -350,7 +385,7 @@ test('a redaction alongside a fail-open send is still counted as a redaction', (
   // found and removed in the part that could be examined.
   assert.deepEqual(
     tallyFromReceipt({ decision: 'redact', unchecked: true, redactedCount: 1, unscreened: [pdf] }),
-    { uncheckedSends: 1, withheldItems: 0, redactedItems: 1 }
+    { uncheckedSends: 1, withheldItems: 0, redactedItems: 1, blockedSends: 0 }
   );
 });
 
@@ -359,7 +394,7 @@ test('an allow never carries a redaction count, even if the field is malformed',
   // this also guards against a receipt that lies.
   assert.deepEqual(
     tallyFromReceipt({ decision: 'allow', unchecked: false, redactedCount: 5 }),
-    { uncheckedSends: 0, withheldItems: 0, redactedItems: 0 }
+    { uncheckedSends: 0, withheldItems: 0, redactedItems: 0, blockedSends: 0 }
   );
 });
 
@@ -367,7 +402,7 @@ test('a zero, missing, or malformed redactedCount counts as no redaction', () =>
   for (const redactedCount of [0, undefined, null, -1, 'lots', NaN]) {
     assert.deepEqual(
       tallyFromReceipt({ decision: 'redact', unchecked: false, redactedCount }),
-      { uncheckedSends: 0, withheldItems: 0, redactedItems: 0 },
+      { uncheckedSends: 0, withheldItems: 0, redactedItems: 0, blockedSends: 0 },
       String(redactedCount)
     );
   }
@@ -817,7 +852,7 @@ test('both counts appear together, and singular/plural read correctly', () => {
 });
 
 test('nothing to report means no note at all', () => {
-  assert.equal(noteFor({ uncheckedSends: 0, withheldItems: 0, redactedItems: 0 }), null);
+  assert.equal(noteFor({ uncheckedSends: 0, withheldItems: 0, redactedItems: 0, blockedSends: 0 }), null);
   assert.equal(noteFor({}), null);
   assert.equal(noteFor(null), null);
   assert.equal(copyFor(connected({ screening: SCREENING.AVAILABLE })).note, null);
@@ -853,6 +888,48 @@ test('the redaction note appears alongside the fail-open notes when all three ar
 
 test('a zero redaction count reports nothing extra', () => {
   assert.equal(noteFor({ redactedItems: 0 }), null);
+});
+
+// ── the block note: the outcome the user already SAW, unexplained ───
+//
+// Of the four counts this note carries, blocked is the only one whose
+// consequence the user has already experienced: their send failed, and the site
+// rendered our refusal as its own network error. Everything they can see points
+// at the AI provider being broken. The popup is where that gets corrected.
+
+test('a blocked send is surfaced with a count, and says nothing left the machine', () => {
+  const note = noteFor({ blockedSends: 1 });
+  assert.match(note, /1 request was blocked this session before anything left your machine/);
+});
+
+test('the block note pluralizes and reads as protection, not as breakage', () => {
+  const note = noteFor({ blockedSends: 3 });
+  assert.match(note, /3 requests were blocked this session/);
+  // A block is the product working. The wording must not join the user in
+  // reading it as a fault.
+  for (const alarm of ['leak', 'exposed', 'danger', 'warning', 'unsafe', 'error', 'failed', '!']) {
+    assert.ok(!note.toLowerCase().includes(alarm), `note must not say "${alarm}": ${note}`);
+  }
+});
+
+test('the block note leads, and coexists with the other three', () => {
+  const note = noteFor({
+    blockedSends: 2, redactedItems: 3, uncheckedSends: 1, withheldItems: 1
+  });
+  assert.match(note, /^2 requests were blocked/, 'blocked answers the question they opened the popup with');
+  assert.match(note, /3 items of personal information were redacted/);
+  assert.match(note, /1 request went out/);
+  assert.match(note, /1 attachment couldn’t be examined/);
+});
+
+test('a zero blocked count reports nothing extra', () => {
+  assert.equal(noteFor({ blockedSends: 0 }), null);
+});
+
+test('the block note rides copyFor, so the popup actually renders it', () => {
+  // noteFor being right is worth nothing if the assembled copy drops it.
+  const copy = copyFor(connected({ screening: SCREENING.AVAILABLE, blockedSends: 4 }));
+  assert.match(copy.note, /4 requests were blocked this session/);
 });
 
 // ── "we have not heard yet" is not "the app is down" ───────────────

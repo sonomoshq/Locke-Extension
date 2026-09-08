@@ -1,7 +1,7 @@
 // Copyright © 2026 Sonomos, Inc. All rights reserved.
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { DEFAULTS, NATIVE_CALL_TIMEOUT_MS, PRESENCE_INTERVAL_SECONDS, PRESENCE_STALE_MS, PRESENCE_URL, REGISTRATION_MIN_INTERVAL_MS, REGISTRATION_URL } from '../shared/constants.js';
+import { BLOCK_BADGE_MS, DEFAULTS, NATIVE_CALL_TIMEOUT_MS, PRESENCE_INTERVAL_SECONDS, PRESENCE_STALE_MS, PRESENCE_URL, REGISTRATION_MIN_INTERVAL_MS, REGISTRATION_URL } from '../shared/constants.js';
 
 // background/service-worker.js had no test at all, and three of the things in it
 // are boundaries rather than plumbing:
@@ -679,6 +679,7 @@ test('service-worker: a send that shipped unexamined bytes marks the badge too',
   assert.equal(badges.at(-1), '!',
     'unexamined bytes just left this machine — a blank toolbar reads as nothing to report');
 
+
   // ...and it is not sticky. One clean receipt is enough to take it back off:
   // the user's fail-open window is a setting they are entitled to have on, not
   // an offence the toolbar keeps reminding them about.
@@ -689,6 +690,196 @@ test('service-worker: a send that shipped unexamined bytes marks the badge too',
     await flush();
   });
   assert.equal(cleared.at(-1), '');
+});
+
+// -- a block must be visible somewhere other than a console ----------
+//
+// A block was the one outcome with no surface at all: the fetch rejects / the
+// XHR aborts, the site renders that as its own network error, and the only
+// account of what happened was a console line nobody has open. The popup now
+// carries a session count and the badge carries it for BLOCK_BADGE_MS.
+//
+// The existing badge contract is preserved exactly. The count fills the EMPTY
+// badge only; every value that already means something still wins.
+
+const blockReceipt = () => ({
+  type: 'receipt',
+  receipt: { decision: 'block', reason: 'US SSN detected', blockCause: 'policy' }
+});
+
+test('service-worker: a blocked request is counted and shown on the badge', async () => {
+  await resetScreening();
+  nativeHandler = guardIsUp;
+  await deliver({ type: 'requestCheck' }, TRUSTED);
+
+  const badges = await badgesDuring(async () => {
+    nativeHandler = blockReceipt;
+    await deliver(captureMsg, TRUSTED);
+    await flush();
+    await flush();
+  });
+  assert.equal(badges.at(-1), '1', 'the user just saw their send fail; the toolbar must account for it');
+
+  const screening = store.session.screeningState;
+  assert.equal(screening.blockedSends, 1);
+  assert.ok(screening.lastBlockAt > 0, 'and the window the badge reads is stamped');
+
+  // The popup's state carries it too, or the count exists and nobody can read it.
+  nativeHandler = guardIsUp;
+  const { state } = await deliver({ type: 'requestCheck' }, TRUSTED);
+  assert.equal(state.blockedSends, 1);
+});
+
+test('service-worker: the blocked count accumulates across a session', async () => {
+  await resetScreening();
+  nativeHandler = guardIsUp;
+  await deliver({ type: 'requestCheck' }, TRUSTED);
+
+  const badges = await badgesDuring(async () => {
+    nativeHandler = blockReceipt;
+    for (let i = 0; i < 3; i++) {
+      await deliver(captureMsg, TRUSTED);
+      await flush();
+      await flush();
+    }
+  });
+  assert.deepEqual(badges.slice(-1), ['3']);
+  assert.equal(store.session.screeningState.blockedSends, 3);
+});
+
+test('service-worker: a policy block does not mark the badge as a problem', async () => {
+  // The distinction the whole feature rests on. An outage or a fail-open send
+  // wears '!' because something is wrong. A block is enforcement working, so it
+  // must not borrow the attention mark -- and it must not leave the screening
+  // row claiming a problem either.
+  await resetScreening();
+  nativeHandler = guardIsUp;
+  await deliver({ type: 'requestCheck' }, TRUSTED);
+
+  const badges = await badgesDuring(async () => {
+    nativeHandler = blockReceipt;
+    await deliver(captureMsg, TRUSTED);
+    await flush();
+    await flush();
+  });
+  assert.notEqual(badges.at(-1), '!');
+
+  nativeHandler = guardIsUp;
+  const { state } = await deliver({ type: 'requestCheck' }, TRUSTED);
+  assert.equal(state.screening, 'available',
+    'a policy block is first-hand proof the screener answered');
+  assert.equal(state.lastCaptureFailure, null, 'and it is not a capture failure');
+});
+
+test('service-worker: the block count never overwrites a badge that already means something', async () => {
+  // '!' (screening down) and 'off' (no connection) are claims about the browser
+  // being unable to protect the user. A count of past blocks must not displace
+  // either -- the count is scoped to the otherwise-clean badge.
+  await resetScreening();
+  nativeHandler = blockReceipt;
+  await deliver(captureMsg, TRUSTED);
+  await flush();
+  await flush();
+  assert.equal(store.session.screeningState.blockedSends, 1);
+
+  const down = await badgesDuring(async () => {
+    nativeHandler = () => ({ type: 'status', connected: true, screening: 'unavailable' });
+    await deliver({ type: 'requestCheck' }, TRUSTED);
+  });
+  assert.equal(down.at(-1), '!', 'screening being down outranks a count of blocks');
+
+  const offline = await badgesDuring(async () => {
+    nativeHandler = () => { throw new Error('Native host has exited.'); };
+    await deliver({ type: 'requestCheck' }, TRUSTED);
+  });
+  assert.equal(offline.at(-1), '!', 'and so does having no bridge at all');
+});
+
+test('service-worker: the block badge is a window, not a sticky number', async () => {
+  // Derived from `lastBlockAt`, never from a timer: the MV3 worker is evicted
+  // constantly and a pending setTimeout dies with it. Age the stamp past
+  // BLOCK_BADGE_MS and the very next badge write of any kind must find the
+  // window closed -- which is what makes an evicted worker unable to leave a
+  // stale count on the toolbar.
+  await resetScreening();
+  nativeHandler = blockReceipt;
+  await deliver(captureMsg, TRUSTED);
+  await flush();
+  await flush();
+
+  const fresh = await badgesDuring(async () => {
+    nativeHandler = guardIsUp;
+    await deliver({ type: 'requestCheck' }, TRUSTED);
+  });
+  assert.equal(fresh.at(-1), '1', 'inside the window');
+
+  store.session.screeningState = {
+    ...store.session.screeningState,
+    lastBlockAt: Date.now() - BLOCK_BADGE_MS - 1
+  };
+  const stale = await badgesDuring(async () => {
+    nativeHandler = guardIsUp;
+    await deliver({ type: 'requestCheck' }, TRUSTED);
+  });
+  assert.equal(stale.at(-1), '', 'and empty again once it closes -- the healthy-badge contract');
+
+  // The count itself survives; only its time on the toolbar expires. The popup
+  // still reports it for the whole session.
+  assert.equal(store.session.screeningState.blockedSends, 1);
+});
+
+test('service-worker: a clock that moved backwards closes the window rather than pinning it open', async () => {
+  await resetScreening();
+  nativeHandler = blockReceipt;
+  await deliver(captureMsg, TRUSTED);
+  await flush();
+  await flush();
+
+  store.session.screeningState = {
+    ...store.session.screeningState,
+    lastBlockAt: Date.now() + 60_000
+  };
+  const badges = await badgesDuring(async () => {
+    nativeHandler = guardIsUp;
+    await deliver({ type: 'requestCheck' }, TRUSTED);
+  });
+  assert.equal(badges.at(-1), '');
+});
+
+test('service-worker: a blocked-request count past 99 is clamped, not truncated', async () => {
+  await resetScreening();
+  nativeHandler = blockReceipt;
+  await deliver(captureMsg, TRUSTED);
+  await flush();
+  await flush();
+
+  store.session.screeningState = {
+    ...store.session.screeningState,
+    blockedSends: 250,
+    lastBlockAt: Date.now()
+  };
+  const badges = await badgesDuring(async () => {
+    nativeHandler = guardIsUp;
+    await deliver({ type: 'requestCheck' }, TRUSTED);
+  });
+  assert.equal(badges.at(-1), '99+', 'three characters is about all a badge renders legibly');
+});
+
+test('service-worker: a failed capture with no receipt is not counted as a block', async () => {
+  // The line the whole count depends on. A request blocked because the chain
+  // was broken is an OUTAGE, it has its own surface (`lastCaptureFailure`), and
+  // pooling it here would let downtime read to the user as protection.
+  await resetScreening();
+  nativeHandler = guardIsUp;
+  await deliver({ type: 'requestCheck' }, TRUSTED);
+
+  nativeHandler = () => ({ type: 'error', code: 'bridge-unreachable', message: 'unreachable' });
+  await deliver(captureMsg, TRUSTED);
+  await flush();
+  await flush();
+
+  assert.equal(store.session.screeningState.blockedSends ?? 0, 0);
+  assert.equal(store.session.screeningState.lastBlockAt ?? null, null);
 });
 
 // The state UNCONFIRMED was named for keeps its blank badge. "We cannot tell

@@ -404,6 +404,28 @@ export const SCREENING_EVIDENCE_TTL_MS = 10 * 60 * 1000;
 // bounds the same evidence for every other purpose.
 export const SCREENING_CONTRADICTION_WINDOW_MS = 60 * 1000;
 
+// How long the toolbar badge shows the session's blocked count after a block.
+//
+// A block was previously invisible outside a console: the page renders our
+// refusal as its own network error, and the popup has to be opened to learn
+// anything. The badge is the one surface a user sees without asking, so it
+// carries the count — briefly.
+//
+// Briefly, because the badge's standing contract is "empty when healthy", and a
+// block IS the healthy path: enforcement working. A number parked there
+// permanently would read as an unresolved problem and would train the user to
+// ignore the badge, which is the state every other badge value depends on not
+// being in.
+//
+// Ten seconds: long enough to be seen by someone whose send just failed and who
+// is looking at the page, short enough that it is gone before it becomes
+// scenery. Applied as a WINDOW measured from the last block, never as a timer:
+// the MV3 worker can be evicted at any moment, and a pending setTimeout dies
+// with it. Deriving the badge from a timestamp means an evicted worker cannot
+// leave a stale count on the toolbar — the next badge write of any kind, from
+// any wake, computes the window afresh and finds it closed.
+export const BLOCK_BADGE_MS = 10 * 1000;
+
 export const MSG = Object.freeze({
   REQUEST_CHECK: 'requestCheck',
   STATE_UPDATE: 'stateUpdate',

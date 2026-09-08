@@ -297,7 +297,22 @@ export function noteFor(state) {
   const redacted = Number(state?.redactedItems) || 0;
   const unchecked = Number(state?.uncheckedSends) || 0;
   const withheld = Number(state?.withheldItems) || 0;
+  const blocked = Number(state?.blockedSends) || 0;
   const parts = [];
+  // Blocked leads. It is the only one of the four the user has already SEEN the
+  // consequence of — their send failed, and the site rendered our refusal as its
+  // own network error — so it is the clause that answers the question they
+  // opened the popup with. The other three describe sends that appeared to work.
+  //
+  // "Blocked" here means the desktop app decided to block, never "the chain was
+  // broken so we failed closed". The second is an outage, it has its own
+  // sentence in `detailFor` via `lastCaptureFailure`, and counting it in this
+  // total would let an outage read as protection.
+  if (blocked > 0) {
+    parts.push(
+      `${plural(blocked, 'request', 'requests')} ${wasWere(blocked)} blocked this session before anything left your machine.`
+    );
+  }
   if (redacted > 0) {
     parts.push(
       `${plural(redacted, 'item', 'items')} of personal information ${wasWere(redacted)} redacted from what you sent this session.`

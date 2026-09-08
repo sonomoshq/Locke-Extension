@@ -303,9 +303,32 @@ export function evidenceFromRelayFailure(code, now = Date.now()) {
 // number was going uncollected even though every receipt already carried it.
 // `allow` never carries a positive count: an `allow` always sends
 // `redactedCount: 0`, because nothing was rewritten.
+//
+// `blockedSends` is the fourth independent fact, and the last one the user had
+// no way to see. `[added 2026-09-08]` A block was visible only as a failed
+// request on the page — which the site renders as its own network error — and
+// as a console line nobody has open. The number was already on every receipt;
+// like `redactedCount` before it, it simply was not collected.
+//
+// SCOPE, stated precisely, because "blocked" is ambiguous here in a way that
+// matters. This counts blocks the desktop app DECIDED: a receipt that came back
+// saying `decision: 'block'`. It does NOT count a request blocked because the
+// chain was broken — no verdict, a relay failure, a timeout. Those are
+// fail-closed refusals with no receipt at all, they are an OUTAGE rather than a
+// policy outcome, and they already have their own machinery
+// (`evidenceFromRelayFailure` → `captureFailureToName`) which NAMES the failure
+// instead of counting it. Rolling the two together would let an outage inflate
+// a number the user reads as "Locke protected me N times".
+//
+// A `block` whose `reason` is missing is still counted. `evidenceFromReceipt`
+// correctly calls that receipt UNCONFIRMED — we cannot say WHY it was blocked —
+// but the block itself is not in doubt: the app said it refused, and nothing
+// left. "Something was blocked and we cannot tell you why" is a true statement
+// worth surfacing; silently dropping it is not.
 export function tallyFromReceipt(receipt) {
-  const none = { uncheckedSends: 0, withheldItems: 0, redactedItems: 0 };
+  const none = { uncheckedSends: 0, withheldItems: 0, redactedItems: 0, blockedSends: 0 };
   if (!receipt || typeof receipt !== 'object') return none;
+  if (receipt.decision === 'block') return { ...none, blockedSends: 1 };
   const items = Array.isArray(receipt.unscreened) ? receipt.unscreened.length : 0;
   const sentUnscreened = shippedUnscreened(receipt);
   const redactedItems = Number.isInteger(receipt.redactedCount) && receipt.redactedCount > 0
@@ -314,11 +337,11 @@ export function tallyFromReceipt(receipt) {
   if (receipt.decision === 'allow') {
     // `allow` never carries a positive redacted count (see above), so it is
     // not passed on here even when a malformed receipt claims one.
-    return sentUnscreened ? { uncheckedSends: 1, withheldItems: 0, redactedItems: 0 } : none;
+    return sentUnscreened ? { ...none, uncheckedSends: 1 } : none;
   }
   if (receipt.decision === 'redact') {
-    if (sentUnscreened) return { uncheckedSends: 1, withheldItems: 0, redactedItems };
-    return { uncheckedSends: 0, withheldItems: items, redactedItems };
+    if (sentUnscreened) return { ...none, uncheckedSends: 1, redactedItems };
+    return { ...none, withheldItems: items, redactedItems };
   }
   return none;
 }
