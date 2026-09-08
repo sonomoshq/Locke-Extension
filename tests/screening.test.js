@@ -332,15 +332,43 @@ test('a block is counted, and counted as nothing else', () => {
   );
 });
 
-test('a block with no reason is still a block that happened', () => {
-  // `evidenceFromReceipt` calls this receipt UNCONFIRMED — we cannot say WHY it
-  // was blocked — but the block itself is not in doubt: the app said it refused
-  // and nothing left. "Something was blocked and we cannot tell you why" is
-  // true and worth surfacing; dropping it silently is not.
-  assert.deepEqual(
-    tallyFromReceipt({ decision: 'block' }),
-    { uncheckedSends: 0, withheldItems: 0, redactedItems: 0, blockedSends: 1 }
-  );
+test('a block with NO reason is not counted — it is a wire fault, not a decision', () => {
+  // The subtlest line in tallyFromReceipt. The host defaults a HALF-PARSED
+  // receipt to `block` (fail-closed, correctly), so a truncated frame arrives
+  // looking exactly like a policy refusal. Counting it would put "N requests
+  // were blocked before anything left your machine" — a sentence about
+  // protection — directly beside lastCaptureFailure 'verdict-unreadable', a
+  // sentence about a broken wire. A wire fault must never inflate the
+  // protection count.
+  const none = { uncheckedSends: 0, withheldItems: 0, redactedItems: 0, blockedSends: 0 };
+  for (const receipt of [
+    { decision: 'block' },
+    { decision: 'block', reason: '' },
+    { decision: 'block', reason: null },
+    { decision: 'block', reason: 42 },
+    { decision: 'block', blockCause: 'policy' }
+  ]) {
+    assert.deepEqual(tallyFromReceipt(receipt), none, JSON.stringify(receipt));
+  }
+});
+
+test('the reasonless block the tally drops is the one evidence calls unreadable', () => {
+  // The two must agree about the same receipt, or the popup contradicts itself.
+  // This is the pairing that makes dropping it correct rather than lossy: the
+  // event is not discarded, it is reported by the machinery that can describe
+  // it honestly.
+  const receipt = { decision: 'block' };
+  assert.equal(tallyFromReceipt(receipt).blockedSends, 0, 'not counted as protection');
+  const evidence = evidenceFromReceipt(receipt, NOW);
+  assert.equal(evidence.code, 'verdict-unreadable', 'named as a capture failure instead');
+  assert.equal(evidence.state, SCREENING.UNCONFIRMED);
+});
+
+test('a real policy block is counted, and its evidence agrees', () => {
+  const receipt = { decision: 'block', reason: 'US SSN detected' };
+  assert.equal(tallyFromReceipt(receipt).blockedSends, 1);
+  assert.equal(evidenceFromReceipt(receipt, NOW).state, SCREENING.AVAILABLE,
+    'a reasoned block is first-hand proof the screener answered');
 });
 
 test('a block never borrows the other three counts from a malformed receipt', () => {
@@ -348,7 +376,8 @@ test('a block never borrows the other three counts from a malformed receipt', ()
   // withheld, or redacted — whatever else the receipt claims.
   assert.deepEqual(
     tallyFromReceipt({
-      decision: 'block', unchecked: true, unscreened: [pdf, pdf], redactedCount: 7
+      decision: 'block', reason: 'US SSN detected',
+      unchecked: true, unscreened: [pdf, pdf], redactedCount: 7
     }),
     { uncheckedSends: 0, withheldItems: 0, redactedItems: 0, blockedSends: 1 }
   );
