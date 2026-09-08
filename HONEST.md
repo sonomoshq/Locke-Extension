@@ -81,6 +81,74 @@ verdict means no send. The residuals we accept and document:
   silently. There is no "send unmasked / cancel" prompt in the
   extension; fail-open is a per-user toggle the desktop app applies,
   not something the extension decides.
+- **On three hosts, only a short list of PATHS is screened; every other
+  bodied request on those hosts leaves unscreened — attachment uploads
+  included.** `[added 2026-09-08]` This is the biggest single gap between
+  what the rest of this repo reads like and what the extension does, and
+  it went undocumented here from the day the mechanism landed.
+
+  A host in the catalog's `web_hosts` is *injected* wholesale, and the
+  shim used to hold every bodied request on it. That is only survivable
+  where the whole hostname carries prompts, and `chatgpt.com` and
+  `claude.ai` do not: each serves sign-in, billing, telemetry and
+  sentinel proof-of-work on the same name as chat. Holding those hands a
+  field-agnostic redactor traffic it must not touch, and an item that
+  cannot be screened becomes a **block** — which reads to the user as
+  "ChatGPT is down". So the catalog gained a per-host
+  `capture_path_allowlist`, the generator bakes it into
+  `content/web-surfaces.generated.js` as `SONOMOS_CAPTURE_PATHS`, and
+  `content/shim.js` (`isScreenedPath` / `isScreenedUrl`) composes the
+  decision as `allowlistAdmits(host, path) && !skipPathSegments(path)`.
+
+  A host with **no** entry is unchanged: every bodied request on it is
+  still held. A host **with** an entry is narrowed to exactly the paths
+  listed, matched segment-by-segment with `*` as a single-segment
+  wildcard (no prefix matching, no trailing-slash tolerance). As of this
+  release three hosts are narrowed:
+
+  | Host | Paths screened — and nothing else on that host |
+  | --- | --- |
+  | `chatgpt.com` | `/backend-api/conversation`, `/backend-api/f/conversation`, `/backend-anon/conversation`, `/backend-anon/f/conversation`, `/unauth-mweb/conversation/updates` |
+  | `claude.ai` | `/api/organizations/*/chat_conversations/*/completion`, `/api/organizations/*/chat_conversations/*/retry_completion` |
+  | `www.perplexity.ai` | `/rest/sse/perplexity_ask` |
+
+  The narrowing applies to subdomains too (most specific entry wins), so
+  it cannot be dodged by addressing a subdomain of a narrowed host.
+
+  **The consequence, stated plainly.** On those three hosts a
+  same-origin bodied request whose path is not in the list above is
+  **not held, not screened, and not blocked** — it goes out exactly as
+  the page issued it. That includes **same-origin attachment uploads**:
+  `claude.ai`'s own `POST /api/<org>/upload` is not in the list, so an
+  attachment a user drags into Claude's web app on `claude.ai` today
+  leaves this machine unscreened. Earlier revisions of this document
+  said flatly that same-origin `multipart/form-data` uploads back to
+  the AI host "are captured as they always were", and `README.md` said
+  any bodied fetch to an AI web surface is held. Both were written
+  before the allow-list existed and neither was corrected when it
+  landed; both are corrected as of 2026-09-08.
+
+  Note what the gap is *not*: it is not a fail-open in the enforcement
+  path. Nothing here weakens "no verdict, no send" — a request the
+  allow-list declines is never held in the first place, so there is no
+  verdict to miss. It is a **coverage** gap, and coverage gaps are
+  invisible in exactly the way this bullet exists to prevent: a declined
+  path never leaves the browser's own logs either, so from any file log
+  an operator can read, "we deliberately did not screen this" and "this
+  was never our host" are the same silence. The shim emits a
+  `path-not-screened` `console.debug` line for precisely that reason.
+
+  **Where paths are added.** Not here. The list lives in the shared
+  surface catalog — `ai-surfaces.json` in Service-Mesh's `sonomos-vocab`
+  — under each provider's `capture_path_allowlist.hosts`; this repo
+  carries a vendored copy at `shared/ai-surfaces.json` and regenerates
+  the baked files with `npm run generate`. **Do not hand-edit
+  `content/web-surfaces.generated.js`.** A catalog update in this
+  release adds `claude.ai`'s upload path; the exact entries are the
+  catalog's to state, and this table is regenerated from the vendored
+  copy when that lands. `tests/honest-capture-paths.test.js` fails if
+  the table above and `SONOMOS_CAPTURE_PATHS` ever disagree, so this
+  document cannot silently drift from the code again.
 - **A surface the user switched off in the desktop app is not
   screened, and that is the point.** The desktop app writes
   `~/.sonomos/surfaces.local.json`; the native host reads its
@@ -288,8 +356,11 @@ verdict means no send. The residuals we accept and document:
   **blocked**, not sent unscreened — an availability change on a path
   that previously always succeeded. Same-origin uploads (a
   `multipart/form-data` POST back to the AI host, which is what
-  Claude's web app does) are captured as they always were. See the
-  upload-specific refusals two bullets down.
+  Claude's web app does) are captured as they always were **only if
+  their path is one the catalog's capture-path allow-list admits** —
+  and on `claude.ai` the upload endpoint is not one of them today. See
+  the capture-path allow-list bullet above, which is the limit that
+  governs here, and the upload-specific refusals two bullets down.
 - **On the upload path, an unexaminable file is blocked rather than
   withheld, and a checksum-committed body is never rewritten.**
   Withholding replaces an attachment the screener could not examine with
