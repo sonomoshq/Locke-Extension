@@ -10,7 +10,7 @@ If a limitation is missing from this list, that's a documentation
 bug — file an issue. We don't want there to be daylight between what
 we know and what we say.
 
-**Last updated:** 2026-08-18. Reviewed every release pass.
+**Last updated:** 2026-09-08. Reviewed every release pass.
 
 ---
 
@@ -31,12 +31,31 @@ we know and what we say.
   with safe-harbour and rules of engagement, but paid submissions
   are not yet accepted. Currently kudos + acknowledgement only on
   [`docs/security/DISCLOSURE-LOG.md`](docs/security/DISCLOSURE-LOG.md).
-- **It is not listed on the Chrome Web Store, Edge Add-ons, or
-  Mozilla AMO.** Maintainer-deferred until the product is more
-  built out. Today's deployment path is force-install via managed
-  policy + signed self-hosted artifact (see
-  [`docs/enterprise/DEPLOYMENT.md`](docs/enterprise/DEPLOYMENT.md)).
-  Most large enterprise IT teams treat sideload-only as a friction
+- **Store-listing status is not evidenced in this repository, and this
+  document no longer asserts it in either direction.**
+  `[corrected 2026-09-08]` — this used to say flatly that the extension
+  "is not listed on the Chrome Web Store, Edge Add-ons, or Mozilla AMO",
+  maintainer-deferred until the product was more built out. That
+  absolute is not a claim this repo can support: publishing is a manual
+  `workflow_dispatch` of `release.yml` driven by credentials held
+  deliberately outside the tree (`~/.config/sonomos/release.env` —
+  `scripts/lib/creds.mjs`), and **no store item ID or listing URL is
+  recorded anywhere here.** `docs/enterprise/DEPLOYMENT.md` carries URL
+  templates with `<EXTENSION_ID>` placeholders,
+  `docs/store/CREDENTIALS.md` carries dummy IDs,
+  `docs/store/LISTING.md` calls its AMO slug "suggested", and
+  `docs/enterprise/templates/firefox-policies.json` still says in its own
+  comment that the AMO install URL "does not resolve today". A reader
+  must therefore take neither the old sentence nor its absence as
+  evidence of what is or is not live. **This is an open documentation
+  bug** by this file's own standard: whoever holds the store consoles
+  needs to land the real item IDs and listing URLs here and in
+  `firefox-policies.json`. Until they do, this is the honest answer
+  rather than the useful one. **True regardless of listing status:** the
+  deployment path this repo documents end to end is force-install via
+  managed policy + signed self-hosted artifact (see
+  [`docs/enterprise/DEPLOYMENT.md`](docs/enterprise/DEPLOYMENT.md)), and
+  most large enterprise IT teams treat sideload-only as a friction
   point.
 - **It is not OSI-licensed in the public repo.** `LICENSE-MIT` and
   `LICENSE-APACHE` were deliberately removed; `TODO.md` flags the
@@ -303,7 +322,8 @@ verdict means no send. The residuals we accept and document:
   opaque by construction. In a *sandboxed* frame at a catalog URL the
   same call read the real origin, matched the frame's opaque document
   origin against it, and silently dropped the message: the request hung
-  for the full 45 s enforce ceiling and was then refused as
+  for the full enforce ceiling (45 s when this bug existed; 200 s
+  today) and was then refused as
   `verdict-timeout`, blaming a desktop app that had never been asked.
   Both posts now name no origin at all, which is the only spelling that
   works in every frame and gives nothing away — the message never leaves
@@ -675,21 +695,33 @@ verdict means no send. The residuals we accept and document:
   set.** Anecdotal observation only — and because the shim holds
   in-scope requests for the verdict round-trip, slow screening shows up as
   AI-site latency or blocked requests, not as silent pass-through. The
-  binding deadline in practice is the native host's **25 s**
-  (`CAPTURE_DEADLINE`), chosen to answer inside the browser's own 30 s
-  service-worker idle window so the user gets our reason rather than a
-  generic failure; the shim's 45 s ceiling is now the last resort
-  behind it. Both are informed by one machine's observations of real
-  screening times, not by a benchmark: on slower
-  hardware, or under heavy concurrency, they may still be too low.
-  `enforceTimeoutMs` raises the shim's without a rebuild; the host's
-  needs one.
+  binding deadline in practice is the native host's **180 s**
+  (`CAPTURE_DEADLINE`, Extension-Bridge `src/messages.rs`) so the user
+  gets our reason rather than a generic failure; the service worker's
+  **190 s** (`NATIVE_CALL_TIMEOUT_MS`) sits above it so the worker owns
+  the specific `native-timeout` diagnosis, and the shim's **200 s**
+  ceiling (`DEFAULT_ENFORCE_TIMEOUT_MS`) is the last resort behind both.
+  All three are informed by one machine's observations of real screening
+  times, not by a benchmark: on slower hardware, or under heavy
+  concurrency, they may still be too low. `enforceTimeoutMs` raises the
+  shim's without a rebuild; the other two need one.
+  `[updated 2026-09-08]` — the whole chain was raised on 2026-09-07
+  (host 25 s → 180 s, worker 30 s → 190 s, shim 45 s → 200 s) so one
+  cold pass over a long conversation can finish. This document went on
+  quoting the old numbers until now.
 - **The browser-side limit the host's deadline is set against is
   documented, not measured here.** Chrome's 30 s service-worker idle
-  rule is from its published lifecycle docs; whether a pending
-  `sendNativeMessage` resets that timer has not been checked on a real
-  browser on this machine. 25 s is correct under either reading, but
-  the margin is reasoned rather than observed.
+  rule is from its published lifecycle docs, and the chain no longer
+  fits inside it: at 180/190/200 s every hop depends on a pending
+  `sendNativeMessage` keeping the worker alive past that idle window
+  (Chrome's ~5 min hard cap for a worker held open by a pending call is
+  the limit actually being relied on). **Whether a pending
+  `sendNativeMessage` resets the idle timer has still not been checked
+  on a real browser on this machine.** At 25 s the answer did not
+  matter, which is why the old margin was safe while merely reasoned;
+  at 190 s it does. This is the one number in the chain whose premise is
+  unverified, and a wrong reading shows up as a worker evicted
+  mid-screen — which fails closed (a blocked request), not open.
 
 ## Browser-coverage gaps
 

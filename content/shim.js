@@ -695,12 +695,17 @@
   // closed. Whatever sits here is what a user experiences as "Sonomos gave up",
   // and a give-up is a BLOCK.
   //
-  // 45 s, matching the Locke desktop app's own verdict ceiling, so the two
-  // surfaces agree on when a screen counts as hung. This is a RESTORATION, not
-  // a new number: the shim carried a 45 s enforce timeout with exactly this
-  // reasoning (align with the desktop ceiling so a slow-but-valid scan isn't
-  // false-blocked) until the v3 raw-relay rewrite silently dropped it to 5 s
-  // with no rationale recorded.
+  // HOW THIS NUMBER GOT HERE, because it moved three times and each move is
+  // the reason the next one was needed. It began at 45 s, chosen to match the
+  // Locke desktop app's own verdict ceiling so the two surfaces agreed on when
+  // a screen counts as hung. The v3 raw-relay rewrite silently dropped it to
+  // 5 s with no rationale recorded; 45 s was restored. On 2026-09-07 the whole
+  // chain was raised and this became 200 s — see the value below.
+  //
+  // The reasoning never changed, only what it is set against: this is still
+  // "sit behind the deadline below you so the specific diagnosis fires first",
+  // and the deadline below is now the native host's 180 s CAPTURE_DEADLINE and
+  // the worker's 190 s NATIVE_CALL_TIMEOUT_MS, not the desktop app's old 45 s.
   //
   // 5 s was under the floor, not near it: a single large, agent-shaped request
   // can take several seconds to screen, and concurrency makes it worse. So a
