@@ -116,7 +116,7 @@ import {
 // Relay failures that PROVE nothing was screened. Deliberately short: only
 // the two codes that mean "the hop below the browser reached far enough to
 // establish that no verdict could be produced".
-const RELAY_FAILURES_PROVING_NO_SCREEN = Object.freeze([
+export const RELAY_FAILURES_PROVING_NO_SCREEN = Object.freeze([
   'bridge-unreachable', // the host could not reach the desktop app
   'screening-timeout'   // the host's own deadline expired with no verdict
 ]);
@@ -139,14 +139,40 @@ const RELAY_FAILURES_PROVING_NO_SCREEN = Object.freeze([
 // shim says so to the user (`kind=too-large`, "NOT a sensitive-data block"),
 // and downgrading the popup for it would manufacture a doubt the page did not
 // raise. It yields no evidence either way rather than a guess.
-const RELAY_FAILURES_PROVING_NO_VERDICT = Object.freeze([
+// `[added 2026-09-08]` `host-panic` and `bridge-protocol-mismatch` are the two
+// newest codes the native host emits, and until now neither was in EITHER list.
+// A code absent from both makes `evidenceFromRelayFailure` return null — no
+// evidence — which leaves the last good receipt standing. So a browser whose
+// every capture was crashing the host went on reading "Active", indefinitely,
+// off a receipt from before the crash. That is precisely the failure the
+// paragraph above describes this list as having been created to fix, recurring
+// through codes added after it.
+//
+// Both belong HERE rather than in PROVING_NO_SCREEN, and the distinction is not
+// pedantic. Neither says anything about the screener:
+//
+//   `host-panic`               — a handler in OUR OWN native-messaging host
+//     panicked. The desktop app may be perfectly healthy; we crashed before we
+//     could ask it. Claiming screening is UNAVAILABLE would blame the screener
+//     for our bug, and the popup would tell the user to go restart something
+//     that was working.
+//   `bridge-protocol-mismatch` — Extension-Bridge answered a wire-version
+//     mismatch, which the host surfaces under this code. A skew between
+//     installed components. The screener behind it is not implicated either.
+//
+// What both DO prove is that this request got no verdict and was blocked, which
+// is exactly what UNCONFIRMED means and is enough to stop the popup claiming a
+// screen it cannot see happening.
+export const RELAY_FAILURES_PROVING_NO_VERDICT = Object.freeze([
   'no-bridge',               // the native host is not registered at all
   'bridge-empty',            // the host answered with nothing we can read
   'bridge-unknown-response', // ...or with a frame type this build doesn't know
   'bridge-error',            // native messaging itself failed
   'capture-error',           // the worker threw relaying it
   'bad-request',             // the host rejected our frame as malformed
-  'native-timeout'           // the host neither answered nor exited in time
+  'native-timeout',          // the host neither answered nor exited in time
+  'host-panic',              // a handler in the native host panicked
+  'bridge-protocol-mismatch' // Extension-Bridge and the host disagree on the wire version
 ]);
 
 // Did this receipt's request go out WITHOUT a complete screen?

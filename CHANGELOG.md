@@ -31,6 +31,12 @@ requests are still to loopback, the Firefox data-collection declaration is still
   covered AI host is held. On the three hosts the catalog narrows by path, it is
   not. Both documents now say which paths are screened and what that leaves
   unscreened; a test fails if either drifts from the generated file again.
+- Three native-host failure codes (`host-panic`, `bridge-protocol-mismatch`,
+  `native-timeout`) told the user "the Locke desktop app could not be reached.
+  Start it." Nothing was unreachable in any of them. Each now says what actually
+  happened, and the first two no longer leave the popup reading "Active" off a
+  receipt from before the failure.
+
 **Added**
 - `claude.ai` attachment uploads (`/api/*/upload`,
   `/api/organizations/*/convert_document`) are now held and screened.
@@ -50,6 +56,32 @@ requests are still to loopback, the Firefox data-collection declaration is still
   recovers rather than staying stuck after a failed round trip.
 
 <!-- store-notes-end -->
+
+### Fixed — codes that landed with no entry in either table
+
+`host-panic` and `bridge-protocol-mismatch` are recent additions to the native
+host's wire vocabulary. Neither was in `RELAY_FAILURES_PROVING_NO_SCREEN` nor
+`RELAY_FAILURES_PROVING_NO_VERDICT`, so `evidenceFromRelayFailure` returned
+`null` — no evidence — and the popup's last good receipt kept speaking for every
+failure after it. A browser panicking the host on every capture read Active
+indefinitely. Both are now PROVING_NO_VERDICT (UNCONFIRMED): the send was
+blocked and no verdict was produced, but neither code implicates the screener,
+so UNAVAILABLE would send the user to restart the one component that was working.
+
+Neither was in the shim's `RELAY_BLOCK_REASON` either, so both inherited
+`native-call-failed`'s "could not be reached. Start it". They now have their own
+reasons — `connector-crashed` and `bridge-version-mismatch` — whose copy says the
+request was blocked because Locke's own helper failed, that nothing was sent,
+that it is not a sensitive-data block, and asks for a report with the wire code
+interpolated.
+
+A drift pin added with them (`tests/shim.test.js`) asserts every code either
+relay-failure list keeps evidence for has a `RELAY_BLOCK_REASON` entry and a
+`BLOCK_KIND` sentence, or is a documented intentional fallback. It immediately
+found a third: `native-timeout` was falling through too, telling users to start
+a host the browser had already started and which was merely hung. It now maps to
+`connector-no-answer`, kept distinct from the shim's own `verdict-timeout` so a
+support log can tell which hop gave up.
 
 - A provider label supplied by the page is validated against the trusted
   catalog copy before a capture is relayed, so a hostile page cannot mislabel

@@ -5,6 +5,10 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
 import { DEFAULTS } from '../shared/constants.js';
+import {
+  RELAY_FAILURES_PROVING_NO_SCREEN,
+  RELAY_FAILURES_PROVING_NO_VERDICT
+} from '../shared/screening.js';
 
 // content/shim.js is a MAIN-world classic script (no exports), so we test it
 // the way the browser runs it: evaluate the real source inside a vm context
@@ -1635,6 +1639,110 @@ test('a handler that throws on every event does not stop the sequence', async ()
   assert.equal(xhr.readyState, 4);
 });
 
+
+// ── the two host codes whose copy blamed the wrong thing ────────────
+//
+// `host-panic` and `bridge-protocol-mismatch` had no RELAY_BLOCK_REASON entry,
+// so both fell to `native-call-failed`, whose sentence is "the Locke desktop app
+// could not be reached. Start it, then try again."
+//
+// In both cases the app WAS reached. `host-panic` means our own
+// native-messaging host ran and then crashed; `bridge-protocol-mismatch` means
+// Extension-Bridge and the host disagree about the wire version. Telling the
+// user to start an app that is very likely already running is the same
+// wrong-advice defect `bridge-unreachable`, `receipt-too-large` and the rest
+// were pulled out of that bucket to fix — arriving again through codes added
+// after the table was written.
+
+async function blockedByRelayCode(code, message = '') {
+  const { sandbox } = makeXhrWorld(() => ({ ok: false, code, message }));
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"hi"}');
+  await waitFor(() => xhr.sonomosBlocked === true);
+  return xhr;
+}
+
+test('a host panic does not tell the user to start an app that already ran', async () => {
+  const xhr = await blockedByRelayCode('host-panic', 'handler panicked');
+  assert.equal(xhr.sonomosBlockReason, 'connector-crashed');
+  assert.equal(xhr.sonomosBlockKind, 'unavailable');
+  const msg = xhr.sonomosBlockMessage;
+
+  // The defect, stated as an assertion. This is the sentence it used to get.
+  assert.doesNotMatch(
+    msg, /could not be reached/,
+    'nothing was unreachable — the host ran and then crashed'
+  );
+  assert.doesNotMatch(msg, /Start it/, 'there is nothing for the user to start');
+
+  assert.match(msg, /connector failed while handling this request/);
+  assert.match(msg, /NOT a sensitive-data block/, 'or the user goes hunting for PII they never sent');
+  assert.match(msg, /nothing was sent/);
+  assert.match(msg, /report it/, 'a crash in our own component is a bug report, not a user action');
+  assert.match(msg, /\(host-panic\)/, 'and the wire code, which is what a bug report needs');
+  assert.deepEqual(xhr.sent, [], 'fail-closed: the request did not go out');
+});
+
+test('a wire-version mismatch says update, not start', async () => {
+  const xhr = await blockedByRelayCode('bridge-protocol-mismatch', 'wire version 7 != 6');
+  assert.equal(xhr.sonomosBlockReason, 'bridge-version-mismatch');
+  assert.equal(xhr.sonomosBlockKind, 'unavailable');
+  const msg = xhr.sonomosBlockMessage;
+
+  assert.doesNotMatch(msg, /could not be reached/);
+  assert.doesNotMatch(msg, /Start it/);
+  // A skew is not cleared by retrying the same request, so the advice differs
+  // from the panic's even though both are 'unavailable'.
+  assert.match(msg, /disagree about their message format/);
+  assert.match(msg, /Update or repair/);
+  assert.match(msg, /NOT a sensitive-data block/);
+  assert.match(msg, /\(bridge-protocol-mismatch\)/);
+  assert.deepEqual(xhr.sent, []);
+});
+
+test('a relay code we genuinely cannot place still says the app was unreachable', async () => {
+  // The fallback is not being removed — it is right for `bridge-error`, where
+  // the port really did die. This pins that the two fixes above did not quietly
+  // change the default for everything else.
+  const xhr = await blockedByRelayCode('bridge-error', 'port disconnected');
+  assert.equal(xhr.sonomosBlockReason, 'native-call-failed');
+  assert.match(xhr.sonomosBlockMessage, /could not be reached \(bridge-error\)/);
+});
+
+test('every relay-failure code the extension records has copy written for it', async () => {
+  // The drift pin, and the one test that would have caught both defects. Any
+  // code shared/screening.js keeps evidence for is a code the shim will be
+  // handed, so it must have a reason of its own — or be a DOCUMENTED fallback.
+  //
+  // `bridge-error` is the sole intentional fallback: "the desktop app could not
+  // be reached" is exactly true when native messaging itself failed.
+  const INTENTIONAL_FALLBACKS = new Set(['bridge-error']);
+  const table = /const RELAY_BLOCK_REASON = \{([^}]*)\}/.exec(SHIM_SRC);
+  assert.ok(table, 'shim.js must declare RELAY_BLOCK_REASON');
+  const mapped = new Set([...table[1].matchAll(/'([^']+)':\s*'([^']+)'/g)].map((m) => m[1]));
+
+  const known = [...RELAY_FAILURES_PROVING_NO_SCREEN, ...RELAY_FAILURES_PROVING_NO_VERDICT];
+  const missing = known.filter((c) => !mapped.has(c) && !INTENTIONAL_FALLBACKS.has(c));
+  assert.deepEqual(
+    missing, [],
+    'these relay codes would fall back to "the Locke desktop app could not be reached. ' +
+    'Start it" — add a RELAY_BLOCK_REASON entry and a BLOCK_KIND sentence, or list them ' +
+    'as intentional fallbacks here'
+  );
+
+  // And every reason the table names must have a sentence, or blockMessage
+  // silently serves the generic "could not be screened before sending".
+  const kinds = /const BLOCK_KIND = \{([\s\S]*?)\n  \};/.exec(SHIM_SRC);
+  assert.ok(kinds, 'shim.js must declare BLOCK_KIND');
+  for (const [, , reason] of table[1].matchAll(/'([^']+)':\s*'([^']+)'/g)) {
+    assert.ok(
+      kinds[1].includes(`'${reason}': [`),
+      `RELAY_BLOCK_REASON maps to '${reason}' but BLOCK_KIND has no sentence for it`
+    );
+  }
+});
+
 // ── an XHR block must be attributable to us ────────────────────────
 //
 // A `fetch` block rejects with a `TypeError` whose message says who refused
@@ -3136,4 +3244,20 @@ test('policy: the managed-schema enum is exactly the catalog ids that have web h
     'an id in the schema that the catalog does not have silently narrows scope to nothing; ' +
       'a catalog provider missing from the schema is one an admin cannot keep'
   );
+});
+
+test('a hung host is not reported as one the user needs to start', async () => {
+  // Found by the drift pin above, not by hand: `native-timeout` was falling
+  // through to `native-call-failed` too. The browser DID start the host — it is
+  // stuck, so "Start it" sends the user to launch a process that already exists.
+  const xhr = await blockedByRelayCode('native-timeout');
+  assert.equal(xhr.sonomosBlockReason, 'connector-no-answer');
+  assert.equal(xhr.sonomosBlockKind, 'unavailable');
+  assert.doesNotMatch(xhr.sonomosBlockMessage, /Start it/);
+  assert.match(xhr.sonomosBlockMessage, /did not answer in time/);
+  assert.match(xhr.sonomosBlockMessage, /NOT a sensitive-data block/);
+  // Deliberately NOT reusing `verdict-timeout`: that is the shim's own ceiling
+  // one hop further out, and a support log must be able to tell which hop gave
+  // up. Same observation, different component.
+  assert.notEqual(xhr.sonomosBlockReason, 'verdict-timeout');
 });
