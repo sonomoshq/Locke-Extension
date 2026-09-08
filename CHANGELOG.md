@@ -14,8 +14,8 @@ strict SemVer.
 long conversation can finish instead of being blocked for taking too long, and
 documents a coverage limit that had gone unstated since it landed: on
 `chatgpt.com`, `claude.ai` and `www.perplexity.ai` only a short list of paths is
-screened, so other bodied requests on those hosts — `claude.ai`'s attachment
-upload among them — are not held. For reviewers: nothing about this release
+screened, so other bodied requests on those hosts are not held; the same
+catalog revision adds `claude.ai`'s attachment uploads. For reviewers: nothing about this release
 weakens fail-closed, no permission was added or widened, the only outbound
 requests are still to loopback, the Firefox data-collection declaration is still
 `none`, and `HONEST.md` now states the path limit in full.
@@ -32,6 +32,8 @@ requests are still to loopback, the Firefox data-collection declaration is still
   not. Both documents now say which paths are screened and what that leaves
   unscreened; a test fails if either drifts from the generated file again.
 **Added**
+- `claude.ai` attachment uploads (`/api/*/upload`,
+  `/api/organizations/*/convert_document`) are now held and screened.
 - The popup reports how many requests were **blocked** this session beside the
   count of items redacted, and the toolbar badge shows the blocked count for ten
   seconds after a block. A block was previously visible only as a failed request
@@ -46,12 +48,14 @@ requests are still to loopback, the Firefox data-collection declaration is still
   `enforceTimeoutMs` range is 1000–300000, default 200000.
 - Native host requests are cancellable, and live browser connection status
   recovers rather than staying stuck after a failed round trip.
+
+<!-- store-notes-end -->
+
 - A provider label supplied by the page is validated against the trusted
   catalog copy before a capture is relayed, so a hostile page cannot mislabel
   which surface its traffic is attributed to.
-- Vendored `sonomos-vocab` v6, which carries the screening-progress envelope.
-
-<!-- store-notes-end -->
+- Vendored `sonomos-vocab` v7: the screening-progress envelope (v6) and the
+  `claude.ai` attachment paths (v7).
 
 ### Fixed — the documentation the ceiling raise left behind
 
