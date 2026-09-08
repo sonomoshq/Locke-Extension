@@ -92,7 +92,7 @@
       <supportedOn ref="windows:SUPPORTED_WindowsVista"/>
       <elements>
         <decimal id="EnforceTimeout_Decimal" valueName="enforceTimeoutMs"
-                 minValue="1000" maxValue="120000" required="true"/>
+                 minValue="1000" maxValue="300000" required="true"/>
       </elements>
     </policy>
   </policies>

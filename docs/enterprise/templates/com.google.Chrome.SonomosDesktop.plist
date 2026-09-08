@@ -87,11 +87,11 @@
         <!--
           The fail-closed ceiling: how long the page-side shim HOLDS an
           outbound AI request waiting for a verdict before blocking it.
-          1000–120000 ms. Must exceed worst-case screening time on the
+          1000–300000 ms. Must exceed worst-case screening time on the
           slowest machine in the fleet, or healthy sends will be blocked.
         -->
         <key>enforceTimeoutMs</key>
-        <integer>45000</integer>
+        <integer>200000</integer>
 
         <!--
           Deliberately absent [documented 2026-09-01]:

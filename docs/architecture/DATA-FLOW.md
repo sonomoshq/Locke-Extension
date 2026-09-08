@@ -127,7 +127,9 @@ out-of-scope traffic is never touched.
   connection status (`disconnected` / `no-bridge`) and the badge reflects it.
 - **Extension context torn down** (reload / SW restart): the content script answers
   the shim with a null verdict → block.
-- **Verdict timeout** (45 s in the shim, settable via `enforceTimeoutMs`): block —
+- **Verdict timeout** (200 s in the shim, settable via `enforceTimeoutMs`; behind
+  the worker's 190 s `NATIVE_CALL_TIMEOUT_MS` and the native host's 180 s
+  `CAPTURE_DEADLINE`, so the specific diagnosis fires first): block —
   the page never hangs indefinitely, and expiry is never "send the original".
   It must stay above worst-case screening time, or a healthy chain blocks sends
   purely because the shim gave up first.

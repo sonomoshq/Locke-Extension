@@ -37,7 +37,7 @@ Warnings for a request that was BLOCKED, or that went out unscreened, are printe
 Shape-only either way: host, path, byte counts, media types and decisions. Request bodies and header values are never logged.</string>
 
       <string id="EnforceTimeout">Verdict timeout before a held request is blocked (milliseconds)</string>
-      <string id="EnforceTimeout_Explain">How long the page-side shim HOLDS an outbound AI request while it waits for the Locke desktop app's verdict. Allowed range 1000-120000 ms; default 45000.
+      <string id="EnforceTimeout_Explain">How long the page-side shim HOLDS an outbound AI request while it waits for the Locke desktop app's verdict. Allowed range 1000-300000 ms; default 200000.
 
 This is a fail-closed ceiling, not a hint. When it expires the request is BLOCKED, not sent: the extension never lets a body out unexamined because screening was slow. Set it above worst-case screening time on the slowest machine in the fleet, or healthy sends will start failing on those machines and users will see the page's own network-error handling.</string>
     </stringTable>
@@ -48,7 +48,7 @@ This is a fail-closed ceiling, not a hint. When it expires the request is BLOCKE
       </presentation>
 
       <presentation id="EnforceTimeout">
-        <decimalTextBox refId="EnforceTimeout_Decimal" defaultValue="45000" spinStep="1000">Milliseconds to hold a request before blocking it (1000-120000):</decimalTextBox>
+        <decimalTextBox refId="EnforceTimeout_Decimal" defaultValue="200000" spinStep="1000">Milliseconds to hold a request before blocking it (1000-300000):</decimalTextBox>
       </presentation>
     </presentationTable>
   </resources>
