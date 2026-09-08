@@ -931,6 +931,54 @@ async function beaconsDuring(fn) {
 
 const presenceCreates = () => alarmCreates.filter((c) => c.name === PRESENCE_ALARM);
 
+// -- the Origin header both loopback POSTs are authenticated by ------
+//
+// The Locke desktop app's presence listener identifies the caller by the
+// request's `Origin` header -- `chrome-extension://<id>` or
+// `moz-extension://<uuid>`, which the browser sets and a page cannot forge --
+// and answers CORS for that exact origin, never a wildcard. The
+// self-registration route already says so in its own comment: "the app takes
+// the id primarily from the request's Origin header (browser-attested) and uses
+// this body as the fallback and cross-check."
+//
+// A fetch from an extension service worker sends that header on a cross-origin
+// request by default, so today both calls are correct and neither needs a
+// change. There is exactly one common way to lose it, and it is a one-word edit
+// that looks like a fix: `mode: 'no-cors'`. Someone debugging a CORS error on
+// this call will reach for it; it will appear to work, because both calls are
+// fire-and-forget and neither reads the response; and the desktop app will
+// silently stop being able to tell which extension is talking to it.
+//
+// This asserts the shape of the init object rather than the header itself. The
+// header is the browser's to add and the stub cannot produce it; what we can
+// pin is that nothing in our own init prevents it.
+function assertOriginPreserving(init, what) {
+  assert.ok(init, `${what}: no init at all`);
+  assert.equal(init.method, 'POST', what);
+  assert.equal(
+    init.mode, undefined,
+    `${what}: a fetch mode must not be set. 'no-cors' strips the Origin header the ` +
+    'desktop app authenticates this extension by, and does it silently.'
+  );
+  assert.equal(
+    init.credentials, undefined,
+    `${what}: these calls carry no credentials and must not start`
+  );
+  assert.deepEqual(
+    Object.keys(init.headers ?? {}), ['content-type'],
+    `${what}: exactly one header, and it is ours`
+  );
+}
+
+test('service-worker: the presence beacon does not suppress its own Origin header', async () => {
+  const calls = await beaconsDuring(async () => { await registered.startup(); await flush(); });
+  const presence = calls.filter((c) => c.url === PRESENCE_URL);
+  assert.equal(presence.length, 1);
+  assertOriginPreserving(presence[0].init, 'presence beacon');
+  await flush();
+  await flush();
+});
+
 test('service-worker: presence has its own alarm, and it is not the health one', async () => {
   const presence = alarmRegistry.get(PRESENCE_ALARM);
   assert.ok(presence, 'the worker must arm a presence alarm of its own');
@@ -1115,6 +1163,27 @@ test('service-worker: a refused host makes the worker ask the app to register it
     assert.deepEqual(Object.keys(payload).sort(), ['browser', 'id', 'version'],
       'the id, which browser, which build — and nothing else leaves the browser');
     assert.equal(payload.id, CHROMIUM_ID, 'the id is our own runtime id, never user input');
+  });
+});
+
+test('service-worker: the self-registration POST does not suppress its own Origin header', async () => {
+  // The one that matters most. Registration exists to tell the desktop app
+  // WHICH extension id to authorise, and the app takes that id from the Origin
+  // header in preference to the body it also sends.
+  await resetScreening();
+  nativeHandler = () => { throw new Error('Access to the specified native messaging host is forbidden.'); };
+
+  await asChromiumUnpacked(async () => {
+    const calls = await beaconsDuring(async () => {
+      await deliver({ type: 'requestCheck' }, CHROMIUM_SENDER);
+      await flush();
+    });
+    const regs = registrationCalls(calls);
+    assert.equal(regs.length, 1);
+    assertOriginPreserving(regs[0].init, 'self-registration');
+    // The body stays the fallback and cross-check for the header, so it must
+    // still carry the id even though the header is what the app prefers.
+    assert.equal(JSON.parse(regs[0].init.body).id, CHROMIUM_ID);
   });
 });
 

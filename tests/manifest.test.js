@@ -156,7 +156,25 @@ test('manifest: only https, and no host permission was widened to do any of this
   }
   // The capture path is native messaging; the only host permission is the
   // desktop app's loopback presence listener. Nothing above may add to it.
+  //
+  // Portless, and asserted as such in both directions. `http://127.0.0.1/*` is
+  // wider than the one port we use, and narrowing it to
+  // `http://127.0.0.1:18795/*` is a tempting one-line tightening that would be
+  // a regression: Firefox treats a match pattern with an explicit port as
+  // matching NOTHING (Bugzilla 1362809, 1468162), so on one of the three
+  // targets the extension would silently lose the permission and the presence
+  // beacon would start failing CORS. Chrome accepts the port; Firefox is the
+  // constraint. `[reviewed again 2026-09-08 — see CHANGELOG 2.0.2]`
+  //
+  // What actually bounds the port is the extension-pages CSP, which pins
+  // `connect-src` to the exact origin and is asserted by the next test.
   assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*']);
+  for (const host of manifest.host_permissions) {
+    assert.doesNotMatch(
+      host, /:\d/,
+      'a port here matches nothing in Firefox — narrow with the CSP, not this'
+    );
+  }
 });
 
 test('manifest: the extension-pages CSP pins connect-src to the loopback presence origin', () => {
