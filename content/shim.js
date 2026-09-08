@@ -1677,12 +1677,48 @@
         sonomosBlockMessage: { ...own, value: blockMessage(reason, fields) }
       });
     } catch { /* a frozen or exotic XHR — the console line still stands */ }
+
+    // ── readyState must reach DONE, or an `onreadystatechange` page hangs ──
+    //
+    // `abort()` before `send()` was ever forwarded is a no-op in both the ways
+    // that matter here: per spec it fires nothing, AND it leaves `readyState`
+    // at OPENED (1). Dispatching `error` + `loadend` served the page that
+    // listens for events. It did nothing for the page whose only completion
+    // signal is `onreadystatechange` testing `xhr.readyState === 4` — the
+    // older of the two XHR idioms, and still the common one in hand-rolled
+    // wrappers and older libraries. Those pages waited forever on a request we
+    // had already refused: the exact hang the error dispatch was added to fix,
+    // surviving untouched in the half of the API it did not reach.
+    //
+    // What a network-failed XHR presents is readyState 4 with status 0, then
+    // `readystatechange`, then `error`, then `loadend`. That is what we
+    // present. `readyState` is an accessor on XMLHttpRequest.prototype, so an
+    // own data property on the instance shadows it; non-writable for the same
+    // reason the reason properties above are, and enumerable to match the
+    // prototype attribute it stands in for.
+    //
+    // Set BEFORE the dispatch guard below, and in its own try: a page that
+    // polls `xhr.readyState` on a timer is stuck for exactly the same reason
+    // as one using the handler, and it must be freed even on an XHR whose
+    // events we cannot fire at all.
+    try {
+      Object.defineProperty(xhr, 'readyState', {
+        value: 4, writable: false, enumerable: true, configurable: true
+      });
+    } catch { /* a frozen or exotic XHR — the events below still stand */ }
+
     try {
       if (typeof xhr.dispatchEvent !== 'function') return;
       const make = typeof ProgressEvent === 'function'
         ? (type) => new ProgressEvent(type)
         : typeof Event === 'function' ? (type) => new Event(type) : null;
       if (!make) return;
+      // `readystatechange` is a plain Event on a real XHR, never a
+      // ProgressEvent. The order is not cosmetic: a handler reading
+      // `readyState` must find 4 already there (set above), and `error` must
+      // not arrive ahead of the state change that accounts for it.
+      const plain = typeof Event === 'function' ? (type) => new Event(type) : make;
+      xhr.dispatchEvent(plain('readystatechange'));
       xhr.dispatchEvent(make('error'));
       xhr.dispatchEvent(make('loadend'));
     } catch { /* the page's own handler threw, or events are unavailable */ }

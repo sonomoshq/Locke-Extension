@@ -705,8 +705,17 @@ function makeXhrWorld(onCapture, { headerSetThrows = false, settleConfig = true,
   // what the page would have observed: a real XHR whose send() was never
   // forwarded fires nothing on abort(), so the shim raises the failure itself.
   class FakeXHR {
-    constructor() { this.sent = []; this.setHeaders = []; this.aborted = false; this.events = []; }
-    open(method, url) { this.opened = [method, url]; }
+    constructor() {
+      this.sent = []; this.setHeaders = []; this.aborted = false; this.events = [];
+      // UNSENT. A real XHR carries this on the prototype as an accessor; the
+      // instance field here is the same observable, and it lets the test see
+      // whether the shim moved it. `eventStates` records what a handler would
+      // have READ at each dispatch, which is the thing that was broken: the
+      // events fired, the state they described did not exist.
+      this.readyState = 0;
+      this.eventStates = [];
+    }
+    open(method, url) { this.opened = [method, url]; this.readyState = 1; }
     setRequestHeader(name, value) {
       // A real XHR throws InvalidStateError here if the request has left the
       // OPENED state — which is exactly what defeats the rebuilt Content-Type.
@@ -715,7 +724,11 @@ function makeXhrWorld(onCapture, { headerSetThrows = false, settleConfig = true,
     }
     send(body) { this.sent.push(body); }
     abort() { this.aborted = true; }
-    dispatchEvent(event) { this.events.push(event.type); return true; }
+    dispatchEvent(event) {
+      this.events.push(event.type);
+      this.eventStates.push(this.readyState);
+      return true;
+    }
   }
   return makeWorld(onCapture, { XMLHttpRequest: FakeXHR, ...extraGlobals }, { settleConfig });
 }
@@ -1391,7 +1404,103 @@ test('a blocked XHR raises an error event rather than leaving the page waiting',
   await waitFor(() => xhr.events.length > 0);
   assert.deepEqual(xhr.sent, []);
   assert.equal(xhr.aborted, true);
-  assert.deepEqual(xhr.events, ['error', 'loadend']);
+  assert.deepEqual(xhr.events, ['readystatechange', 'error', 'loadend']);
+});
+
+// ── …and a blocked XHR must also reach DONE ─────────────────────────
+//
+// The event dispatch above fixed half the hang. `abort()` before `send()` was
+// forwarded leaves readyState at OPENED (1), so a page whose completion signal
+// is `onreadystatechange` testing `readyState === 4` — the older XHR idiom, and
+// still what hand-rolled wrappers use — went on waiting through the error
+// event, which it was not listening for.
+
+test('a blocked XHR reaches DONE and says so before the error event', async () => {
+  const { sandbox } = makeXhrWorld(() => (
+    { ok: true, receipt: { decision: 'block', reason: 'pii' } }
+  ));
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  assert.equal(xhr.readyState, 1, 'OPENED, as a real XHR is after open()');
+  xhr.send('{"q":"hi"}');
+
+  await waitFor(() => xhr.events.length >= 3);
+  assert.equal(xhr.readyState, 4, 'DONE — what a network-failed XHR reports');
+  // Order and visible state together: `readystatechange` first, and every
+  // handler — that one included — must already read 4. A state change
+  // announced while the state still says OPENED is the bug with extra steps.
+  assert.deepEqual(xhr.events, ['readystatechange', 'error', 'loadend']);
+  assert.deepEqual(xhr.eventStates, [4, 4, 4]);
+});
+
+test('an onreadystatechange-only page is released by a blocked XHR', async () => {
+  // The page this whole change exists for: no `error` listener anywhere, the
+  // only completion signal is the handler. It must run, and it must see DONE.
+  const { sandbox } = makeXhrWorld(() => (
+    { ok: true, receipt: { decision: 'block', reason: 'US SSN detected', blockCause: 'policy' } }
+  ));
+  const xhr = new sandbox.XMLHttpRequest();
+  const seen = [];
+  // Dispatch on the fake routes through dispatchEvent; wire the handler the
+  // way a page does, so the property name itself is part of the contract.
+  const realDispatch = xhr.dispatchEvent.bind(xhr);
+  xhr.dispatchEvent = (event) => {
+    if (event.type === 'readystatechange' && typeof xhr.onreadystatechange === 'function') {
+      xhr.onreadystatechange();
+    }
+    return realDispatch(event);
+  };
+  xhr.onreadystatechange = () => {
+    seen.push({ readyState: xhr.readyState, blocked: xhr.sonomosBlocked === true });
+  };
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"hi"}');
+
+  await waitFor(() => seen.length > 0);
+  assert.deepEqual(
+    seen, [{ readyState: 4, blocked: true }],
+    'the handler ran exactly once, at DONE, with our reason already on the object'
+  );
+  assert.deepEqual(xhr.sent, [], 'and nothing was sent');
+});
+
+test('a blocked XHR still reaches DONE when its events cannot be fired', async () => {
+  // An exotic XHR with no dispatchEvent: the old code returned early and left
+  // readyState at OPENED, so a page polling `xhr.readyState` on a timer had no
+  // signal at all. The state transition is deliberately made before the
+  // dispatch guard.
+  const { sandbox } = makeXhrWorld(() => (
+    { ok: true, receipt: { decision: 'block', reason: 'pii' } }
+  ));
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.dispatchEvent = undefined;
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"hi"}');
+
+  await waitFor(() => xhr.readyState === 4);
+  assert.equal(xhr.readyState, 4);
+  assert.deepEqual(xhr.sent, []);
+});
+
+test('the DONE state a block reports cannot be rewritten by the page', async () => {
+  // Same rule as the reason properties: our account of why the request ended
+  // is not something the page gets to edit into a success.
+  const { sandbox } = makeXhrWorld(() => (
+    { ok: true, receipt: { decision: 'block', reason: 'pii' } }
+  ));
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"hi"}');
+
+  await waitFor(() => xhr.readyState === 4);
+  try { xhr.readyState = 1; } catch { /* strict-mode assignment throws */ }
+  assert.equal(xhr.readyState, 4);
+  // Deliberately NOT synthesized, and this pins it: a fabricated `status` /
+  // `statusText` / `responseText` would make our refusal read as a response
+  // from the site's own server.
+  assert.equal(xhr.status, undefined);
+  assert.equal(xhr.statusText, undefined);
+  assert.equal(xhr.responseText, undefined);
 });
 
 // ── an XHR block must be attributable to us ────────────────────────
@@ -1430,8 +1539,15 @@ test('a blocked XHR carries the reason on the object, before the error event fir
   assert.equal(xhr.sonomosBlockKind, 'policy');
   assert.match(xhr.sonomosBlockMessage, /blocked by Sonomos/);
   assert.match(xhr.sonomosBlockMessage, /US SSN detected/);
-  assert.deepEqual(seenAtDispatch[0], ['error', true, 'decision-block'],
-    'a handler reading event.target must find the reason already there');
+  // The FIRST event a handler can see is `readystatechange`, not `error`, since
+  // a blocked XHR now transitions to DONE first. The rule is unchanged and is
+  // asserted across all three: whichever event a page happens to listen for,
+  // the reason is already on the object by the time it runs.
+  assert.deepEqual(seenAtDispatch.map((s) => s[0]), ['readystatechange', 'error', 'loadend']);
+  for (const [type, blocked, reason] of seenAtDispatch) {
+    assert.deepEqual([blocked, reason], [true, 'decision-block'],
+      `a handler for '${type}' reading event.target must find the reason already there`);
+  }
 });
 
 test('a blocked XHR says on the console what a blocked fetch says in its rejection', async () => {
@@ -1855,7 +1971,10 @@ test('upload: an XHR whose attachment could not be examined aborts rather than u
 
   await waitFor(() => xhr.aborted);
   assert.deepEqual(xhr.sent, [], 'no placeholder was uploaded');
-  assert.deepEqual(xhr.events, ['error', 'loadend'], 'and the page was told, not left waiting');
+  assert.deepEqual(
+    xhr.events, ['readystatechange', 'error', 'loadend'],
+    'and the page was told, not left waiting'
+  );
   assertBlocked(logs, 'upload-withheld', 'unsupported');
 });
 
