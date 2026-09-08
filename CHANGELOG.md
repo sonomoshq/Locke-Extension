@@ -14,11 +14,12 @@ strict SemVer.
 long conversation can finish instead of being blocked for taking too long, and
 documents a coverage limit that had gone unstated since it landed: on
 `chatgpt.com`, `claude.ai` and `www.perplexity.ai` only a short list of paths is
-screened, so other bodied requests on those hosts are not held; the same
-catalog revision adds `claude.ai`'s attachment uploads. For reviewers: nothing about this release
-weakens fail-closed, no permission was added or widened, the only outbound
-requests are still to loopback, the Firefox data-collection declaration is still
-`none`, and `HONEST.md` now states the path limit in full.
+screened, so other bodied requests on those hosts — `claude.ai`'s attachment
+upload among them — are not held. That gap is live in this release; the catalog
+change closing it is pending. For reviewers: nothing here weakens fail-closed,
+no permission was added or widened, outbound requests are still loopback-only,
+the Firefox data-collection declaration is still `none`, and `HONEST.md` now
+states the path limit in full.
 
 **Fixed**
 - A blocked `XMLHttpRequest` left `readyState` at `OPENED` and fired no
