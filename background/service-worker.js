@@ -437,7 +437,10 @@ async function applyBadge(status, screening = null, captureCode = null, evidence
   // Colour is left as the base status colour — green, when this can appear at
   // all. A block is enforcement working, and repainting the badge amber or red
   // for it would say the opposite.
-  const blocked = text === '' ? blockBadgeText(evidence, Date.now()) : null;
+  // One clock reading for the whole decision, so the text and the clear that
+  // follows it cannot disagree about what time it is.
+  const now = Date.now();
+  const blocked = text === '' ? blockBadgeText(evidence, now) : null;
 
   try {
     await ext.action.setBadgeBackgroundColor({ color });
@@ -446,24 +449,55 @@ async function applyBadge(status, screening = null, captureCode = null, evidence
     /* action API occasionally unavailable during transitions */
   }
 
-  // Best-effort prompt clear. The window above is authoritative — this only
-  // decides whether the badge empties in ten seconds or waits for the next
-  // wake. A worker evicted before it fires loses nothing but the promptness.
-  if (blocked) scheduleBlockBadgeClear();
+  // Best-effort prompt clear. The window is authoritative — this only decides
+  // whether the badge empties on time or waits for the next wake. A worker
+  // evicted before it fires loses nothing but the promptness.
+  if (blocked) scheduleBlockBadgeClear(blockBadgeRemainingMs(evidence, now));
+}
+
+// What is LEFT of the window, not how long the window is.
+//
+// The clear used to be scheduled at BLOCK_BADGE_MS from the moment it was
+// armed, which is only the same thing on the wake that recorded the block. Any
+// later badge write inside the window — the next heartbeat, a popup opening, a
+// second capture — re-armed a full ten seconds from THEN, so a wake at +9 s left
+// the count on the toolbar for 19 s. Repeated often enough (a busy chat page
+// writes the badge on every capture) the badge could be held past the window
+// indefinitely, which is precisely the "empty when healthy" contract this
+// feature promised not to break.
+function blockBadgeRemainingMs(evidence, now) {
+  const at = Number(evidence?.lastBlockAt) || 0;
+  return Math.max(0, BLOCK_BADGE_MS - (now - at));
 }
 
 // One pending clear at a time: a burst of blocks should extend the window, not
 // queue a clear per block, each of which would fire while the window is still
 // open and be immediately undone by the next capture's badge write.
 let blockBadgeClear = null;
-function scheduleBlockBadgeClear() {
+function scheduleBlockBadgeClear(remainingMs) {
   if (blockBadgeClear) clearTimeout(blockBadgeClear);
   blockBadgeClear = setTimeout(() => {
     blockBadgeClear = null;
     // Re-derive rather than blanking: the status may have moved to something
     // with its own badge value in the meantime, and this must not clobber it.
     void refreshBadgeFromEvidence(null);
-  }, BLOCK_BADGE_MS + 250);
+  }, remainingMs + 250);
+  // Node's timers keep the process alive and fire into whatever runs next; a
+  // browser's do not. Under `node --test` that difference is a pending badge
+  // write landing in an unrelated later test, which is how a suite gets a
+  // failure nobody can place. `unref` is Node-only and absent in the worker.
+  blockBadgeClear?.unref?.();
+}
+
+// Test hook, and the reason it exists rather than the tests reaching in: the
+// timer above is deliberately fire-and-forget in production, so there is no
+// natural seam to await. A suite that has just driven a block needs to cancel
+// the pending clear before moving on, or the next test inherits it.
+// `unref` alone is not enough — it stops the timer holding the process open, not
+// from firing while the process is still busy.
+export function __cancelBlockBadgeClear() {
+  if (blockBadgeClear) clearTimeout(blockBadgeClear);
+  blockBadgeClear = null;
 }
 
 // A Promise belongs to this worker instance. Session storage outlives worker

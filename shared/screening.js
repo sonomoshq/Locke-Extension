@@ -320,15 +320,32 @@ export function evidenceFromRelayFailure(code, now = Date.now()) {
 // instead of counting it. Rolling the two together would let an outage inflate
 // a number the user reads as "Locke protected me N times".
 //
-// A `block` whose `reason` is missing is still counted. `evidenceFromReceipt`
-// correctly calls that receipt UNCONFIRMED — we cannot say WHY it was blocked —
-// but the block itself is not in doubt: the app said it refused, and nothing
-// left. "Something was blocked and we cannot tell you why" is a true statement
-// worth surfacing; silently dropping it is not.
+// A `block` with NO reason is deliberately NOT counted, and this is the
+// subtlest line in the function. The host defaults a HALF-PARSED receipt to
+// `block` — fail-closed, correctly — so a truncated frame arrives looking
+// exactly like a policy refusal. `evidenceFromReceipt` already refuses to read
+// that as an answer: it returns UNCONFIRMED with `code: 'verdict-unreadable'`.
+//
+// An earlier revision of this counted it anyway, on the reasoning that "the app
+// said it refused and nothing left" is true either way. It is true, and it is
+// still the wrong number, because the two disagree in the one place a user
+// reads them: the popup would render "N requests were blocked before anything
+// left your machine" — a sentence about protection — directly beside
+// `lastCaptureFailure: 'verdict-unreadable'`, a sentence about a broken wire.
+// A wire fault would inflate the protection count. That is the same class of
+// mistake as a green popup earned from a signal that proves nothing, and this
+// file exists to not make it.
+//
+// So the reason string is the evidence a DECISION was made. A blocked request
+// with nothing to say for itself is a capture failure, and capture failures are
+// named by `evidenceFromReceipt`, never counted here.
 export function tallyFromReceipt(receipt) {
   const none = { uncheckedSends: 0, withheldItems: 0, redactedItems: 0, blockedSends: 0 };
   if (!receipt || typeof receipt !== 'object') return none;
-  if (receipt.decision === 'block') return { ...none, blockedSends: 1 };
+  if (receipt.decision === 'block') {
+    const decided = typeof receipt.reason === 'string' && receipt.reason !== '';
+    return decided ? { ...none, blockedSends: 1 } : none;
+  }
   const items = Array.isArray(receipt.unscreened) ? receipt.unscreened.length : 0;
   const sentUnscreened = shippedUnscreened(receipt);
   const redactedItems = Number.isInteger(receipt.redactedCount) && receipt.redactedCount > 0

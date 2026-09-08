@@ -110,7 +110,10 @@ globalThis.chrome = {
   action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} }
 };
 
-await import('../background/service-worker.js');
+// The cancel hook is the only export: a badge-clear timer armed by one test
+// must not fire into a later one. `unref` stops it holding the process open,
+// not from firing while the process is still busy.
+const { __cancelBlockBadgeClear } = await import('../background/service-worker.js');
 // Imported dynamically for the same reason the worker is: it pulls in
 // shared/browser.js, which throws unless the stub above is already installed.
 const { classifyLastError } = await import('../shared/health-client.js');
@@ -454,6 +457,10 @@ test('service-worker: with nothing stored the probe claims nothing, so no ack is
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 async function resetScreening() {
+  // Cancel any badge-clear armed by the previous test before wiping the state
+  // it would read. A pending clear firing into an unrelated test is a failure
+  // nobody can place from the message.
+  __cancelBlockBadgeClear();
   delete store.session.screeningState;
   delete store.session.connectionState;
   delete store.session.inFlight;
@@ -788,11 +795,24 @@ test('service-worker: the block count never overwrites a badge that already mean
   });
   assert.equal(down.at(-1), '!', 'screening being down outranks a count of blocks');
 
-  const offline = await badgesDuring(async () => {
+  const noBridge = await badgesDuring(async () => {
     nativeHandler = () => { throw new Error('Native host has exited.'); };
     await deliver({ type: 'requestCheck' }, TRUSTED);
   });
-  assert.equal(offline.at(-1), '!', 'and so does having no bridge at all');
+  assert.equal(noBridge.at(-1), '!', 'and so does having no bridge at all');
+
+  // DISCONNECTED, which wears 'off' rather than '!'. The earlier version of
+  // this test claimed to cover it and did not: "Native host has exited" is
+  // classified as NO_BRIDGE, so both branches above were the same '!' and the
+  // one badge value that is neither empty nor the attention mark was never
+  // reached. A host that ANSWERS and reports the desktop app unreachable is
+  // what produces it.
+  const offline = await badgesDuring(async () => {
+    nativeHandler = () => ({ type: 'status', connected: false });
+    await deliver({ type: 'requestCheck' }, TRUSTED);
+  });
+  assert.equal(offline.at(-1), 'off',
+    'no connection to the desktop app outranks a count of blocks too');
 });
 
 test('service-worker: the block badge is a window, not a sticky number', async () => {
@@ -826,6 +846,56 @@ test('service-worker: the block badge is a window, not a sticky number', async (
   // The count itself survives; only its time on the toolbar expires. The popup
   // still reports it for the whole session.
   assert.equal(store.session.screeningState.blockedSends, 1);
+});
+
+test('service-worker: a wake inside the window does not extend it', async () => {
+  // The clear used to be scheduled BLOCK_BADGE_MS from whenever it was armed,
+  // not from the block. Any later badge write inside the window — the next
+  // heartbeat, a popup opening, a second capture — re-armed a full window from
+  // THEN, so a wake at +9 s held the count for 19 s, and a busy page (which
+  // writes the badge on every capture) could hold it indefinitely. That is the
+  // "empty when healthy" contract broken by the feature that promised to keep
+  // it.
+  await resetScreening();
+  nativeHandler = blockReceipt;
+  await deliver(captureMsg, TRUSTED);
+  await flush();
+  await flush();
+
+  const blockedAt = store.session.screeningState.lastBlockAt;
+  assert.ok(blockedAt > 0);
+
+  // A wake most of the way through the window. Age the stamp rather than
+  // waiting: the delay is computed from `lastBlockAt`, so this is the same
+  // arithmetic the real clock would do.
+  const nearlyExpired = Date.now() - (BLOCK_BADGE_MS - 500);
+  store.session.screeningState = { ...store.session.screeningState, lastBlockAt: nearlyExpired };
+
+  const delays = [];
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...rest) => { delays.push(ms); return realSetTimeout(fn, ms, ...rest); };
+  try {
+    await badgesDuring(async () => {
+      nativeHandler = guardIsUp;
+      await deliver({ type: 'requestCheck' }, TRUSTED);
+    });
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+
+  // The worker arms other timers too, so identify this one by its value rather
+  // than by an upper bound. 500 ms of window were left, so the clear is due in
+  // 500 + 250; allow a little slack for the clock advancing between arranging
+  // the stamp and the badge write reading it.
+  assert.ok(
+    delays.some((ms) => ms >= 700 && ms <= 800),
+    `the clear must be scheduled for what is LEFT of the window (~750 ms): got ${delays.join(', ')}`
+  );
+  assert.ok(
+    !delays.includes(BLOCK_BADGE_MS + 250),
+    `a full fresh window was armed inside an existing one: got ${delays.join(', ')}`
+  );
+  __cancelBlockBadgeClear();
 });
 
 test('service-worker: a clock that moved backwards closes the window rather than pinning it open', async () => {
