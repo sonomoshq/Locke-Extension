@@ -7,6 +7,7 @@ import { WEB_HOSTS } from '../shared/web-surfaces.generated.js';
 import {
   AUDIT_KEY,
   AUDIT_MAX_ENTRIES,
+  BLOCK_BADGE_MS,
   BRIDGE_MSG,
   DEFAULTS,
   DISABLED_WEB_HOSTS_KEY,
@@ -68,7 +69,8 @@ function initialState() {
     lastCaptureFailure: null,
     uncheckedSends: 0,
     withheldItems: 0,
-    redactedItems: 0
+    redactedItems: 0,
+    blockedSends: 0
   };
 }
 
@@ -141,6 +143,12 @@ function initialScreening() {
     uncheckedSends: 0,  // requests that left WITHOUT a full screen (fail-open)
     withheldItems: 0,   // items held back because they could not be examined
     redactedItems: 0,   // PII spans the screener actually found and removed
+    // Requests the desktop app DECIDED to block. Not requests blocked because
+    // the chain was broken — those are an outage and are named by
+    // `lastCaptureFailure`, not counted here. See shared/screening.js
+    // `tallyFromReceipt` for why the two must not be pooled.
+    blockedSends: 0,
+    lastBlockAt: null,  // drives the badge's BLOCK_BADGE_MS window
     lastUncheckedAt: null
   };
 }
@@ -263,11 +271,17 @@ async function applyScreening(evidence, tally) {
       next.at = evidence.at;
     }
 
-    if (tally && (tally.uncheckedSends > 0 || tally.withheldItems > 0 || tally.redactedItems > 0)) {
+    if (tally && (tally.uncheckedSends > 0 || tally.withheldItems > 0 ||
+                  tally.redactedItems > 0 || tally.blockedSends > 0)) {
       next.uncheckedSends = (prev.uncheckedSends ?? 0) + tally.uncheckedSends;
       next.withheldItems = (prev.withheldItems ?? 0) + tally.withheldItems;
       next.redactedItems = (prev.redactedItems ?? 0) + (tally.redactedItems ?? 0);
+      next.blockedSends = (prev.blockedSends ?? 0) + (tally.blockedSends ?? 0);
       if (tally.uncheckedSends > 0) next.lastUncheckedAt = evidence?.at ?? Date.now();
+      // Stamped from the receipt's own observation time when we have one, so
+      // the badge window is measured from when the block HAPPENED rather than
+      // from when this serialized write got its turn.
+      if (tally.blockedSends > 0) next.lastBlockAt = evidence?.at ?? Date.now();
       changed = true;
     }
 
@@ -295,14 +309,19 @@ async function applyScreening(evidence, tally) {
 // last one a real probe established, which is the only status anyone here is
 // entitled to assert. `screeningFor` with no live signal falls through to
 // exactly the evidence just written — see shared/screening.js.
+// `null` means "re-derive from whatever is stored" — the shape the badge-clear
+// timer uses, and the one a caller with no evidence in hand wants: reading the
+// stored copy is how it avoids blanking a badge the current status still earns.
 async function refreshBadgeFromEvidence(evidence) {
   try {
+    const stored = evidence ?? await getScreening();
     const state = await getState();
     const now = Date.now();
     await applyBadge(
       state.status,
-      screeningFor(state.status, evidence, now),
-      captureFailureToName(evidence, now)?.code ?? null
+      screeningFor(state.status, stored, now),
+      captureFailureToName(stored, now)?.code ?? null,
+      stored
     );
   } catch {
     /* the badge is a hint; never let it break the capture path */
@@ -382,17 +401,69 @@ async function appendAudit(kind, details = {}) {
 // SCREENING_CONTRADICTION_WINDOW_MS and one clean receipt restores AVAILABLE,
 // so this marks a recent event, never a standing penalty for a setting the
 // user is entitled to have on.
-async function applyBadge(status, screening = null, captureCode = null) {
+// The blocked-count badge text, or null when the window is closed or there is
+// nothing to report. A pure function of the stored evidence and the clock, so a
+// badge write from ANY wake — capture, heartbeat, popup — computes it afresh and
+// an evicted worker cannot leave a stale number behind.
+//
+// Clamped at 99+: three characters is roughly all a badge renders legibly, and
+// the exact figure past that point is the popup's job anyway.
+function blockBadgeText(evidence, now) {
+  const count = Number(evidence?.blockedSends) || 0;
+  const at = Number(evidence?.lastBlockAt) || 0;
+  if (count <= 0 || at <= 0) return null;
+  // A future timestamp means a clock that moved backwards, not a block that has
+  // not happened yet; treat it as expired rather than as a window that never
+  // closes.
+  const age = now - at;
+  if (age < 0 || age > BLOCK_BADGE_MS) return null;
+  return count > 99 ? '99+' : String(count);
+}
+
+async function applyBadge(status, screening = null, captureCode = null, evidence = null) {
   const base = BADGE[status] ?? BADGE[STATUS.UNKNOWN];
   const needsAttention = status === STATUS.CONNECTED &&
     (screening === SCREENING.UNAVAILABLE || captureCode === 'sent-unscreened');
   const { text, color } = needsAttention ? BADGE[STATUS.NO_BRIDGE] : base;
+
+  // The blocked count fills the EMPTY badge and nothing else. Every existing
+  // badge value still wins — '…' warming, 'off' disconnected, '!' attention,
+  // '?' unknown — so no state that already means something is overwritten by a
+  // count, and the '' healthy badge is the only one relaxed. That keeps the
+  // whole existing contract intact: a non-empty badge still means exactly what
+  // it meant before, and the one new value is scoped to the ten seconds after a
+  // block on an otherwise-healthy browser.
+  //
+  // Colour is left as the base status colour — green, when this can appear at
+  // all. A block is enforcement working, and repainting the badge amber or red
+  // for it would say the opposite.
+  const blocked = text === '' ? blockBadgeText(evidence, Date.now()) : null;
+
   try {
     await ext.action.setBadgeBackgroundColor({ color });
-    await ext.action.setBadgeText({ text });
+    await ext.action.setBadgeText({ text: blocked ?? text });
   } catch {
     /* action API occasionally unavailable during transitions */
   }
+
+  // Best-effort prompt clear. The window above is authoritative — this only
+  // decides whether the badge empties in ten seconds or waits for the next
+  // wake. A worker evicted before it fires loses nothing but the promptness.
+  if (blocked) scheduleBlockBadgeClear();
+}
+
+// One pending clear at a time: a burst of blocks should extend the window, not
+// queue a clear per block, each of which would fire while the window is still
+// open and be immediately undone by the next capture's badge write.
+let blockBadgeClear = null;
+function scheduleBlockBadgeClear() {
+  if (blockBadgeClear) clearTimeout(blockBadgeClear);
+  blockBadgeClear = setTimeout(() => {
+    blockBadgeClear = null;
+    // Re-derive rather than blanking: the status may have moved to something
+    // with its own badge value in the meantime, and this must not clobber it.
+    void refreshBadgeFromEvidence(null);
+  }, BLOCK_BADGE_MS + 250);
 }
 
 // A Promise belongs to this worker instance. Session storage outlives worker
@@ -475,11 +546,17 @@ async function performCheck(_reason) {
       lastCaptureFailure: captureFailureToName(screening, result.timestamp),
       uncheckedSends: screening.uncheckedSends ?? 0,
       withheldItems: screening.withheldItems ?? 0,
-      redactedItems: screening.redactedItems ?? 0
+      redactedItems: screening.redactedItems ?? 0,
+      // Requests the desktop app decided to block this session. Carried into
+      // the popup's state beside the other three counts; `lastBlockAt` stays in
+      // the session evidence, since only the badge window reads it.
+      blockedSends: screening.blockedSends ?? 0
     };
 
     await setState(next);
-    await applyBadge(next.status, next.screening, next.lastCaptureFailure?.code ?? null);
+    await applyBadge(
+      next.status, next.screening, next.lastCaptureFailure?.code ?? null, screening
+    );
     await scheduleNextAlarm(next);
     broadcast(next);
     return next;
