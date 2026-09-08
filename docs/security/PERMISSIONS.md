@@ -59,10 +59,26 @@ extension. Removing it would mean the extension has nothing to do.
 ### `http://127.0.0.1/*`
 **Why:** the only outbound network endpoint the extension can reach,
 and it is loopback-only. The pattern carries no port because Firefox
-treats match patterns with an explicit port as matching nothing
-(Bugzilla 1362809); the extension-pages CSP still pins `connect-src`
-to `http://127.0.0.1:18795`, so in practice only that port is
-reachable. The Locke desktop app runs a presence listener on port
+treats match patterns with an explicit port as matching **nothing**
+(Bugzilla 1362809 and 1468162) — Chrome accepts a port here and
+matches it correctly, so Firefox is the binding constraint, and
+narrowing this to `http://127.0.0.1:18795/*` would silently drop the
+permission on AMO builds and start failing the presence beacon there.
+The control that actually bounds the port is the extension-pages CSP,
+which pins `connect-src` to `http://127.0.0.1:18795`, so in practice
+only that port is reachable; both the portless pattern and the pinned
+CSP are asserted by `tests/manifest.test.js`.
+`[reviewed again 2026-09-08]`
+
+**How the desktop app knows it is us.** Both POSTs on this origin
+(`/heartbeat` and `/register-extension`) are identified by the
+request's `Origin` header — `chrome-extension://<id>` or
+`moz-extension://<uuid>` — which the browser sets and a page cannot
+forge, and the app answers CORS for that exact origin rather than with
+a wildcard. Neither call sets a `fetch` `mode`, which is what keeps
+the header present: `mode: "no-cors"` would strip it, silently, while
+the fire-and-forget calls carried on looking fine.
+`tests/service-worker.test.js` pins that neither init grows one. The Locke desktop app runs a presence listener on port
 18795; on a fixed 30-second presence tick — its own alarm, NOT the
 health check's, which backs off to 5 minutes when the desktop app is
 down — the service worker POSTs `/heartbeat` with `{ "browser":
