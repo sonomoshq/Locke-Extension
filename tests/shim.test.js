@@ -208,10 +208,14 @@ test('shim synthesizes a raw HTTP/1.1 request from a string body', async () => {
     '\r\n' +
     body
   );
-  // allow → the ORIGINAL call is released unchanged.
+  // allow → the call is released with exactly the bytes that were screened,
+  // and nothing else about it changes.
   assert.equal(res.__net, true);
   assert.equal(netCalls.length, 1);
-  assert.equal(netCalls[0][1].body, body);
+  assert.equal(netCalls[0][0], `${AI_URL}?x=1`);
+  assert.equal(netCalls[0][1].method, 'POST');
+  assert.equal(Buffer.from(netCalls[0][1].body).toString('utf8'), body);
+  assert.equal(netCalls[0][1].headers.get('authorization'), 'Bearer t');
 });
 
 test('shim fills in the effective Content-Type when the caller set none', async () => {
@@ -244,8 +248,16 @@ test('shim serializes FormData once: Content-Type boundary matches the body byte
   assert.ok(body.indexOf(`--${boundary}\r\n`) === 0, 'body opens with the same boundary');
   assert.ok(body.includes(`--${boundary}--`), 'body closes with the same boundary');
   assert.ok(body.includes(Buffer.from([0, 1, 2, 255])), 'binary part bytes are exact');
-  assert.equal(netCalls.length, 1); // allow → original FormData released
-  assert.equal(netCalls[0][1].body, fd);
+  // allow → the serialization that was screened is the one that goes out,
+  // under the boundary it was screened with. Handing the FormData object back
+  // to fetch would re-serialize it under a FRESH boundary, from whatever the
+  // object holds by then — a second, unscreened say in what leaves.
+  assert.equal(netCalls.length, 1);
+  assert.deepEqual(Buffer.from(netCalls[0][1].body), body);
+  assert.ok(
+    head.toLowerCase().includes(`content-type: ${netCalls[0][1].headers.get('content-type')}`),
+    'the released Content-Type is the screened one'
+  );
 });
 
 test('shim captures a Request-object body binary-safely', async () => {
@@ -264,7 +276,15 @@ test('shim captures a Request-object body binary-safely', async () => {
   const { body } = splitRaw(rawOf(captured[0]));
   assert.deepEqual(new Uint8Array(body), bytes);
   assert.equal(netCalls.length, 1);
-  assert.equal(netCalls[0][0], req); // released as held
+  // A Request input is released as a Request — the constructor carries the
+  // page's method, url, credentials, mode and signal across — rebuilt around
+  // the screened bytes rather than around headers the page can still write to.
+  const [released] = netCalls[0];
+  assert.ok(released instanceof Request, 'the Request branch releases a Request');
+  assert.equal(released.url, req.url);
+  assert.equal(released.method, 'POST');
+  assert.equal(released.headers.get('content-type'), 'application/octet-stream');
+  assert.deepEqual(new Uint8Array(await released.arrayBuffer()), bytes);
 });
 
 // ── receipt handling ───────────────────────────────────────────────
@@ -552,18 +572,20 @@ test('fail-closed: an unreadable body blocks', async () => {
   assertBlocked(logs, 'uncapturable-unreadable');
 });
 
-test('fail-closed: a Request body that will not clone blocks', async () => {
-  const { sandbox, netCalls, logs } = makeWorld(() => allowVerdict);
-  // Request-shaped enough to reach the clone path, and its clone rejects.
-  const reqLike = {
-    url: AI_URL,
-    method: 'POST',
-    body: {},
-    clone: () => ({ arrayBuffer: () => Promise.reject(new Error('detached')) })
-  };
-  await assert.rejects(sandbox.fetch(reqLike), blockedError);
-  assert.equal(netCalls.length, 0);
-  assertBlocked(logs, 'uncapturable-request-clone');
+test('a page override of Request.clone cannot alter the private snapshot', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld(msg => {
+    captured.push(msg.requestB64);
+    return allowVerdict;
+  });
+  const request = new Request(AI_URL, { method: 'POST', body: 'approved' });
+  request.clone = () => { throw new Error('page clone override'); };
+
+  await sandbox.fetch(request);
+
+  const sent = await sentFetch(netCalls[0]);
+  assert.equal(sent.bytes.toString(), 'approved');
+  assert.deepEqual(sent.bytes, splitRaw(rawOf(captured[0])).body);
 });
 
 // ── the timeout, which is its own kind of failure ──────────────────
@@ -840,6 +862,104 @@ test('XHR: a rebuilt Content-Type that cannot be set aborts rather than sending 
   await waitFor(() => xhr.aborted);
   assert.deepEqual(xhr.sent, []);
   assertBlocked(logs, 'redact-ct-set-failed');
+});
+
+// ── abort while we are holding the request ─────────────────────────
+//
+// The window between `send()` deferring and the verdict landing is the one
+// place the page's own `abort()` used to do nothing at either end: the real
+// abort fires no events (our wrapper never forwarded the send, so the send flag
+// is unset) AND it did not stop the deferred branch, which forwarded the
+// request moments later. The user pressed stop, the page reported nothing, and
+// the prompt went out anyway.
+
+test('XHR: a request the page aborts while it is held is never sent', async () => {
+  let landVerdict;
+  const verdict = new Promise((resolve) => { landVerdict = resolve; });
+  const { sandbox, logs } = makeXhrWorld(() => verdict, { extraGlobals: { SONOMOS_DEBUG: true } });
+
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"hi"}');
+  xhr.abort();               // the user pressed stop while the screen was running
+  landVerdict(allowVerdict); // and only then does a perfectly good verdict land
+
+  await waitFor(() => findLine(logs, 'aborted-while-held'));
+  assert.deepEqual(xhr.sent, [], 'a request the page cancelled must not be sent');
+  assertReason(logs, 'aborted-while-held', 'debug');
+});
+
+test('XHR: aborting a held request completes it at DONE, and does not claim a Locke block', async () => {
+  // The page is owed the completion a real abort would have given it —
+  // readystatechange, abort, loadend, all observed at DONE. Not `error`, and no
+  // `sonomos*` properties: this is the page's cancellation, not our refusal.
+  const { sandbox } = makeXhrWorld(() => new Promise(() => {}));
+
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"hi"}');
+  xhr.abort();
+
+  assert.equal(xhr.aborted, true, 'the real abort() still ran');
+  assert.equal(xhr.readyState, 4);
+  assert.deepEqual(xhr.events, ['readystatechange', 'abort', 'loadend']);
+  assert.deepEqual(xhr.eventStates, [4, 4, 4]);
+  assert.equal(xhr.sonomosBlocked, undefined, 'a cancellation is not a refusal');
+});
+
+test('XHR: an abort after the request was forwarded is the browser’s to answer', async () => {
+  // Once we have handed the request on, the underlying XHR has a send flag and
+  // its own abort() does the right thing. We must not synthesize a second
+  // completion on top of it.
+  const { sandbox } = makeXhrWorld(() => allowVerdict);
+
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"hi"}');
+  await waitFor(() => xhr.sent.length === 1);
+  xhr.abort();
+
+  assert.equal(xhr.aborted, true);
+  assert.deepEqual(xhr.events, [], 'nothing synthesized — the browser owns this one');
+});
+
+test('XHR: a blocked request fires one completion sequence, not two', async () => {
+  // blockXhr calls abort() itself, which now runs through our own wrapper. If
+  // the refusal did not release the request first, the page would see the error
+  // sequence and an abort sequence for the same send.
+  const { sandbox } = makeXhrWorld(() => (
+    { ok: true, receipt: { decision: 'block', reason: 'US SSN detected', blockCause: 'policy' } }
+  ));
+
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"hi"}');
+
+  await waitFor(() => xhr.events.length >= 3);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(xhr.events, ['readystatechange', 'error', 'loadend']);
+});
+
+test('XHR: a reused object does not inherit the cancellation of the send before it', async () => {
+  // `open()` is where an XHR stops describing the old request, so the abort
+  // flag has to go with it — otherwise the retry a page issues on the same
+  // object after cancelling is silently dropped.
+  let landVerdict;
+  const first = new Promise((resolve) => { landVerdict = resolve; });
+  let call = 0;
+  const { sandbox } = makeXhrWorld(() => (call++ === 0 ? first : allowVerdict));
+
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"first"}');
+  xhr.abort();
+  landVerdict(allowVerdict);
+
+  xhr.open('POST', 'https://chat.openai.com/api/chat', true);
+  xhr.send('{"q":"second"}');
+
+  await waitFor(() => xhr.sent.length === 1);
+  assert.deepEqual(xhr.sent, ['{"q":"second"}'], 'only the retry goes out');
 });
 
 test('XHR: out-of-scope and bodyless sends report at debug and pass through', async () => {
@@ -1953,10 +2073,14 @@ test('upload: a cross-origin PUT of a file is held and screened', async () => {
   const { head, body } = splitRaw(rawOf(captured[0]));
   assert.match(head, /^PUT \/file-abc123 HTTP\/1\.1\r\nHost: files\.oaiusercontent\.com\r\n/);
   assert.deepEqual(new Uint8Array(body), bytes, 'the exact file bytes were screened');
-  // A clean allow releases the page's ORIGINAL call, untouched.
+  // A clean allow releases the page's own call — same url, same method — with
+  // the bytes that were screened. Not the page's own buffer: a typed array is
+  // writable, and the verdict wait is long enough to overwrite it in.
   assert.equal(netCalls.length, 1);
   assert.equal(netCalls[0][0], STORAGE_PUT);
-  assert.equal(netCalls[0][1].body, bytes);
+  assert.equal(netCalls[0][1].method, 'PUT');
+  assert.deepEqual(Buffer.from(netCalls[0][1].body), Buffer.from(bytes));
+  assert.notEqual(netCalls[0][1].body, bytes, 'released from a copy the page cannot reach');
 });
 
 test('upload: the pre-signed credential in the query string is never sent onward', async () => {
@@ -3260,4 +3384,241 @@ test('a hung host is not reported as one the user needs to start', async () => {
   // one hop further out, and a support log must be able to tell which hop gave
   // up. Same observation, different component.
   assert.notEqual(xhr.sonomosBlockReason, 'verdict-timeout');
+});
+
+async function sentFetch(call) {
+  const request = new Request(...call);
+  return { request, bytes: Buffer.from(await request.arrayBuffer()) };
+}
+
+for (const configWait of [false, true]) {
+  test(`snapshot: fetch freezes mutable body, headers and options before ${configWait ? 'configuration' : 'verdict'} wait`, async () => {
+    let answer;
+    const captured = [];
+    const { sandbox, netCalls, deliver } = makeWorld(msg => {
+      captured.push(msg.requestB64);
+      return new Promise(resolve => { answer = resolve; });
+    }, {}, { settleConfig: !configWait });
+    const body = new URLSearchParams({ prompt: 'approved' });
+    const init = { method: 'POST', headers: { 'x-version': 'approved' }, body, credentials: 'include' };
+    const pending = sandbox.fetch(AI_URL, init);
+    if (!configWait) await waitFor(() => answer);
+    body.set('prompt', 'unscreened');
+    init.body = 'replacement';
+    init.headers['x-version'] = 'changed';
+    init.credentials = 'omit';
+    if (configWait) {
+      deliver({ type: 'SONOMOS_CONFIG', config: {} });
+      await waitFor(() => answer);
+    }
+    answer(allowVerdict);
+    await pending;
+    const sent = await sentFetch(netCalls[0]);
+    assert.equal(sent.bytes.toString(), 'prompt=approved');
+    assert.deepEqual(sent.bytes, splitRaw(rawOf(captured[0])).body);
+    assert.equal(sent.request.headers.get('x-version'), 'approved');
+    assert.equal(sent.request.credentials, 'include');
+  });
+}
+
+test('snapshot: fetch FormData releases the exact screened boundary and file bytes', async () => {
+  let answer;
+  let captured;
+  const { sandbox, netCalls } = makeWorld(msg => {
+    captured = splitRaw(rawOf(msg.requestB64));
+    return new Promise(resolve => { answer = resolve; });
+  });
+  const form = new FormData();
+  form.append('prompt', 'approved');
+  form.append('file', new Blob([new Uint8Array([0, 255, 13, 10])]), 'unicode-ß.bin');
+  const pending = sandbox.fetch(AI_URL, { method: 'POST', body: form });
+  await waitFor(() => answer);
+  form.set('prompt', 'unscreened');
+  answer(allowVerdict);
+  await pending;
+  const sent = await sentFetch(netCalls[0]);
+  assert.deepEqual(sent.bytes, captured.body);
+  assert.ok(captured.head.toLowerCase().includes('content-type: ' + sent.request.headers.get('content-type')));
+});
+
+test('snapshot: Request init headers replace rather than merge the original headers', async () => {
+  let captured;
+  const { sandbox, netCalls } = makeWorld(msg => {
+    captured = splitRaw(rawOf(msg.requestB64));
+    return allowVerdict;
+  });
+  const request = new Request(AI_URL, {
+    method: 'POST', headers: { 'x-old': 'must-not-be-screened' }, body: 'approved'
+  });
+  await sandbox.fetch(request, { headers: { 'x-new': 'current' } });
+  const sent = await sentFetch(netCalls[0]);
+  assert.equal(sent.request.headers.get('x-old'), null);
+  assert.doesNotMatch(captured.head, /x-old/i);
+  assert.match(captured.head, /x-new: current/);
+});
+
+test('snapshot: XHR copies a mutable buffer before the configuration wait', async () => {
+  const captures = [];
+  const { sandbox, deliver } = makeXhrWorld(msg => { captures.push(msg.requestB64); return allowVerdict; }, { settleConfig: false });
+  const bytes = new Uint8Array([1, 2, 3]);
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', AI_URL);
+  xhr.send(bytes);
+  bytes.fill(9);
+  deliver({ type: 'SONOMOS_CONFIG', config: {} });
+  await waitFor(() => xhr.sent.length);
+  assert.deepEqual(Buffer.from(xhr.sent[0]), Buffer.from([1, 2, 3]));
+  assert.deepEqual(splitRaw(rawOf(captures[0])).body, Buffer.from([1, 2, 3]));
+});
+
+test('snapshot: a bodyless fetch cannot gain an unscreened body during the configuration wait', async () => {
+  const { sandbox, netCalls, deliver } = makeWorld(() => allowVerdict, {}, { settleConfig: false });
+  const init = { method: 'GET', credentials: 'include' };
+  const pending = sandbox.fetch(AI_URL, init);
+
+  init.method = 'POST';
+  init.body = 'unscreened';
+  init.credentials = 'omit';
+  deliver({ type: 'SONOMOS_CONFIG', config: {} });
+
+  await pending;
+  const sent = new Request(...netCalls[0]);
+  assert.equal(sent.method, 'GET');
+  assert.equal(sent.body, null);
+  assert.equal(sent.credentials, 'include');
+});
+
+test('snapshot: a page-owned RequestInfo object cannot retarget an approved fetch', async () => {
+  let answer;
+  const { sandbox, netCalls } = makeWorld(() => new Promise(resolve => { answer = resolve; }));
+  const target = { href: AI_URL };
+  const input = { toString: () => target.href };
+  const pending = sandbox.fetch(input, { method: 'POST', body: 'approved' });
+  await waitFor(() => answer);
+
+  target.href = 'https://example.com/unscreened';
+  answer(allowVerdict);
+
+  await pending;
+  assert.equal(netCalls.length, 1);
+  assert.equal(netCalls[0][0], AI_URL);
+});
+
+test('snapshot: inherited RequestInit fields are frozen before the verdict wait', async () => {
+  let answer;
+  const { sandbox, netCalls } = makeWorld(() => new Promise(resolve => { answer = resolve; }));
+  const inherited = {
+    method: 'POST',
+    headers: { 'x-version': 'approved' },
+    body: new URLSearchParams({ prompt: 'approved' }),
+    credentials: 'include'
+  };
+  const init = Object.create(inherited);
+  const pending = sandbox.fetch(AI_URL, init);
+  await waitFor(() => answer);
+
+  inherited.method = 'PUT';
+  inherited.headers['x-version'] = 'changed';
+  inherited.body.set('prompt', 'unscreened');
+  inherited.credentials = 'omit';
+  answer(allowVerdict);
+
+  await pending;
+  const sent = await sentFetch(netCalls[0]);
+  assert.equal(sent.request.method, 'POST');
+  assert.equal(sent.request.credentials, 'include');
+  assert.equal(sent.request.headers.get('x-version'), 'approved');
+  assert.equal(sent.bytes.toString(), 'prompt=approved');
+});
+
+test('snapshot: a Request input is privately captured before the configuration wait', async () => {
+  let answer;
+  const captured = [];
+  const { sandbox, netCalls, deliver } = makeWorld(msg => {
+    captured.push(msg.requestB64);
+    return new Promise(resolve => { answer = resolve; });
+  }, {}, { settleConfig: false });
+  const input = new Request(AI_URL, {
+    method: 'POST', headers: { 'x-version': 'approved' }, body: 'approved'
+  });
+  const pending = sandbox.fetch(input);
+
+  assert.equal(input.bodyUsed, true, 'native fetch takes ownership of a Request body before returning');
+  input.headers.set('x-version', 'changed');
+  deliver({ type: 'SONOMOS_CONFIG', config: {} });
+  await waitFor(() => answer);
+  answer(allowVerdict);
+
+  await pending;
+  const sent = await sentFetch(netCalls[0]);
+  assert.equal(sent.request.headers.get('x-version'), 'approved');
+  assert.equal(sent.bytes.toString(), 'approved');
+  assert.deepEqual(sent.bytes, splitRaw(rawOf(captured[0])).body);
+});
+
+test('snapshot: invalid RequestInit is rejected without reaching the network', async () => {
+  const { sandbox, netCalls } = makeWorld(() => allowVerdict);
+  const input = new Request(AI_URL, {
+    method: 'POST', headers: { 'x-old': 'must-not-send' }, body: 'approved'
+  });
+
+  await assert.rejects(sandbox.fetch(input, { headers: null }), { name: 'TypeError' });
+  assert.equal(netCalls.length, 0);
+});
+
+for (const decision of ['allow', 'block']) {
+  test(`generation: stale XHR ${decision} cannot affect a reopened successor`, async () => {
+    const answers = [];
+    const { sandbox } = makeXhrWorld(() => new Promise(resolve => answers.push(resolve)));
+    const xhr = new sandbox.XMLHttpRequest();
+    xhr.open('POST', AI_URL);
+    xhr.send('old');
+    await waitFor(() => answers.length === 1);
+    xhr.open('POST', AI_URL + '?successor');
+    xhr.send('new');
+    await waitFor(() => answers.length === 2);
+    answers[0]({ ok: true, receipt: { decision, redactedCount: 0 } });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(xhr.sent.length, 0, 'old result must neither send nor abort the successor');
+    assert.equal(xhr.aborted, false);
+    assert.equal(xhr.sonomosBlocked, undefined);
+    answers[1](allowVerdict);
+    await waitFor(() => xhr.sent.length === 1);
+    assert.equal(Buffer.from(xhr.sent[0]).toString(), 'new');
+  });
+}
+
+test('generation: a stale asynchronous XHR failure cannot block a reopened successor', async () => {
+  const answers = [];
+  const { sandbox } = makeXhrWorld(() => new Promise(resolve => answers.push(resolve)));
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', AI_URL);
+  xhr.send('old');
+  await waitFor(() => answers.length === 1);
+
+  xhr.open('POST', AI_URL + '?successor');
+  xhr.send('new');
+  await waitFor(() => answers.length === 2);
+  answers[0]({ get ok() { throw new Error('asynchronous verdict failure'); } });
+  await new Promise(resolve => setTimeout(resolve, 20));
+
+  assert.equal(xhr.sent.length, 0);
+  assert.equal(xhr.aborted, false);
+  assert.equal(xhr.sonomosBlocked, undefined);
+  answers[1](allowVerdict);
+  await waitFor(() => xhr.sent.length === 1);
+  assert.equal(Buffer.from(xhr.sent[0]).toString(), 'new');
+});
+
+test('generation: held XHR rejects second send and header changes like a native active request', async () => {
+  let answer;
+  const { sandbox } = makeXhrWorld(() => new Promise(resolve => { answer = resolve; }));
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', AI_URL);
+  xhr.send('approved');
+  await waitFor(() => answer);
+  assert.throws(() => xhr.send('unscreened'), { name: 'InvalidStateError' });
+  assert.throws(() => xhr.setRequestHeader('x-late', 'unscreened'), { name: 'InvalidStateError' });
+  answer(allowVerdict);
+  await waitFor(() => xhr.sent.length === 1);
 });

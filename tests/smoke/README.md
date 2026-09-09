@@ -17,6 +17,20 @@ cd tests/smoke && npm install     # once — installs Puppeteer + a Chrome build
 cd ../.. && npm run smoke
 ```
 
+For the local request-boundary proof used during shim changes:
+
+```sh
+npm run smoke:boundary
+```
+
+That runner injects the exact shipped `content/shim.js` into Chromium,
+creates and removes a new temporary browser profile, and binds an ephemeral
+`127.0.0.1` server. It performs no external request and installs no
+extension. It holds verdicts while page-owned bodies, headers, options, and
+XHR generations mutate, then checks the server received only the captured
+bytes and current generations. It requires the same opt-in Puppeteer install
+described above.
+
 To also cover Firefox (Puppeteer's `npm install` downloads only Chrome):
 
 ```sh

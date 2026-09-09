@@ -885,7 +885,7 @@ async function captureViaHost(requestB64, provider) {
       noteScreening(evidenceFromRelayFailure('native-timeout'), null);
       return { ok: false, code: 'native-timeout' };
     }
-    // This is `runtime.lastError.message` — see sendNativeMessagePromise.
+    // This is `runtime.lastError.message` from the per-request native port.
     const detail = e?.message || String(e);
     // The SAME classifier the health check uses, deliberately, instead of the
     // second copy of the pattern list that used to live here. The copies had
