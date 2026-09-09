@@ -30,7 +30,8 @@
     "publish-stores": "node scripts/publish.mjs",
     "bump": "node scripts/bump-version.mjs",
     "install-hooks": "node scripts/install-hooks.mjs",
-    "prepare": "node scripts/install-hooks.mjs --quiet"
+    "prepare": "node scripts/install-hooks.mjs --quiet",
+    "smoke:boundary": "node tests/smoke/boundary.mjs"
   },
   "dependencies": {},
   "devDependencies": {}

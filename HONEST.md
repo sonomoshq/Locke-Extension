@@ -722,19 +722,19 @@ verdict means no send. The residuals we accept and document:
   (host 25 s → 180 s, worker 30 s → 190 s, shim 45 s → 200 s) so one
   cold pass over a long conversation can finish. This document went on
   quoting the old numbers until now.
-- **The browser-side limit the host's deadline is set against is
-  documented, not measured here.** Chrome's 30 s service-worker idle
-  rule is from its published lifecycle docs, and the chain no longer
-  fits inside it: at 180/190/200 s every hop depends on a pending
-  `sendNativeMessage` keeping the worker alive past that idle window
-  (Chrome's ~5 min hard cap for a worker held open by a pending call is
-  the limit actually being relied on). **Whether a pending
-  `sendNativeMessage` resets the idle timer has still not been checked
-  on a real browser on this machine.** At 25 s the answer did not
-  matter, which is why the old margin was safe while merely reasoned;
-  at 190 s it does. This is the one number in the chain whose premise is
-  unverified, and a wrong reading shows up as a worker evicted
-  mid-screen — which fails closed (a blocked request), not open.
+- **The browser-side lifetime premise is implemented and documented,
+  but the full 190 s native round trip is not measured here.**
+  `shared/native-client.js` opens an independent `connectNative` port
+  for every request and closes it on a response, error, or timeout;
+  `tests/native-client.test.js` exercises those cleanup paths. Chrome's
+  [extension service-worker lifecycle documentation](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle)
+  says that a `connectNative()` connection keeps the worker alive
+  (Chrome 105+). The old text here described `sendNativeMessage`, which
+  the capture path no longer uses. What remains unmeasured in this
+  repository is a real browser, native host, and desktop app sustaining
+  one screening call through the 180/190/200 s chain. An early port
+  close or worker eviction still fails closed as a blocked request.
+  `[corrected 2026-09-09]`
 
 ## Browser-coverage gaps
 

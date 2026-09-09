@@ -1658,25 +1658,102 @@
     return null;
   }
 
-  // Re-issue a fetch with the screener's rebuilt body swapped in — as BYTES,
-  // never a string: the rebuilt Content-Type may carry a fresh multipart
-  // boundary that must match the body byte-for-byte. Everything else about
-  // the call (url, method, other headers, credentials mode, …) stays as the
-  // page issued it; the browser recomputes framing (Content-Length).
-  function resendFetch(input, init, bodyBytes, contentType) {
+  // A synchronous snapshot of everything one fetch call said, taken before the
+  // hook's first `await`. See `freezeBody` for why "before" is the whole point:
+  // `init` is an object the page still holds a reference to, and a Request's
+  // `headers` are writable, so both can be a different thing by the time the
+  // verdict lands.
+  //
+  // The header set is snapshotted as a `Headers` here rather than at release.
+  // That also applies the platform's validation before the first wait, instead
+  // of discovering a malformed header only after screening.
+  const FETCH_INIT_MEMBERS = Object.freeze([
+    'method', 'headers', 'body', 'referrer', 'referrerPolicy', 'mode',
+    'credentials', 'cache', 'redirect', 'integrity', 'keepalive', 'signal',
+    'window', 'duplex', 'priority', 'attributionReporting', 'browsingTopics'
+  ]);
+
+  function freezeFetchCall(input, init) {
+    const frozenInit = {};
+    if (init != null) {
+      const source = Object(init);
+      for (const member of FETCH_INIT_MEMBERS) {
+        if (member in source) frozenInit[member] = source[member];
+      }
+    }
+    const hasInitBody = 'body' in frozenInit;
+    const body = hasInitBody ? freezeBody(frozenInit.body) : undefined;
+    if (hasInitBody) frozenInit.body = body;
+    const headerMap = readHeaders(frozenInit, null);
+    if ('headers' in frozenInit) frozenInit.headers = new Headers(frozenInit.headers);
+
     const isRequest = typeof Request !== 'undefined' && input instanceof Request;
-    const baseHeaders = (init && init.headers) ? init.headers : (isRequest ? input.headers : undefined);
-    const headers = new Headers(baseHeaders || {});
-    if (contentType) headers.set('content-type', contentType);
     if (isRequest) {
+      const request = new Request(input, frozenInit);
+      return {
+        input: request,
+        isRequest: true,
+        init: {},
+        headers: new Headers(request.headers),
+        headerMap: readHeaders(null, request),
+        hasInitBody: false,
+        body: undefined,
+        uncapturableBody: hasInitBody && (
+          (typeof ReadableStream !== 'undefined' && body instanceof ReadableStream) ||
+          (body && typeof body === 'object' && body.nodeType === 9)
+        ) ? body : null
+      };
+    }
+
+    // RequestInfo's non-Request arm is a USVString. Native fetch converts any
+    // object supplied there synchronously, so retain that string rather than a
+    // page-owned object whose toString() result can change while we wait.
+    let frozenInput;
+    try { frozenInput = String(input); }
+    catch {
+      // Preserve the existing fail-closed/pass-through handling for a value the
+      // URL resolver cannot coerce. Successful conversions are always frozen;
+      // failed ones remain failed and never cross an async boundary in scope.
+      frozenInput = input;
+    }
+    const headers = new Headers(frozenInit.headers || {});
+    frozenInit.headers = headers;
+    return {
+      input: frozenInput, isRequest: false, init: frozenInit, headers, headerMap,
+      hasInitBody, body, uncapturableBody: null
+    };
+  }
+
+  function releaseFrozenFetch(frozen) {
+    if (frozen.isRequest) return origFetch.call(window, frozen.input);
+    return origFetch.call(window, frozen.input, frozen.init);
+  }
+
+  // Re-issue a fetch from the snapshot, with the approved body as BYTES — never
+  // a string, and never the page's own object: the Content-Type may carry a
+  // multipart boundary that has to match the body byte-for-byte, and the only
+  // body that does is the one those bytes came from. A clean allow goes out
+  // through here for the same reason a redaction does — releasing `arguments`
+  // would give the page a second, unscreened say in what actually left.
+  //
+  // Everything else about the call — url, method, credentials, mode, cache,
+  // redirect, referrer, integrity, keepalive, signal — is the page's, carried
+  // by the init copy and, for a Request input, by the Request constructor,
+  // which copies exactly those fields off the input. The browser recomputes
+  // framing (Content-Length).
+  function releaseFetch(frozen, bodyBytes, contentType) {
+    const headers = new Headers(frozen.headers);
+    if (contentType) headers.set('content-type', contentType);
+    const init = { ...frozen.init, body: bodyBytes, headers };
+    if (frozen.isRequest) {
       // `init` still applies when `input` is a Request — it overrides the
       // Request's own fields, and fetch(new Request(url), { method: 'POST',
       // body }) is a legal call shape. Dropping it here rebuilt a GET with a
       // body, which throws before any [sonomos] line could name the block,
       // and silently lost the page's signal/credentials/mode on the resend.
-      return origFetch.call(window, new Request(input, { ...(init || {}), body: bodyBytes, headers }));
+      return origFetch.call(window, new Request(frozen.input, init));
     }
-    return origFetch.call(window, input, { ...(init || {}), body: bodyBytes, headers });
+    return origFetch.call(window, frozen.input, init);
   }
 
   // Fail-closed block for an in-scope XHR: cancel it rather than let an
@@ -1728,7 +1805,86 @@
     'sonomosBlockMessage'
   ]);
 
+  // ── who owns the completion of a held XHR ───────────────────────────────
+  //
+  // Between our `send()` wrapper deferring and the branch that finally
+  // forwards or refuses the request, the underlying XHR has never had its send
+  // flag set. Two things follow, and both are load-bearing:
+  //
+  //   • the page's own `abort()` fires NOTHING and leaves readyState at OPENED
+  //     (the same spec corner `blockXhr` documents), so a page that cancels a
+  //     held request and waits for `abort`/`loadend` waits forever;
+  //   • and nothing stops us forwarding, moments later, a request the page has
+  //     already cancelled — which sends content the user just told the page not
+  //     to send.
+  //
+  // `__sonomos.held` marks the window in which those are true. It is set as the
+  // deferred branch begins and cleared by `releaseXhr` the instant the request
+  // stops being ours — forwarded, refused, or cancelled — so exactly one of us
+  // ever answers a given send.
+  function releaseXhr(xhr) {
+    try { if (xhr && xhr.__sonomos) xhr.__sonomos.held = false; } catch { /* ignore */ }
+  }
+
+  // The DOMException a native XHR throws for a call made at the wrong time.
+  // Built as a real DOMException where the realm has one, so `instanceof` and
+  // `code` behave; a plain Error carrying the same `name` otherwise, because
+  // the name is what callers actually test.
+  function invalidState(method) {
+    const message = `Failed to execute '${method}' on 'XMLHttpRequest': The object's state must be OPENED.`;
+    try {
+      if (typeof DOMException === 'function') return new DOMException(message, 'InvalidStateError');
+    } catch { /* not constructible here */ }
+    const err = new Error(message);
+    err.name = 'InvalidStateError';
+    return err;
+  }
+
+  // The page aborted a request we were still holding.
+  //
+  // What a real aborted XHR presents is readyState 4 with status 0, then
+  // `readystatechange`, then `abort`, then `loadend`. That is what we present,
+  // for the same reason `blockXhr` synthesizes the error sequence: the real
+  // `abort()` cannot, because we never forwarded the send.
+  //
+  // Deliberately NOT `error`, and deliberately no `sonomos*` properties. This
+  // is the page's own cancellation, not our refusal, and stamping a Locke block
+  // on it would put our name on a request the user chose not to make — in a
+  // support log, months later, indistinguishable from one we stopped.
+  function abortHeldXhr(xhr) {
+    try {
+      Object.defineProperty(xhr, 'readyState', {
+        value: 4, writable: false, enumerable: true, configurable: true
+      });
+    } catch { /* a frozen or exotic XHR — the events below still stand */ }
+    let make = null;
+    let plain = null;
+    try {
+      if (typeof xhr.dispatchEvent !== 'function') return;
+      make = typeof ProgressEvent === 'function'
+        ? (type) => new ProgressEvent(type)
+        : typeof Event === 'function' ? (type) => new Event(type) : null;
+      if (!make) return;
+      plain = typeof Event === 'function' ? (type) => new Event(type) : make;
+    } catch { return; /* events are unavailable in this realm */ }
+    // One try per dispatch, for the reason spelled out in `blockXhr`: a page
+    // handler that throws on the first event must not swallow the two that
+    // actually release a waiting page.
+    const fire = (factory, type) => {
+      try { xhr.dispatchEvent(factory(type)); }
+      catch { /* the page's own handler threw — the remaining events still fire */ }
+    };
+    fire(plain, 'readystatechange');
+    fire(make, 'abort');
+    fire(make, 'loadend');
+  }
+
   function blockXhr(xhr, reason, fields) {
+    // We are answering this request ourselves, so it stops being held here: the
+    // `abort()` below runs through our own wrapper, and without this it would
+    // read as the page cancelling a request we were still sitting on and fire a
+    // second completion sequence on top of ours.
+    releaseXhr(xhr);
     try { xhr.abort(); } catch { /* nothing more we can safely do */ }
     try {
       // Enumerable on purpose: a support engineer typing the object into a
@@ -1815,6 +1971,13 @@
   // (sensitive, screened downstream, never logged). The browser's own
   // network-layer headers (cookies, sec-fetch-*, UA) are added after our
   // reach and are not part of the capture.
+  //
+  // `init.headers` REPLACES a Request input's own headers; it does not merge
+  // with them. That is the Request constructor's own rule (Fetch §5.4: when
+  // `init["headers"]` exists the header list is emptied and filled from it),
+  // and reading it as a merge screened headers the browser was never going to
+  // send — while `resendFetch` below has always read it as a replace, so the
+  // two halves of this file disagreed about what the request even was.
   function readHeaders(init, requestObj) {
     const out = {};
     const absorb = (h) => {
@@ -1831,8 +1994,11 @@
         }
       } catch { /* ignore malformed header containers */ }
     };
+    if (init && init.headers) {
+      absorb(init.headers);
+      return out;
+    }
     if (requestObj && requestObj.headers) absorb(requestObj.headers);
-    if (init && init.headers) absorb(init.headers);
     return out;
   }
 
@@ -1865,6 +2031,51 @@
       return over;
     }
     return { hadBody: true, bytes, effectiveCt: effectiveCt || null, reason: null };
+  }
+
+  // ── freezing a mutable body ─────────────────────────────────────────────
+  //
+  // Both specs extract the body SYNCHRONOUSLY, at the call: `fetch()` builds a
+  // Request there and then (Fetch §5.4), and `send()` extracts the body before
+  // it returns (XHR §3.5.6). Nothing the page does afterwards can change what a
+  // native call puts on the wire.
+  //
+  // Holding the request breaks that, because the screening round trip puts real
+  // time between the call and the send. In that window the page — or anything
+  // running in it — can `set()` a field on the FormData it handed us, write
+  // over the bytes of the typed array it passed, or swap `init.body` outright,
+  // and the request that finally leaves is not the one we screened. Screening
+  // that cannot say WHICH bytes it approved is not screening.
+  //
+  // So the extraction goes back where the specs have it: a stable copy, taken
+  // before the first `await`, from which everything downstream is built — the
+  // bytes we screen AND the body we release.
+  //
+  // Strings and Blobs are already immutable and come back as they are. A
+  // ReadableStream or a Document cannot be copied at all; they come back
+  // untouched and `captureBodyBytes` fails closed on them, exactly as before.
+  function freezeBody(body) {
+    if (body == null || typeof body === 'string') return body;
+    try {
+      if (typeof FormData !== 'undefined' && body instanceof FormData) {
+        // Entry values are strings and Blobs, both immutable, so copying the
+        // entry LIST is enough — the parts themselves cannot change under us.
+        const copy = new FormData();
+        body.forEach((value, name) => { copy.append(name, value); });
+        return copy;
+      }
+      if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+        return new URLSearchParams(body);
+      }
+      // Byte-exact whatever the view's element type is, and off the page's
+      // buffer — a DataView or an Int32Array shares memory the same way a
+      // Uint8Array does.
+      if (ArrayBuffer.isView(body)) {
+        return new Uint8Array(body.buffer, body.byteOffset, body.byteLength).slice();
+      }
+      if (body instanceof ArrayBuffer) return body.slice(0);
+    } catch { /* a body we cannot copy — capture answers for it below */ }
+    return body;
   }
 
   async function captureBodyBytes(body) {
@@ -2032,31 +2243,35 @@
   const origFetch = window.fetch;
   if (typeof origFetch === 'function') {
     window.fetch = async function (input, init) {
-      let action = 'send';   // out-of-scope / no-body → send the original untouched
+      const frozen = freezeFetchCall(input, init);
+      let action = 'send';   // out-of-scope / no-body → release the frozen call
       let rebuilt = null;    // redact: { body: Uint8Array, contentType }
       let committed = false; // did we enter enforcement scope for this request?
       // Which branch blocked, so the rejection can say so rather than shrug.
       let blockReason = 'internal-error';
       let blockFields = null;
+      let approved = null;    // the exact bytes/Content-Type an allow releases
       const shape = newShape('fetch');
       const say = reporter(shape, Date.now());
       try {
-        const url = resolveUrl(input);
+        const url = resolveUrl(frozen.input);
         fillUrl(shape, url);
-        const reqObj = (typeof input === 'object' && input) ? input : null;
-        const method = (init && init.method) || (reqObj && reqObj.method) || 'GET';
+        const reqObj = (typeof frozen.input === 'object' && frozen.input) ? frozen.input : null;
+        const method = frozen.isRequest
+          ? frozen.input.method
+          : (frozen.init.method || (reqObj && reqObj.method) || 'GET');
         // Headers are read at most once, and only when something asks — the
         // upload test consults them only for a cross-origin bodied POST, so a
         // busy chat page's hundreds of ordinary requests never pay for it.
         let headerCache = null;
-        const headersOf = () => (headerCache ??= readHeaders(init, reqObj));
+        const headersOf = () => (headerCache ??= frozen.headerMap);
         // The AI-host test is evaluated first and is untouched by any of this:
         // isUploadScope is total and can only ever answer for a host the
         // catalog does NOT contain, so a bug in it cannot disturb the scope
         // this file has always enforced.
         let scope = null;
         if (isScreenedUrl(url)) scope = SCOPE.AI;
-        else if (url && isUploadScope(url, method, headersOf, () => hasFetchBody(input, init))) {
+        else if (url && isUploadScope(url, method, headersOf, () => hasFetchBody(frozen.input, frozen.init))) {
           scope = SCOPE.UPLOAD;
         }
         // A catalog host, decided before the disable set could arrive: give the
@@ -2075,15 +2290,23 @@
           shape.method = String(method).toUpperCase();
           const headers = headersOf();
           shape.ct = mediaType(headers['content-type']);
-          const initBody = (init && 'body' in init) ? init.body : undefined;
+          const initBody = frozen.hasInitBody ? frozen.body : undefined;
           let cap;
-          if (initBody !== undefined && initBody !== null) {
+          if (frozen.uncapturableBody) {
+            cap = await captureBodyBytes(frozen.uncapturableBody);
+          } else if (initBody !== undefined && initBody !== null) {
             cap = await captureBodyBytes(initBody);
           } else if (reqObj && typeof reqObj.clone === 'function' && reqObj.body != null) {
             // Body carried on the Request object — clone so the held original
-            // stays sendable, and read the exact bytes (binary-safe).
+            // stays sendable, and read the exact bytes (binary-safe). A
+            // Request's body is immutable once constructed, so this one needs
+            // no freezing; its Content-Type does travel with it, and is the
+            // effective one whenever `init.headers` replaced the set that
+            // carried it.
             try {
-              cap = capped(new Uint8Array(await reqObj.clone().arrayBuffer()), null);
+              let reqCt = null;
+              try { reqCt = reqObj.headers ? reqObj.headers.get('content-type') : null; } catch { /* no readable headers */ }
+              cap = capped(new Uint8Array(await reqObj.clone().arrayBuffer()), reqCt);
             } catch {
               cap = uncapturable('uncapturable-request-clone'); // in scope, fail closed
             }
@@ -2105,6 +2328,14 @@
             } else {
               shape.bytes = cap.bytes.byteLength;
               if (!shape.ct) shape.ct = mediaType(cap.effectiveCt);
+              // What a clean allow releases: these bytes, under the same
+              // Content-Type they are screened under — the one the page set, or
+              // the one the serialization minted for it (a multipart boundary
+              // is only correct beside the bytes it was generated with).
+              approved = {
+                body: cap.bytes,
+                contentType: headers['content-type'] ? null : cap.effectiveCt
+              };
               const raw = synthesizeRequest(method, url, headers, cap.effectiveCt, cap.bytes,
                 scope === SCOPE.UPLOAD);
               const res = await enforce(b64FromBytes(raw), providerFor(url));
@@ -2130,7 +2361,7 @@
               say(levelFor(action, reason), reason, { action, ...extra });
             }
           }
-        } else if (!url && hasFetchBody(input, init)) {
+        } else if (!url && hasFetchBody(frozen.input, frozen.init)) {
           // We are injected on AI surfaces and nowhere else, so a bodied
           // request whose target we cannot even resolve is a "couldn't check"
           // state, not somebody else's traffic. Fail closed.
@@ -2157,8 +2388,12 @@
         // the thrown sentence and the logged one must be the same sentence.
         throw new TypeError(blockMessage(blockReason, { bytes: shape.bytes, ...blockFields }));
       }
-      if (action === 'redact') return resendFetch(input, init, rebuilt.body, rebuilt.contentType);
-      return origFetch.apply(this, arguments);
+      if (action === 'redact') return releaseFetch(frozen, rebuilt.body, rebuilt.contentType);
+      // A screened allow is re-issued from the snapshot, not from `arguments`.
+      // Calls that waited only for configuration also use the snapshot: an
+      // initially bodyless call must not gain an unscreened body in that wait.
+      if (approved) return releaseFetch(frozen, approved.body, approved.contentType);
+      return releaseFrozenFetch(frozen);
     };
   }
 
@@ -2168,6 +2403,7 @@
     const origOpen = XHR.prototype.open;
     const origSetHeader = XHR.prototype.setRequestHeader;
     const origSend = XHR.prototype.send;
+    const origAbort = typeof XHR.prototype.abort === 'function' ? XHR.prototype.abort : null;
 
     XHR.prototype.open = function (method, url) {
       // A refused XHR is not necessarily a dead one. `open()` on a used object
@@ -2192,6 +2428,11 @@
         try { delete this[prop]; } catch { /* non-configurable — nothing we can undo */ }
       }
       try {
+        // A FRESH state object every time, and its identity is this request's
+        // generation — the thing a deferred branch checks to find out whether
+        // the object it is holding still describes the request it screened. See
+        // the `abandoned` guard in `send`.
+        //
         // arguments[2] is the async flag; only `false` means a synchronous XHR,
         // which we can't defer (see send) and therefore fail closed.
         this.__sonomos = { method, url: resolveUrl(url), headers: {}, async: arguments[2] !== false };
@@ -2200,11 +2441,51 @@
     };
 
     XHR.prototype.setRequestHeader = function (name, value) {
+      let s = null;
+      try { s = this.__sonomos; } catch { /* ignore */ }
+      // While we hold the request, the page's own send() has happened as far as
+      // the page is concerned, and XHR §3.5.2 makes a header set with the
+      // send() flag set an InvalidStateError. Native behaviour and the honest
+      // answer are the same one here: this header was not part of what we
+      // captured, and quietly appending it would put an unscreened header on a
+      // request that has already been screened.
+      if (s && s.held === true) throw invalidState('setRequestHeader');
       try {
-        if (this.__sonomos) this.__sonomos.headers[String(name).toLowerCase()] = String(value);
+        if (s) s.headers[String(name).toLowerCase()] = String(value);
       } catch { /* ignore */ }
       return origSetHeader.apply(this, arguments);
     };
+
+    // ── abort ───────────────────────────────────────────────────────────────
+    //
+    // The one page-facing XHR call that had no wrapper, and it needed one for a
+    // reason that is not cosmetic: while we hold a request, `abort()` is a
+    // no-op at both ends. The real one fires nothing (our `send()` wrapper never
+    // forwarded the page's send, so the send flag is unset) and it does not stop
+    // us — the deferred branch went on to forward the request moments later.
+    // Together those are the worst pairing available here: the user pressed
+    // stop, the page reported nothing, and the prompt was sent anyway.
+    //
+    // So the flag is recorded before delegating — the deferred branch re-reads
+    // it after every `await` and declines to send — and, when the request was
+    // still ours, the completion the page is owed is raised here, because the
+    // real `abort()` cannot raise it.
+    //
+    // Nothing about an ordinary abort changes: an XHR we never held, or one we
+    // have already forwarded, is delegated untouched and answered by the browser
+    // exactly as before.
+    if (origAbort) {
+      XHR.prototype.abort = function () {
+        let held = false;
+        try {
+          const s = this.__sonomos;
+          if (s) { held = s.held === true; s.aborted = true; s.held = false; }
+        } catch { /* ignore */ }
+        const result = origAbort.apply(this, arguments);
+        if (held) abortHeldXhr(this);
+        return result;
+      };
+    }
 
     // Re-issue a held XHR with the screener's rebuilt body BYTES. XHR headers are
     // append-only (a second setRequestHeader comma-joins), so the rebuilt
@@ -2214,6 +2495,10 @@
     // *differs* can't be overridden without corrupting the header → fail
     // closed.
     function resendXhr(xhr, pageCt, rebuilt, say, reason, extra) {
+      // Every branch below either forwards or refuses, so the request stops
+      // being ours here. (blockXhr does this too; doing it once up front covers
+      // the origSend arms as well.)
+      releaseXhr(xhr);
       const rebuiltCt = mediaType(rebuilt.contentType);
       const level = levelFor('redact', reason);
       if (!rebuilt.contentType || rebuilt.contentType === pageCt) {
@@ -2247,6 +2532,13 @@
     XHR.prototype.send = function (body) {
       let s = null;
       try { s = this.__sonomos; } catch { /* ignore */ }
+      // A second send() on a request we are still holding. XHR §3.5.6 throws
+      // InvalidStateError when the send() flag is set, and that is exactly the
+      // state the page is in: it called send(), we took the request, and it has
+      // not been answered yet. Letting the second one through would start a
+      // second screening round trip against the same object, after which
+      // whichever verdict landed last would answer for a request it never saw.
+      if (s && s.held === true) throw invalidState('send');
       // Same two-step scope as the fetch hook, in the same order: the AI-host
       // test first and unchanged, the cross-origin object-write test only for
       // hosts it did not match. `body` is not consulted here — the bodyless
@@ -2298,6 +2590,54 @@
         return;
       }
 
+      // Freeze the body here, which is where XHR §3.5.6 extracts it. From this
+      // line on, both what we screen and what we release are this copy — see
+      // `freezeBody`. The page keeps its own object and may do as it likes with
+      // it; nothing it does can reach the request any more.
+      const frozen = freezeBody(body);
+
+      // From here the request is ours until one of the branches below forwards
+      // or refuses it. See `releaseXhr` for what this window means.
+      try { s.held = true; } catch { /* ignore */ }
+
+      // Has this request stopped being ours? Re-asked after every await and in
+      // the catch, because each of those is a place the page can take the
+      // object back.
+      //
+      // TWO WAYS, and they are not the same event.
+      //
+      // `abort()` CANCELS this request. The page has already been answered by
+      // the abort wrapper, so neither sending nor refusing is ours to do —
+      // raising a Locke block on top would put our refusal in the log for
+      // something the user did.
+      //
+      // `open()` REPLACES it. Reusing one XHR object is ordinary — retry loops
+      // and jQuery-era wrappers do it routinely — and the open wrapper hands
+      // the successor a fresh state object, so `s` is then the PREVIOUS
+      // request's. Answering with it answers the wrong send, in both
+      // directions: a stale allow releases the successor's body without the
+      // verdict the successor is still waiting for, and a stale block aborts a
+      // request nobody has screened yet. Identity of the state object is that
+      // generation, and comparing it is the whole check.
+      //
+      // Dropping the stale branch silently is what the object already promises:
+      // XHR §3.5.1 has open() terminate the fetch it replaces and fire nothing
+      // for it.
+      const superseded = () => {
+        try { return xhr.__sonomos !== s; } catch { return true; }
+      };
+      const abandoned = () => {
+        if (superseded()) {
+          say('debug', 'superseded-while-held', { action: 'drop' });
+          return true;
+        }
+        if (s.aborted === true) {
+          say('debug', 'aborted-while-held', { action: 'drop' });
+          return true;
+        }
+        return false;
+      };
+
       (async () => {
         // The same page-start race the fetch hook handles: this is a catalog
         // host, and the disable set had not arrived when send() ran. It can
@@ -2307,16 +2647,20 @@
         // neither ever waits.
         if (scope === SCOPE.AI && !configArrived) {
           await waitForFirstConfig();
+          if (abandoned()) return;
           if (!isScreenedHost(s.url.hostname)) { // switched off or policy-excluded after all
             say('debug', 'not-in-scope', { action: 'send' });
-            origSend.call(xhr, body);
+            releaseXhr(xhr);
+            origSend.call(xhr, frozen);
             return;
           }
         }
-        const cap = await captureBodyBytes(body);
+        const cap = await captureBodyBytes(frozen);
+        if (abandoned()) return;
         if (!cap.hadBody) { // empty after all → untouched
           say('debug', 'no-body', { action: 'send' });
-          origSend.call(xhr, body);
+          releaseXhr(xhr);
+          origSend.call(xhr, frozen);
           return;
         }
         if (cap.bytes == null) { // uncapturable → fail closed
@@ -2329,6 +2673,7 @@
         const raw = synthesizeRequest(s.method, s.url, s.headers, cap.effectiveCt, cap.bytes,
           scope === SCOPE.UPLOAD);
         const res = await enforce(b64FromBytes(raw), providerFor(s.url));
+        if (abandoned()) return;
         const d = decide(res);
         const veto = (d.action === 'redact' && scope === SCOPE.UPLOAD)
           ? uploadRedactVeto(d.reason, s.headers) : null;
@@ -2337,7 +2682,8 @@
           blockXhr(xhr, veto, { bytes: shape.bytes, ...d.fields });
         } else if (d.action === 'send') {
           say(levelFor('send', d.reason), d.reason, { action: 'send', ...d.fields });
-          origSend.call(xhr, body);
+          releaseXhr(xhr);
+          origSend.call(xhr, frozen);
         } else if (d.action === 'redact') {
           const built = rebuildFrom(res.verdict.receipt.requestB64);
           if (!built.rebuilt) { // malformed rebuild → fail closed
@@ -2354,6 +2700,10 @@
           blockXhr(xhr, d.reason, { bytes: shape.bytes, ...d.fields });
         }
       })().catch((e) => {
+        // Even our own failure must not answer for a request that stopped being
+        // ours: blocking here would abort a successor the page has already
+        // opened, or stamp a Locke refusal on a send the user cancelled.
+        if (abandoned()) return;
         say('warn', 'internal-error', { action: 'block', detail: clip(e && e.message) });
         blockXhr(xhr, 'internal-error');
       });
