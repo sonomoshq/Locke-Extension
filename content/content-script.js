@@ -14,6 +14,12 @@
 // restart, torn-down context), we reply with a null verdict, which the shim
 // treats as "block". We never leave a held request without an answer.
 //
+// One of those causes is told apart from the rest, and only so the block can
+// explain itself: an extension reload orphans this script for the life of the
+// tab, so the answer is "reload the page" rather than "try again" (see
+// DEAD_CHANNEL). It is still a block — the reply is the same fail-closed shape
+// with a reason attached, never a send.
+//
 // We are also the shim's only route to its own settings: a MAIN-world script
 // has no chrome.* APIs, so we read them here and post them across (see
 // pushConfig at the bottom).
@@ -74,6 +80,59 @@
   const isGecko = typeof globalThis.browser !== 'undefined' && !!globalThis.browser?.runtime;
   const api = isGecko ? globalThis.browser : globalThis.chrome;
 
+  // ── "this tab's channel is dead" vs "the worker is asleep" ─────────────
+  //
+  // Both arrive here as a failed sendMessage, both block the send, and the
+  // difference is the only thing the user can act on.
+  //
+  // Reloading, updating or re-enabling the extension orphans every content
+  // script already injected into an open tab. THIS script keeps running — it
+  // is page-lifetime, not extension-lifetime — but its `runtime` port belongs
+  // to a generation of the extension that no longer exists, so every later
+  // relay fails and every in-scope request in this tab blocks for the rest of
+  // the tab's life. Retrying cannot clear it. Nothing in the browser says so,
+  // and the popup cannot see it either: the worker is never reached, so no
+  // capture failure is ever recorded for it. The one fix is a page reload,
+  // which injects a live content script — and until we said that, a correct
+  // fail-closed block on a healthy install was indistinguishable from Locke
+  // being broken.
+  //
+  // The other shape ("Could not establish connection. Receiving end does not
+  // exist") is an MV3 service worker that had been evicted, which the next
+  // send wakes. Same block, opposite advice, so they must not share a
+  // sentence.
+  //
+  // Matched on the browser's own message text because that is the only signal
+  // there is: `runtime.id` reads `undefined` in an orphaned Chromium context
+  // but is not specified to, and touching `runtime` at all can throw here.
+  // An unrecognised message keeps the old, weaker answer — a null verdict —
+  // rather than claiming a cause we did not observe.
+  const DEAD_CHANNEL = /context invalidated/i;
+
+  // What we hand the shim for a dead channel, instead of a bare null.
+  //
+  // It is the service worker's own relay-failure shape, which the shim
+  // already routes through `RELAY_BLOCK_REASON` (content/shim.js) — and every
+  // entry in that table blocks. So this buys the user a sentence and can
+  // never buy the page a send: `ok: false` reaches the same fail-closed
+  // branch a null does, one reason string better off. `message` is our own
+  // fixed text, never the browser's, so nothing from this tab rides out.
+  const DEAD_CHANNEL_VERDICT = Object.freeze({
+    ok: false,
+    code: 'extension-reloaded',
+    message: 'the extension was reloaded, updated or re-enabled after this page was opened'
+  });
+
+  const isDeadChannel = (e) => {
+    try {
+      return DEAD_CHANNEL.test(String((e && e.message) || ''));
+    } catch {
+      // A thrown getter on a hostile error object is not evidence of a
+      // reload. Fall back to the unattributed block.
+      return false;
+    }
+  };
+
   // The two dialects can't share one call shape, and guessing wrong is not
   // cheap: `browser.runtime.sendMessage(message, fn)` reads that second
   // argument as the *options* object and rejects a function, while sending
@@ -124,7 +183,9 @@
 
     // Relay to the service worker and answer the shim with its verdict. Any
     // failure (context invalidated, no receiving end during an SW restart)
-    // resolves to a null verdict → the shim fails closed and blocks the request.
+    // blocks the request: a null verdict, or — for the one cause whose remedy
+    // is not "try again" — the relay-failure shape carrying its reason. Both
+    // land in the shim's fail-closed branches; neither can produce a send.
     try {
       // Omitted, not nulled, when the shim attributed nothing — an
       // unattributed capture stays the exact message older builds sent.
@@ -137,9 +198,12 @@
         resp.then((v) => reply(v ?? null), (e) => {
           // The classic one: "Extension context invalidated" after a reload,
           // or "Could not establish connection" while the SW restarts. Both
-          // block the send, and neither is visible anywhere else.
-          warn('relay-rejected', e && e.message);
-          reply(null);
+          // block the send, and neither is visible anywhere else — so the
+          // first gets named, because its remedy is a page reload and the
+          // other's is nothing at all. See DEAD_CHANNEL.
+          const dead = isDeadChannel(e);
+          warn(dead ? 'extension-reloaded' : 'relay-rejected', e && e.message);
+          reply(dead ? DEAD_CHANNEL_VERDICT : null);
         });
       } else {
         // askWorker's Chromium branch always hands back a promise, so this is
@@ -150,8 +214,14 @@
         reply(null);
       }
     } catch (e) {
-      warn('relay-threw', e && e.message);
-      reply(null);
+      // Firefox's `browser.runtime.sendMessage` throws synchronously on a
+      // torn-down context rather than returning a rejected promise, so the
+      // dead channel arrives here as often as it arrives above. Same
+      // attribution, or the remedy would depend on which browser the user
+      // happened to be in.
+      const dead = isDeadChannel(e);
+      warn(dead ? 'extension-reloaded' : 'relay-threw', e && e.message);
+      reply(dead ? DEAD_CHANNEL_VERDICT : null);
     }
   });
 

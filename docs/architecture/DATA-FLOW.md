@@ -126,7 +126,18 @@ out-of-scope traffic is never touched.
   error; the shim maps it to a block. The service worker's heartbeat flips the
   connection status (`disconnected` / `no-bridge`) and the badge reflects it.
 - **Extension context torn down** (reload / SW restart): the content script answers
-  the shim with a null verdict → block.
+  the shim with a null verdict → block. One cause is told apart from the rest,
+  because its remedy is different: an extension reload, update or re-enable
+  **orphans the content script in every tab that was already open**, so that tab
+  relays on a channel belonging to an extension generation that no longer exists
+  and blocks every in-scope request for the life of the tab. Retrying cannot
+  clear it; reloading the page can. The content script recognises the browser's
+  "Extension context invalidated" and answers with the relay-failure shape
+  carrying `extension-reloaded` instead of a bare null — the same block, with a
+  reason and an instruction. A sleeping service worker ("Receiving end does not
+  exist") keeps the unattributed null, because for that one retrying is the fix.
+  Nothing about this reaches the popup: the service worker was never called, so
+  no capture failure is recorded (see HONEST.md's note on per-tab evidence).
 - **Verdict timeout** (200 s in the shim, settable via `enforceTimeoutMs`; behind
   the worker's 190 s `NATIVE_CALL_TIMEOUT_MS` and the native host's 180 s
   `CAPTURE_DEADLINE`, so the specific diagnosis fires first): block —
@@ -152,7 +163,7 @@ never sent.
 | Class | Means | Branches |
 |---|---|---|
 | `policy` | the screener looked and said no | `decision-block` |
-| `unavailable` | screening never happened, or the chain answered unintelligibly | `verdict-timeout`, `verdict-channel-failed`, `verdict-missing`, `native-call-failed`, `connector-not-started`, `bridge-unreachable`, `bridge-unreadable-reply`, `relay-error`, `relay-rejected`, `screening-timeout`, `screening-unavailable`, `verdict-malformed`, `decision-missing`, `decision-unknown`, `redact-*`, `internal-error` |
+| `unavailable` | screening never happened, or the chain answered unintelligibly | `verdict-timeout`, `verdict-channel-failed`, `verdict-missing`, `native-call-failed`, `connector-not-started`, `bridge-unreachable`, `bridge-unreadable-reply`, `relay-error`, `relay-rejected`, `extension-reloaded`, `screening-timeout`, `screening-unavailable`, `verdict-malformed`, `decision-missing`, `decision-unknown`, `redact-*`, `internal-error` |
 | `too-large` | over the screening size limit — **not** a sensitive-data block | `uncapturable-oversize`, `receipt-too-large` |
 | `unsupported` | this surface cannot screen this request at all | `uncapturable-stream`, `uncapturable-document`, `uncapturable-unreadable`, `uncapturable-request-clone`, `uncapturable-sync-xhr`, `uncapturable-beacon`, `scope-unresolvable` |
 

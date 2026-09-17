@@ -8,6 +8,30 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Fixed**
+- A tab that was already open when the extension was reloaded, updated or
+  re-enabled blocked every in-scope request with a generic reason, so a
+  healthy install looked broken. The block itself was correct and stays
+  exactly as it was: that reload orphans the content script in the tab, which
+  goes on relaying on a channel belonging to an extension generation that no
+  longer exists, and fail-closed means every request in that tab is blocked
+  until the page is reloaded. What was wrong is what the user was told — the
+  same "the Locke extension restarted while this request was waiting. Reload
+  the page and try again" a merely-sleeping service worker produces, which
+  named no cause and implied that retrying would help. It never does here, and
+  the user's own next moves (retry, restart the desktop app, reinstall the
+  extension — which orphans more tabs) range from useless to worse. The
+  content script now recognises the browser's "Extension context invalidated"
+  and reports `extension-reloaded`, whose copy names the cause, says it is not
+  a sensitive-data block, gives the one action that works, and says that
+  retrying without it will keep failing. A sleeping worker ("Receiving end
+  does not exist") keeps the old unattributed block, because for that one
+  retrying *is* the fix. The popup's "nothing sent yet" line — the state a
+  user lands in seconds after a reload, since that event clears
+  `storage.session` — carries the same remedy, as standing advice rather than
+  a detection: a dead channel never reaches the service worker, so the popup
+  cannot observe it and does not claim to.
+
 ## [2.0.2] — 2026-09-08
 
 **Summary.** 2.0.2 raises the fail-closed verdict ceiling so a cold screen of a

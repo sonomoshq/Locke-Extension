@@ -1143,6 +1143,14 @@
     'bridge-unknown-response': 'bridge-unreadable-reply',
     'capture-error': 'relay-error',
     'bad-request': 'relay-rejected',
+    // The one entry here that does NOT come from the service worker: the
+    // content script sets it itself when its own channel is dead
+    // (content/content-script.js `DEAD_CHANNEL`), because that failure never
+    // reaches the worker at all. It rides this table because this table is
+    // where a relay failure is turned into words, and because every entry in
+    // it blocks — so routing a content-script cause through it cannot widen
+    // what gets sent.
+    'extension-reloaded': 'extension-reloaded',
     // `[added 2026-09-08]` Both were falling through to `native-call-failed`,
     // whose sentence is "the Locke desktop app could not be reached. Start it."
     // Nothing was unreachable in either case — see the notes in `decide()`.
@@ -1246,6 +1254,14 @@
       //     channel this failed on.
       //   `bad-request`             — the host rejected our frame as
       //     malformed. Also ours, and also a version skew.
+      //   `extension-reloaded`      — the only code here the SERVICE WORKER
+      //     never sends, because this failure never reaches it: the content
+      //     script's own channel died when the extension was reloaded or
+      //     updated, and it sets the code itself
+      //     (content/content-script.js `DEAD_CHANNEL`). The block is the same
+      //     one a null verdict already produced; what is new is that it names
+      //     a cause whose remedy — reload THIS page — is the one thing the
+      //     generic "the extension restarted, try again" never told anyone.
       //   `host-panic`              — a handler inside our native-messaging
       //     host PANICKED on this request. Our component, crashed. The desktop
       //     app may be entirely healthy; we died before we could ask it. The
@@ -1464,6 +1480,25 @@
       'the page could not reach the Locke extension. Reload the page and try again.'],
     'verdict-missing': ['unavailable',
       'the Locke extension restarted while this request was waiting. Reload the page and try again.'],
+    // The sharpest version of the line above, and the reason it was worth
+    // splitting out. `verdict-missing` covers every way the content script
+    // could fail to answer, most of which clear themselves: a service worker
+    // that was asleep wakes on the next send, so "try again" is honest advice.
+    // This one never clears. An extension reload, update or re-enable orphans
+    // the content script in every tab that was already open: the tab keeps
+    // relaying on a channel belonging to an extension generation that no
+    // longer exists, so EVERY in-scope request in it blocks until the page is
+    // reloaded — correctly, fail-closed, and indistinguishably from Locke
+    // being broken. That is the whole defect: a working install reads as a
+    // broken one, and the user's own remedy (retry, restart the app, reinstall
+    // the extension — which orphans more tabs) makes it worse.
+    //
+    // So this sentence does three things the generic one did not: it names the
+    // cause, it says the block is not about their content, and it gives the
+    // one action that works. "This page" and not "the page", because a user
+    // with several tabs open needs to know it is per-tab.
+    'extension-reloaded': ['unavailable',
+      'Locke was reloaded or updated after this page was opened, so this page’s screening channel is no longer connected — this is NOT a sensitive-data block, and nothing was sent. Reload this page to restore screening, then retry. Retrying without reloading will keep failing.'],
     'native-call-failed': ['unavailable',
       'the Locke desktop app could not be reached. Start it, then try again.'],
     // The browser could not start our native-messaging host at all — see the
