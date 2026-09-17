@@ -570,10 +570,35 @@ verdict means no send. The residuals we accept and document:
   **What is still open:** the evidence is browser-global, not per-tab
   — a failure on one AI surface downgrades the popup for all of them —
   and failures the service worker never sees (the content script's own
-  `relay-rejected` / `relay-threw`, and the shim-local
-  `verdict-timeout` / `verdict-missing`) still cannot reach the popup,
-  because by definition the worker was unreachable when they happened.
-  Both fail toward "we cannot tell", never toward green.
+  `relay-rejected` / `relay-threw` / `extension-reloaded`, and the
+  shim-local `verdict-timeout` / `verdict-missing`) still cannot reach
+  the popup, because by definition the worker was unreachable when they
+  happened. Both fail toward "we cannot tell", never toward green.
+
+  `[added 2026-09-17]` One of those unreachable failures is now at
+  least *explained*, on the surface that can explain it. An extension
+  reload, update or re-enable orphans the content script in every tab
+  that was already open: that tab keeps relaying on a channel belonging
+  to an extension generation that no longer exists, so every in-scope
+  request in it blocks — correctly, fail-closed — for the life of the
+  tab, until the page is reloaded. Retrying cannot clear it. The block
+  was right and the sentence was boilerplate ("the Locke extension
+  restarted while this request was waiting. Reload the page and try
+  again", the same line a sleeping service worker produces), so a
+  healthy install was indistinguishable from a broken one and the
+  user's own next moves — retry, restart the app, reinstall the
+  extension, which orphans more tabs — ranged from useless to worse.
+  The content script now recognises the browser's own "Extension
+  context invalidated" and hands the shim `extension-reloaded`, whose
+  copy names the cause, says it is not a sensitive-data block, gives
+  the one action that works, and says plainly that retrying will not.
+  What is **not** claimed: this is still not detection by the popup.
+  The popup cannot see a dead channel and does not pretend to — its
+  "nothing sent yet" line carries the same remedy as standing advice
+  that is always true, not as an observation. Per-tab evidence remains
+  open, and the match is on a browser-authored message string, which is
+  not a contract: an unrecognised wording falls back to the old
+  unattributed block rather than guessing.
 - **The popup's STATUS row is now as careful as its screening row, and
   was not.** `[added 2026-09-01]` Two corrections, both the same defect
   as the bullets above, displaced from "is anything screening" to "is

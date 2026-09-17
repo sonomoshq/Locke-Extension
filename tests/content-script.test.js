@@ -367,7 +367,11 @@ test('content-script (firefox): a relay that hands back no promise answers null'
 });
 
 test('content-script (firefox): a relay that throws synchronously answers null', async () => {
-  const world = makeWorld({ dialect: 'firefox', relay: () => { throw new Error('context invalidated'); } });
+  // Deliberately NOT an invalidated-context message: that one now carries a
+  // reason (see the dead-channel cases below), and this test is here for
+  // everything else — an API that is not behaving as documented at all. The
+  // unattributed null is the answer for a cause we cannot name.
+  const world = makeWorld({ dialect: 'firefox', relay: () => { throw new TypeError('sendMessage is not a function'); } });
 
   world.fromPage(capture());
   await settle();
@@ -379,8 +383,9 @@ test('content-script (firefox): a relay that throws synchronously answers null',
 test('content-script (chromium): a sendMessage that throws is a rejected relay, not an unanswered one', async () => {
   // chrome.runtime.sendMessage throws outright on a torn-down context. The
   // callback never runs, so the wrapper's own try/catch is what keeps the held
-  // request from hanging forever.
-  const world = makeWorld({ dialect: 'chromium', relay: () => { throw new Error('Extension context invalidated'); } });
+  // request from hanging forever. Same note as above on the message: an
+  // unrecognised one must still be answered, and answered with a block.
+  const world = makeWorld({ dialect: 'chromium', relay: () => { throw new Error('port closed before a response was received'); } });
 
   world.fromPage(capture(9));
   await settle();
@@ -390,6 +395,98 @@ test('content-script (chromium): a sendMessage that throws is a rejected relay, 
   assert.equal(answers[0].data.verdict, null);
   assert.equal(answers[0].data.callId, 9);
   assert.ok(world.warning('relay-rejected'), 'the block must still name its hop');
+});
+
+// ── the dead channel: a correct block that read as a broken product ──
+//
+// Reloading, updating or re-enabling the extension orphans every content
+// script already injected into an open tab. This script keeps running; its
+// `runtime` port belongs to an extension generation that is gone. So every
+// later relay fails and every in-scope request in that tab blocks — for the
+// life of the tab, until the page is reloaded.
+//
+// That was already true and already correct. What was missing is that nothing
+// said so: the block was the same generic "the extension restarted, try
+// again" a sleeping service worker produces, whose advice does not work here
+// and whose absence of a cause made a healthy install look broken. The user's
+// own next moves — retry, restart the desktop app, reinstall the extension —
+// range from useless to actively worse, since a reinstall orphans more tabs.
+//
+// So this cause is told apart from the others and handed to the shim with a
+// reason, and the tests below pin both halves of that: it must be a BLOCK
+// (the fail-closed posture is not what is being changed), and it must be the
+// attributed one.
+
+const DEAD_CHANNEL_CODE = 'extension-reloaded';
+
+for (const [dialect, message] of [
+  // The spellings the two engines actually produce for an orphaned context.
+  ['chromium', 'Extension context invalidated.'],
+  ['firefox', 'Extension context invalidated'],
+  // Lower-case, and embedded in a longer sentence: the match is on the
+  // browser's wording, which is not a contract, so it is deliberately loose.
+  ['chromium', 'Uncaught Error: extension context invalidated'],
+  ['firefox', 'context invalidated']
+]) {
+  test(`content-script (${dialect}): "${message}" blocks with a reason, not a bare null`, async () => {
+    // Both failure shapes at once: Firefox throws synchronously out of
+    // sendMessage on a dead context, Chromium rejects through lastError.
+    // Whichever this dialect does, the answer must be the same — otherwise
+    // the remedy a user is given depends on their browser.
+    const world = makeWorld({ dialect, relay: () => { throw new Error(message); } });
+
+    world.fromPage(capture(4));
+    await settle();
+
+    const answers = world.verdicts();
+    assert.equal(answers.length, 1, 'a held request must never be left without an answer');
+    assert.equal(answers[0].data.callId, 4);
+
+    const verdict = plain(answers[0].data.verdict);
+    // FAIL CLOSED, still. `ok: false` is the service worker's own
+    // relay-failure shape, which the shim routes through RELAY_BLOCK_REASON —
+    // a table whose every entry blocks. Anything truthy on `ok` here would
+    // SEND an unscreened body, which is the one outcome this must never buy.
+    assert.equal(verdict.ok, false, 'the attributed answer must still be a failure');
+    assert.notEqual(verdict.ok, true);
+    assert.equal(verdict.code, DEAD_CHANNEL_CODE);
+    assert.ok(!('receipt' in verdict), 'there is no receipt — nothing was screened');
+
+    // Our own fixed text, never the browser's. The error message is not
+    // page content, but it is also not ours to forward, and the block copy
+    // the user reads comes from content/shim.js either way.
+    assert.ok(!verdict.message.includes('Uncaught'), verdict.message);
+    assert.match(verdict.message, /reloaded, updated or re-enabled/);
+
+    // The console line names the same cause the page will be told, so the two
+    // halves of the chain can be grepped together.
+    const warn = world.warning(DEAD_CHANNEL_CODE);
+    assert.ok(warn, 'the block must name the cause it attributed');
+    assert.equal(warn.level, 'warn');
+    assert.match(warn.line, /via=content-script action=block/);
+  });
+}
+
+test('content-script: a relay failure we cannot attribute stays an unattributed block', async () => {
+  // The guard on the whole idea. "Could not establish connection. Receiving
+  // end does not exist" is an evicted MV3 service worker, which the next send
+  // wakes — telling that user to reload the page would be wrong advice
+  // dressed as a diagnosis, and telling them the extension was reloaded when
+  // it was not is worse than telling them nothing.
+  for (const dialect of ['chromium', 'firefox']) {
+    const world = makeWorld({
+      dialect,
+      relay: async () => { throw new Error('Could not establish connection. Receiving end does not exist.'); }
+    });
+
+    world.fromPage(capture(5));
+    await settle();
+
+    assert.equal(world.verdicts()[0].data.verdict, null, dialect);
+    assert.ok(world.warning('relay-rejected'), dialect);
+    assert.equal(world.warning(DEAD_CHANNEL_CODE), undefined,
+      `${dialect}: a sleeping worker must not be reported as a reloaded extension`);
+  }
 });
 
 // ── the desktop app's disable set ──────────────────────────────────
