@@ -8,6 +8,16 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Changed**
+- The extension icon is now the Locke product mark — a padlock with a green
+  dot on a charcoal tile — replacing the Sonomos traffic light that had stood
+  in for it. `icons/icon-{16,32,48,128}.png` are re-rendered from the new
+  `icons/action.svg` master; `icons/brand.svg` is the bare mark. Nothing else
+  in the package changes: no permission, no host, no script, no popup markup.
+  The published store listings keep the old icon until the next version is
+  submitted — an icon change is a package change, and every store rejects a
+  re-upload of an existing version, so it ships with the next `npm run bump`.
+
 ## [2.0.2] — 2026-09-08
 
 **Summary.** 2.0.2 raises the fail-closed verdict ceiling so a cold screen of a
