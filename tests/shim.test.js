@@ -1768,7 +1768,7 @@ test('a handler that throws on every event does not stop the sequence', async ()
 //
 // In both cases the app WAS reached. `host-panic` means our own
 // native-messaging host ran and then crashed; `bridge-protocol-mismatch` means
-// Extension-Bridge and the host disagree about the wire version. Telling the
+// The bridge and the host disagree about the wire version. Telling the
 // user to start an app that is very likely already running is the same
 // wrong-advice defect `bridge-unreachable`, `receipt-too-large` and the rest
 // were pulled out of that bucket to fix — arriving again through codes added

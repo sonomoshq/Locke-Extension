@@ -709,7 +709,7 @@ verdict means no send. The residuals we accept and document:
   in-scope requests for the verdict round-trip, slow screening shows up as
   AI-site latency or blocked requests, not as silent pass-through. The
   binding deadline in practice is the native host's **180 s**
-  (`CAPTURE_DEADLINE`, Extension-Bridge `src/messages.rs`) so the user
+  (`CAPTURE_DEADLINE`, Bridge `src/extension/messages.rs`) so the user
   gets our reason rather than a generic failure; the service worker's
   **190 s** (`NATIVE_CALL_TIMEOUT_MS`) sits above it so the worker owns
   the specific `native-timeout` diagnosis, and the shim's **200 s**
