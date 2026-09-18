@@ -35,8 +35,8 @@ export const DEFAULTS = Object.freeze({
   // blocked or unscreened send are unconditional — that is the case a user
   // needs explained, and it must never depend on having flipped a flag first.
   debugLogging: false,
-  // Clears the native host's 180 s CAPTURE_DEADLINE (Extension-Bridge
-  // src/messages.rs, raised from 25 s on 2026-09-07 so one cold pass over a
+  // Clears the native host's 180 s CAPTURE_DEADLINE (Bridge
+  // src/extension/messages.rs, raised from 25 s on 2026-09-07 so one cold pass over a
   // long conversation can finish). Rationale in content/shim.js, where the
   // value is also inlined as the default the shim holds until a config push
   // arrives.
@@ -200,7 +200,7 @@ export const PRESENCE_STALE_MS = 45_000;
 // held capture before it gives up and fails the send closed.
 //
 // The host, when it can reach the desktop app, is bound by the app's own
-// extension-bridge peer budget (24 s) and answers — allow, redact, or an
+// extension-surface scan budget in the guard (175 s) and answers — allow, redact, or an
 // `error` receipt — well inside it. This ceiling is NOT that budget: it is the
 // backstop for a host that neither answers NOR exits, which is what a
 // mesh-restart transition produces (the bridge socket exists and accepts, but
@@ -209,7 +209,7 @@ export const PRESENCE_STALE_MS = 45_000;
 // it — the page hangs until the user reloads the extension by hand.
 //
 // 190 s: above the native host's 180 s CAPTURE_DEADLINE (and the guard's
-// 170 s budget behind it) so a slow-but-valid screen is never false-blocked,
+// 175 s budget behind it) so a slow-but-valid screen is never false-blocked,
 // and below content/shim.js's 200 s enforce ceiling so the worker owns the
 // specific `native-timeout` diagnosis instead of the shim's generic give-up.
 // Inside Chrome's ~5 min hard cap on a worker kept alive by a pending call.

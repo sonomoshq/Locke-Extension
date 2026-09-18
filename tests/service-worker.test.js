@@ -1390,7 +1390,7 @@ test('recovery: worker evaluation re-arms a lost health alarm', async () => {
 // ── a crashing host must not leave the popup reading Active ─────────
 //
 // The host emits `{"type":"error","code":"host-panic"}` when a handler panics,
-// and `bridge-protocol-mismatch` when Extension-Bridge reports a wire-version
+// and `bridge-protocol-mismatch` when the bridge reports a wire-version
 // mismatch. `captureViaHost` passes the code straight to
 // `evidenceFromRelayFailure`, which returned null for both — no evidence at all
 // — so the last good receipt kept standing and the popup went on claiming

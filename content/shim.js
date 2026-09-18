@@ -1252,7 +1252,7 @@
       //     default sentence told the user to start an app that was very likely
       //     already running, which is the wrong-advice shape three of the codes
       //     above were already pulled out to stop.
-      //   `bridge-protocol-mismatch` — Extension-Bridge answered a wire-version
+      //   `bridge-protocol-mismatch` — the bridge answered a wire-version
       //     mismatch and the host surfaced it under this code. A skew between
       //     installed Locke components; retrying the same request cannot clear
       //     it, and again nothing was unreachable.
@@ -1496,7 +1496,7 @@
     'connector-crashed': ['unavailable',
       'Locke’s browser connector failed while handling this request, so nothing was screened — this is NOT a sensitive-data block, and nothing was sent. This is a fault in Locke itself, not something you can fix: retry, and report it if it keeps happening.'],
     // The installed Locke components disagree about their message format
-    // (Extension-Bridge's wire version vs the host's). Same "nothing was
+    // (the bridge's extension-seam wire version vs the host's). Same "nothing was
     // unreachable" point as the crash above, but a different fix: retrying the
     // same request cannot clear a skew, so the advice is to update or repair.
     'bridge-version-mismatch': ['unavailable',
