@@ -58,8 +58,8 @@ we know and what we say.
   most large enterprise IT teams treat sideload-only as a friction
   point.
 - **It is not OSI-licensed in the public repo.** `LICENSE-MIT` and
-  `LICENSE-APACHE` were deliberately removed; `TODO.md` flags the
-  open question. External contributors who require certainty about
+  `LICENSE-APACHE` were deliberately removed; the repository is
+  under PolyForm Strict 1.0.0 (`LICENSE`). External contributors who require certainty about
   licensing terms should reach out before submitting non-trivial
   changes.
 - **It does not yet have a registered trademark.** "Sonomos" is used

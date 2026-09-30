@@ -71,4 +71,4 @@ jobs:
           # "Licensing of contributions"), so licence-based allow/deny lists
           # are deliberately NOT configured yet — configuring them before the
           # project's own licence is decided would encode a policy nobody has
-          # agreed to. Revisit when TODO.md's LICENSE item lands.
+          # agreed to. Revisit when counsel's LICENSE review lands.

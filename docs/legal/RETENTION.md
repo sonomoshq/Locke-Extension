@@ -1,7 +1,6 @@
 # Data retention policy
 
-> **DRAFT — pending revision and review by the legal reviewer.** See
-> `TODO.md`.
+> **DRAFT — pending revision and review by the legal reviewer.**
 
 This document satisfies GDPR Art. 5(1)(e) "storage limitation" by
 declaring exactly what the Sonomos Desktop Connector extension

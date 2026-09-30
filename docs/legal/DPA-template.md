@@ -1,7 +1,6 @@
 # Data Processing Addendum (DPA) — template
 
-> **DRAFT — pending revision and review by the legal reviewer.** See
-> `TODO.md` for the legal review checklist. The version in force is
+> **DRAFT — pending revision and review by the legal reviewer.** The version in force is
 > the one signed by both parties; do not deliver this template to a
 > customer without legal sign-off.
 
@@ -198,7 +197,7 @@ controls.
 
 The MSA template is available on request from `info@sonomos.ai`;
 its public summary lives at <https://sonomos.ai/msa> (when
-published — see `TODO.md`).
+published).
 
 ## 16. End-User Licence Agreement
 

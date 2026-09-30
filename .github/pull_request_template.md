@@ -60,7 +60,7 @@ Per CONTRIBUTING.md "Documentation", tick what this change required:
 - [ ] Data flow → `docs/architecture/DATA-FLOW.md`
 - [ ] Legal (DPA, DPIA, retention, sub-processors, export control) —
       **flag for the legal reviewer; do not merge without explicit legal
-      sign-off** (`TODO.md`)
+      sign-off**
 - [ ] None of the above
 
 ## Release note

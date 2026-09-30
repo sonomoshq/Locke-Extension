@@ -5,7 +5,7 @@ document defines scope, rules of engagement, safe-harbour terms,
 and reward expectations.
 
 > **Status: kudos-only at launch.** Live monetary payouts pending
-> a budget decision; see `TODO.md`. The policy below is binding
+> a budget decision. The policy below is binding
 > regardless — researchers acting in good faith within this scope
 > are protected.
 
@@ -119,7 +119,7 @@ Currently:
 - **Sonomos sticker pack** for any valid finding (worldwide
   shipping; ask).
 
-Pending budget approval (see `TODO.md`):
+Pending budget approval:
 
 - Monetary rewards for High and Critical severity findings,
   sized to the issue and the effort.
