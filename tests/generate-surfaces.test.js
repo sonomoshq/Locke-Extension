@@ -67,7 +67,7 @@ test('generator: kagi.com is NOT narrowed, because assistant.kagi.com sits under
   // entry of its own, so an empty list on kagi.com would be the list it
   // inherited — and Kagi Assistant is a bodied chat the catalog says is
   // screened (sonomos-vocab `the_chat_surfaces_split_out_of_the_search_entry_are_screened`).
-  assert.equal(byId.kagi?.web_hosts?.includes('assistant.kagi.com'), true, 'premise: the catalog still files Kagi Assistant there');
+  assert.equal((byId.kagi?.web_hosts ?? []).some((host) => host === 'assistant.kagi.com'), true, 'premise: the catalog still files Kagi Assistant there');
   const table = capturePathsFor(surfaces);
   assert.equal(table['kagi.com'], undefined, 'kagi.com keeps capture-everything');
   const { kept } = unscreenedWebHosts(surfaces);
