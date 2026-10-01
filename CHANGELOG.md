@@ -8,6 +8,27 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Fixed**
+- Bodied requests on the search hosts the catalog declares
+  `web_screening: "none"` — `www.google.com`, `www.bing.com`,
+  `search.brave.com`, `duckduckgo.com`, `you.com` — are no longer held. The
+  catalog has said since 2026-08-18 that nothing a user types on those
+  surfaces travels as a body, but `scripts/generate-surfaces.mjs` never read
+  the field, so the shim held every Maps / Flights / account XHR and every
+  telemetry beacon on them: a native-host round trip each while the desktop
+  app ran, and a **block** each while it did not. The generator now emits an
+  empty `SONOMOS_CAPTURE_PATHS` entry for those hosts (narrowed to nothing),
+  which `content/shim.js` honours on the unscreened surface's own pages only.
+  The hosts stay in `web_hosts`, in the manifest and in the shim's scope set:
+  a bodied request from a screened page to one of them (`duck.ai`'s chat XHRs
+  target `duckduckgo.com`) is still held, and `kagi.com` is left un-narrowed
+  because `assistant.kagi.com` (a screened chat) sits under it with no path
+  list of its own. No manifest match pattern changes. The `path-not-screened`
+  debug line now says which rule declined a request
+  (`by=deny-list|paths|unscreened`) instead of a bare `narrowed=true`.
+  `HONEST.md`, `README.md` and `docs/security/PERMISSIONS.md` no longer say
+  bodied requests on those hosts are "screened normally".
+
 **Changed**
 - The extension icon is now the Locke product mark — a padlock with a green
   dot on a charcoal tile — replacing the Sonomos traffic light that had stood

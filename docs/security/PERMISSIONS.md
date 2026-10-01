@@ -167,9 +167,14 @@ never reaches the page at all. They stay in `web_hosts` for a different
 reason: that list is also the shim's request-**target** scope set, and
 `duck.ai`'s chat XHRs target `duckduckgo.com` while Kagi Assistant is reached
 through `kagi.com`. Removing them would delete real screening on a different
-page. Anything that does leave one of these hosts as a bodied `fetch`/`XHR`
-is screened normally. See `HONEST.md` for the full statement and for why
-screening navigation-borne prompts is deferred to 1.x.
+page. Injection is not capture, though: on those hosts' **own pages** the shim
+holds nothing — the generator narrows every `web_screening: "none"` host to
+an empty path list (`SONOMOS_CAPTURE_PATHS`), so a Maps XHR or a search
+telemetry beacon is neither relayed nor blocked. A bodied request from a
+screened page *to* one of these hosts (`duck.ai` → `duckduckgo.com`) is still
+held, and `kagi.com` is left un-narrowed while `assistant.kagi.com` sits under
+it with no list of its own. See `HONEST.md` for the full statement and for
+why screening navigation-borne prompts is deferred to 1.x.
 
 **Which frames?** `all_frames` injects into every frame whose *own* url
 matches — not every frame of a matching tab. `match_about_blank` and
