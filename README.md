@@ -66,7 +66,10 @@ facts, because a reachable desktop app does not prove the screener behind it is 
 > `<form>` submit — is not screened on **any** host, search hosts included;
 > the search entries in `web_hosts` are declared `web_screening: "none"` in
 > the catalog and are there because those hostnames also carry other surfaces'
-> chat traffic. Screening navigation-borne prompts is deferred to 1.x.
+> chat traffic. On those hosts' own pages the extension holds **nothing** —
+> the generator narrows them to an empty path list — so a Google Maps XHR or a
+> Bing telemetry beacon is neither screened nor blocked. Screening
+> navigation-borne prompts is deferred to 1.x.
 
 - **Page-world fetch / XHR interception** (`content/shim.js`) — runs in the page's
   MAIN world and wraps outbound `fetch` and `XMLHttpRequest`. If the request host
