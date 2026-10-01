@@ -102,16 +102,60 @@ export const SHIM_SETTING_KEYS = Object.freeze([
 // The `.`-boundary is what stops the prefix trick: `notanthropic.com` is not a
 // subdomain of `anthropic.com`, and must never be treated as one.
 //
+// PLUS, since the catalog's 2026-10-01 `host_matching` note, a WILDCARD: an
+// entry label may carry ONE `*`, standing for a non-empty run of characters
+// WITHIN THAT ONE LABEL — it never crosses a dot, so it matches exactly one
+// label's worth of host and nothing more. `bedrock-runtime.*.amazonaws.com`
+// covers `bedrock-runtime.us-east-1.amazonaws.com` (and, by the subdomain
+// rule, `x.bedrock-runtime.us-east-1.amazonaws.com`) but NOT
+// `bedrock-runtime.amazonaws.com` (nothing for `*` to stand for), NOT
+// `bedrock-runtime.a.b.amazonaws.com` (two labels) and NOT
+// `s3.us-east-1.amazonaws.com` (the literal label differs);
+// `*-aiplatform.googleapis.com` covers `us-central1-aiplatform.googleapis.com`
+// — a PARTIAL label, the shape Google chose for Vertex's regional endpoints,
+// which the plain subdomain rule cannot reach. The last two labels of an
+// entry are always literal (the crate's `is_valid_host_entry` refuses `*.com`
+// and `api.*.com`, and the shipped catalog is linted against it), so a
+// wildcard can never swallow an estate the catalog did not review. A
+// wildcard-free entry matches exactly as it always did: this adds a case, it
+// does not change one. Today every wildcard in the catalog is an `api_hosts`
+// entry (the proxy's side); `web_hosts` carries none, and the generator
+// refuses one, because a manifest match pattern cannot express a partial
+// label and the shim would be injected nowhere for it.
+//
 // This lives here so the generator, the tests and the ES-module halves of the
 // extension all read the same rule instead of restating it. `content/shim.js`
 // carries an inline copy — a MAIN-world classic script cannot import an ES
 // module — and tests/shim.test.js drives the same spelling matrix through the
-// real shim so the two cannot drift.
+// real shim so the two cannot drift. The shim's copy is wildcard-free on
+// purpose: it tests the generated `web_hosts` list, which the generator keeps
+// literal.
 export function hostMatches(entry, host) {
   const e = String(entry ?? '').replace(/\.+$/, '').toLowerCase();
   const h = String(host ?? '').replace(/\.+$/, '').toLowerCase();
   if (e === '' || h === '') return false;
-  return h === e || h.endsWith(`.${e}`);
+  if (!e.includes('*')) return h === e || h.endsWith(`.${e}`);
+  const entryLabels = e.split('.');
+  const hostLabels = h.split('.');
+  if (hostLabels.length < entryLabels.length) return false;
+  // The subdomain rule, label-aligned: the entry must match the host's
+  // trailing labels one-for-one, and anything in front is a subdomain.
+  const tail = hostLabels.slice(hostLabels.length - entryLabels.length);
+  return entryLabels.every((pattern, i) => labelMatches(pattern, tail[i]));
+}
+
+// Does one entry label match one host label? Both are already lowercased. A
+// `*` stands for a non-empty run of characters inside the label; a label with
+// two of them is malformed and matches nothing (the safe direction).
+function labelMatches(pattern, label) {
+  const star = pattern.indexOf('*');
+  if (star === -1) return pattern === label;
+  const prefix = pattern.slice(0, star);
+  const suffix = pattern.slice(star + 1);
+  if (suffix.includes('*')) return false;
+  return label.length > prefix.length + suffix.length
+    && label.startsWith(prefix)
+    && label.endsWith(suffix);
 }
 
 export const STATE_KEY = 'connectionState';

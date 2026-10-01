@@ -33,6 +33,19 @@ const providerByHost = {};
 for (const p of surfaces.providers) {
   for (const h of p.web_hosts || []) {
     const host = h.toLowerCase();
+    // The catalog's host rule allows ONE `*` per label since 2026-10-01
+    // (shared/constants.js `hostMatches`), and today every wildcard entry is
+    // an `api_hosts` one — the proxy's side. A wildcard `web_hosts` entry
+    // cannot be honoured HERE: a manifest match pattern can say `*.host` but
+    // not a partial label, so the shim would be injected nowhere for it while
+    // the catalog claimed the surface screened. Stop the build rather than
+    // ship that claim; the fix belongs in the catalog or in this generator,
+    // never in a silently narrower manifest.
+    if (host.includes('*')) {
+      throw new Error(
+        `ai-surfaces.json: web_host ${host} ("${p.id}") carries a wildcard, which a manifest match pattern cannot express`
+      );
+    }
     hostSet.add(host);
     // Two providers claiming one host is a catalog bug. Resolving it silently
     // by last-write-wins would let a catalog edit quietly regroup a user's own
