@@ -496,7 +496,7 @@ test('the vendored catalog: every host entry is well-formed, and no web_host car
   for (const entry of entries) assert.ok(wellFormed(entry), `${entry} is not a well-formed host entry`);
   assert.deepEqual(
     entries.filter((e) => e.includes('*')).sort(),
-    ['*-aiplatform.googleapis.com', 'bedrock-runtime.*.amazonaws.com'],
+    ['*-aiplatform.googleapis.com', 'bedrock-runtime-fips.*.amazonaws.com', 'bedrock-runtime.*.amazonaws.com'],
     'the wildcard is in use, in exactly the shapes the rule was written for'
   );
   for (const p of surfaces.providers) {
