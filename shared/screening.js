@@ -156,7 +156,7 @@ export const RELAY_FAILURES_PROVING_NO_SCREEN = Object.freeze([
 //     could ask it. Claiming screening is UNAVAILABLE would blame the screener
 //     for our bug, and the popup would tell the user to go restart something
 //     that was working.
-//   `bridge-protocol-mismatch` — Extension-Bridge answered a wire-version
+//   `bridge-protocol-mismatch` — the bridge answered a wire-version
 //     mismatch, which the host surfaces under this code. A skew between
 //     installed components. The screener behind it is not implicated either.
 //
@@ -172,7 +172,7 @@ export const RELAY_FAILURES_PROVING_NO_VERDICT = Object.freeze([
   'bad-request',             // the host rejected our frame as malformed
   'native-timeout',          // the host neither answered nor exited in time
   'host-panic',              // a handler in the native host panicked
-  'bridge-protocol-mismatch' // Extension-Bridge and the host disagree on the wire version
+  'bridge-protocol-mismatch' // the bridge and the host disagree on the wire version
 ]);
 
 // Did this receipt's request go out WITHOUT a complete screen?

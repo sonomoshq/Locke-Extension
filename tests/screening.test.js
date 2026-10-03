@@ -267,7 +267,7 @@ test('a relay failure that says nothing about screening still says a capture fai
 // ── the two codes that were in neither list ─────────────────────────
 //
 // `host-panic` (a handler in the native host panicked) and
-// `bridge-protocol-mismatch` (Extension-Bridge answered a wire-version mismatch,
+// `bridge-protocol-mismatch` (the bridge answered a wire-version mismatch,
 // surfaced by the host under that code) are recent host additions. Neither was
 // in either relay-failure list, so `evidenceFromRelayFailure` returned null —
 // NO evidence — and the last good receipt kept standing. A browser crashing the

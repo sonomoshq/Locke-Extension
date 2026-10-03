@@ -182,12 +182,65 @@
     });
   }
 
-  function isScreenedPath(host, path) {
-    const segments = pathSegments(path);
-    if (skipsPath(segments)) return false;
+  // ── a host narrowed to NOTHING: the catalog's `web_screening: "none"` ──
+  //
+  // The generator emits an EMPTY allow-list for every web_host of a provider
+  // the catalog declares `web_screening: "none"` — the `search` entry:
+  // www.google.com, www.bing.com, search.brave.com, duckduckgo.com, you.com
+  // (kagi.com is in that entry too but is deliberately left un-narrowed, see
+  // scripts/lib/capture-paths.mjs: assistant.kagi.com, a screened chat, sits
+  // under it and would inherit the empty list). Those surfaces have no
+  // screened submission path at all: what a user types there leaves as a
+  // top-level navigation this shim never sees.
+  // Yet the shim used to hold EVERY bodied request on them — Maps, Flights,
+  // account XHRs, every telemetry beacon — each one a native-host round trip
+  // when the desktop app was running and a BLOCK when it was not. An empty
+  // list reads as "narrowed to nothing", NOT as "not narrowed": `[]` is truthy,
+  // so it never takes the capture-everything branch above, and `some()` over
+  // it admits no path. The explicit branch below exists for the one thing an
+  // empty list must do differently from a short one.
+  //
+  // ## Why the empty list counts only on the unscreened surface's own pages
+  //
+  // `web_hosts` is the shim's request-TARGET scope set, not just the injection
+  // list, and the catalog keeps duckduckgo.com and kagi.com in it for exactly
+  // that reason: duck.ai's chat XHRs target duckduckgo.com (verified upstream —
+  // `POST duckduckgo.com/duckchat/v1/chat`), so a `[]` on duckduckgo.com that
+  // applied to every request would silently stop screening Duck.ai's chat, a
+  // bodied surface the catalog says is screened. `web_screening` is a
+  // property of the page the user is TYPING ON, so that is the axis the empty
+  // list is honoured on: a request from a page that is itself an unscreened
+  // surface passes; the same request from a screened page (duck.ai) or from a
+  // page whose host we cannot read is held, as before. Wrong only in the
+  // direction that costs a held request, never in the direction that lets a
+  // body out.
+  //
+  // PAGE_HOST is defined further down (it needs resolveUrl); it is a `const`
+  // in this same scope and is initialised long before any hook can fire, which
+  // is the only time this runs.
+  function isUnscreenedSurface(host) {
     const allow = allowlistFor(host);
-    if (!allow) return true; // not narrowed — capture-everything, as before
-    return allow.some((pattern) => patternAdmits(segments, pattern));
+    return Array.isArray(allow) && allow.length === 0;
+  }
+
+  // `null` when the request is screened; otherwise WHICH rule declined it,
+  // because the three read identically from outside and are answered
+  // differently: `deny-list` is the global skip_path_segments floor; `paths`
+  // is a screened host whose allow-list did not admit this path (fix: the
+  // catalog's allow-list); `unscreened` is a surface the catalog says screens
+  // nothing (fix: none — that is the catalog's statement, and this is it
+  // working).
+  function pathDeclinedBy(host, path) {
+    const segments = pathSegments(path);
+    if (skipsPath(segments)) return 'deny-list';
+    const allow = allowlistFor(host);
+    if (!allow) return null; // not narrowed — capture-everything, as before
+    if (allow.length === 0) return isUnscreenedSurface(PAGE_HOST) ? 'unscreened' : null;
+    return allow.some((pattern) => patternAdmits(segments, pattern)) ? null : 'paths';
+  }
+
+  function isScreenedPath(host, path) {
+    return pathDeclinedBy(host, path) === null;
   }
 
   // The request-level gate. `isScreenedHost` answers for a HOST; this answers
@@ -208,16 +261,14 @@
   // into the noise everyone learns to ignore. `console.debug`, because a
   // narrowed passthrough is the healthy path, not a failure — the path is
   // being left alone on purpose. Path only, never `url.search`: a query string
-  // can carry the prompt itself.
+  // can carry the prompt itself. `by` names the rule that declined it — see
+  // pathDeclinedBy.
   function isScreenedUrl(url) {
     try {
       if (!url || !isScreenedHost(url.hostname)) return false;
-      if (isScreenedPath(url.hostname, url.pathname)) return true;
-      debug('path-not-screened', {
-        host: url.hostname,
-        path: url.pathname,
-        narrowed: !!allowlistFor(url.hostname)
-      });
+      const declined = pathDeclinedBy(url.hostname, url.pathname);
+      if (declined === null) return true;
+      debug('path-not-screened', { host: url.hostname, path: url.pathname, by: declined });
       return false;
     } catch {
       return false;
@@ -1268,7 +1319,7 @@
       //     default sentence told the user to start an app that was very likely
       //     already running, which is the wrong-advice shape three of the codes
       //     above were already pulled out to stop.
-      //   `bridge-protocol-mismatch` — Extension-Bridge answered a wire-version
+      //   `bridge-protocol-mismatch` — the bridge answered a wire-version
       //     mismatch and the host surfaced it under this code. A skew between
       //     installed Locke components; retrying the same request cannot clear
       //     it, and again nothing was unreachable.
@@ -1531,7 +1582,7 @@
     'connector-crashed': ['unavailable',
       'Locke’s browser connector failed while handling this request, so nothing was screened — this is NOT a sensitive-data block, and nothing was sent. This is a fault in Locke itself, not something you can fix: retry, and report it if it keeps happening.'],
     // The installed Locke components disagree about their message format
-    // (Extension-Bridge's wire version vs the host's). Same "nothing was
+    // (the bridge's extension-seam wire version vs the host's). Same "nothing was
     // unreachable" point as the crash above, but a different fix: retrying the
     // same request cannot clear a skew, so the advice is to update or repair.
     'bridge-version-mismatch': ['unavailable',

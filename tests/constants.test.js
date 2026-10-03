@@ -425,3 +425,81 @@ test('hostMatches: the dot boundary keeps the prefix trick out', () => {
   assert.equal(hostMatches('claude.ai', ''), false);
   assert.equal(hostMatches('', 'claude.ai'), false);
 });
+
+// The one-label wildcard (catalog `host_matching`, since 2026-10-01): a `*`
+// stands for a NON-EMPTY run of characters within ONE label and never crosses
+// a dot. Cases lifted from the Rust `host_matches` doc and tests — the same
+// matrix Desktop-Frontend's `host-match.test.ts` pins — so the three mirrors
+// cannot drift from enforcement or from each other.
+
+test('hostMatches: a wildcard label covers every Bedrock region, and subdomains of one', () => {
+  const entry = 'bedrock-runtime.*.amazonaws.com';
+  assert.equal(hostMatches(entry, 'bedrock-runtime.us-east-1.amazonaws.com'), true);
+  assert.equal(hostMatches(entry, 'bedrock-runtime.eu-west-1.amazonaws.com'), true);
+  assert.equal(hostMatches(entry, 'Bedrock-Runtime.US-EAST-1.AmazonAWS.com.'), true, 'case and the root dot are noise');
+  assert.equal(hostMatches(entry, 'x.bedrock-runtime.us-east-1.amazonaws.com'), true, 'the subdomain rule still applies in front');
+});
+
+test('hostMatches: a partial-label wildcard reaches a region INSIDE the label (Vertex)', () => {
+  const entry = '*-aiplatform.googleapis.com';
+  assert.equal(hostMatches(entry, 'us-central1-aiplatform.googleapis.com'), true);
+  assert.equal(hostMatches(entry, 'europe-west4-aiplatform.googleapis.com'), true);
+  assert.equal(hostMatches(entry, 'aiplatform.googleapis.com'), false, '`*` must stand for something');
+  assert.equal(hostMatches(entry, 'storage.googleapis.com'), false, 'the literal tail is required');
+});
+
+test('hostMatches: per-resource Azure hosts are plain subdomains of the apex — no wildcard needed', () => {
+  assert.equal(hostMatches('openai.azure.com', 'my-resource.openai.azure.com'), true);
+  assert.equal(hostMatches('openai.azure.com', 'azure.com'), false);
+  assert.equal(hostMatches('openai.azure.com', 'portal.azure.com'), false);
+});
+
+test('hostMatches: a wildcard never crosses a dot and never stands for nothing', () => {
+  const entry = 'bedrock-runtime.*.amazonaws.com';
+  assert.equal(hostMatches(entry, 'bedrock-runtime.a.b.amazonaws.com'), false, 'two labels where one is allowed');
+  assert.equal(hostMatches(entry, 'bedrock-runtime.amazonaws.com'), false, 'nothing for `*` to stand for');
+  assert.equal(hostMatches(entry, 's3.us-east-1.amazonaws.com'), false, 'the literal label differs');
+  assert.equal(hostMatches(entry, 'bedrock-runtime-fips.us-east-1.amazonaws.com'), false);
+  assert.equal(hostMatches(entry, 'amazonaws.com'), false, 'fewer labels than the entry');
+  assert.equal(hostMatches('a**b.example.com', 'axxb.example.com'), false, 'two `*` in a label is malformed and matches nothing');
+  assert.equal(hostMatches('a*b*c.example.com', 'axbxc.example.com'), false);
+});
+
+test('hostMatches: a wildcard-free entry matches exactly as before', () => {
+  assert.equal(hostMatches('amazonaws.com', 'bedrock-runtime.us-east-1.amazonaws.com'), true);
+  assert.equal(hostMatches('amazonaws.com', 'notamazonaws.com'), false);
+});
+
+test('the vendored catalog: every host entry is well-formed, and no web_host carries a wildcard', async () => {
+  // The crate's `every_shipped_host_entry_is_well_formed`, re-run against the
+  // VENDORED copy this extension builds from: the last two labels of an entry
+  // are always literal (`*.com`, `api.*.com` can never arrive here through a
+  // sync unnoticed) and a label carries at most one `*`. And `web_hosts` —
+  // the only side this extension reads — carries no wildcard at all: a
+  // manifest match pattern cannot express a partial label, so the generator
+  // refuses one rather than inject the shim nowhere for it.
+  const surfaces = JSON.parse(await readFile(new URL('../shared/ai-surfaces.json', import.meta.url), 'utf8'));
+  const wellFormed = (entry) => {
+    if (!entry || entry.length > 253 || entry !== entry.toLowerCase()) return false;
+    const labels = entry.split('.');
+    if (labels.length < 2) return false;
+    const labelOk = (l) => l.length > 0 && l.length <= 63 && !l.startsWith('-') && !l.endsWith('-')
+      && (l.match(/\*/g) ?? []).length <= 1 && /^[a-z0-9*-]+$/.test(l);
+    return labels.every(labelOk) && labels.slice(-2).every((l) => !l.includes('*'));
+  };
+  const entries = surfaces.providers.flatMap((p) => [
+    ...(p.api_hosts ?? []),
+    ...(p.web_hosts ?? []),
+    ...Object.keys((p.capture_path_allowlist ?? {}).hosts ?? {})
+  ]);
+  assert.ok(entries.length > 0);
+  for (const entry of entries) assert.ok(wellFormed(entry), `${entry} is not a well-formed host entry`);
+  assert.deepEqual(
+    entries.filter((e) => e.includes('*')).sort(),
+    ['*-aiplatform.googleapis.com', 'bedrock-runtime-fips.*.amazonaws.com', 'bedrock-runtime.*.amazonaws.com'],
+    'the wildcard is in use, in exactly the shapes the rule was written for'
+  );
+  for (const p of surfaces.providers) {
+    for (const h of p.web_hosts ?? []) assert.ok(!h.includes('*'), `${p.id} web_host ${h} carries a wildcard`);
+  }
+});

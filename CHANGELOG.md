@@ -31,6 +31,35 @@ strict SemVer.
   `storage.session` — carries the same remedy, as standing advice rather than
   a detection: a dead channel never reaches the service worker, so the popup
   cannot observe it and does not claim to.
+- Bodied requests on the search hosts the catalog declares
+  `web_screening: "none"` — `www.google.com`, `www.bing.com`,
+  `search.brave.com`, `duckduckgo.com`, `you.com` — are no longer held. The
+  catalog has said since 2026-08-18 that nothing a user types on those
+  surfaces travels as a body, but `scripts/generate-surfaces.mjs` never read
+  the field, so the shim held every Maps / Flights / account XHR and every
+  telemetry beacon on them: a native-host round trip each while the desktop
+  app ran, and a **block** each while it did not. The generator now emits an
+  empty `SONOMOS_CAPTURE_PATHS` entry for those hosts (narrowed to nothing),
+  which `content/shim.js` honours on the unscreened surface's own pages only.
+  The hosts stay in `web_hosts`, in the manifest and in the shim's scope set:
+  a bodied request from a screened page to one of them (`duck.ai`'s chat XHRs
+  target `duckduckgo.com`) is still held, and `kagi.com` is left un-narrowed
+  because `assistant.kagi.com` (a screened chat) sits under it with no path
+  list of its own. No manifest match pattern changes. The `path-not-screened`
+  debug line now says which rule declined a request
+  (`by=deny-list|paths|unscreened`) instead of a bare `narrowed=true`.
+  `HONEST.md`, `README.md` and `docs/security/PERMISSIONS.md` no longer say
+  bodied requests on those hosts are "screened normally".
+
+**Changed**
+- The extension icon is now the Locke product mark — a padlock with a green
+  dot on a charcoal tile — replacing the Sonomos traffic light that had stood
+  in for it. `icons/icon-{16,32,48,128}.png` are re-rendered from the new
+  `icons/action.svg` master; `icons/brand.svg` is the bare mark. Nothing else
+  in the package changes: no permission, no host, no script, no popup markup.
+  The published store listings keep the old icon until the next version is
+  submitted — an icon change is a package change, and every store rejects a
+  re-upload of an existing version, so it ships with the next `npm run bump`.
 
 ## [2.0.2] — 2026-09-08
 

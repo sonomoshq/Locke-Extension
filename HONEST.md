@@ -134,6 +134,23 @@ verdict means no send. The residuals we accept and document:
   The narrowing applies to subdomains too (most specific entry wins), so
   it cannot be dodged by addressing a subdomain of a narrowed host.
 
+  A fourth kind of entry is an **empty** list, and it means narrowed to
+  *nothing*. The generator emits one for every `web_hosts` entry of a
+  provider the catalog declares `web_screening: "none"` — today
+  `www.google.com`, `www.bing.com`, `search.brave.com`, `duckduckgo.com`
+  and `you.com` — because those surfaces have no screened submission
+  path at all (see "navigation-borne prompts" below). On their own
+  pages the extension holds **no** bodied request: not a Maps or
+  Flights XHR, not an account POST, not a telemetry beacon. Until this
+  was done every one of those was held, relayed through the desktop
+  app, and blocked whenever the app was not running. `kagi.com` is in
+  the same catalog entry but is deliberately *not* narrowed:
+  `assistant.kagi.com` (Kagi Assistant, a screened chat) sits under it
+  with no list of its own and would inherit the empty one. The empty
+  list is honoured only when the *page* is one of those surfaces — a
+  bodied request from a screened page to one of these hosts (Duck.ai's
+  chat XHRs target `duckduckgo.com`) is still held.
+
   **The consequence, stated plainly.** On those three hosts a
   same-origin bodied request whose path is not in the list above is
   **not held, not screened, and not blocked** — it goes out exactly as
@@ -477,9 +494,27 @@ verdict means no send. The residuals we accept and document:
   looking at. `duck.ai`'s chat XHRs target `duckduckgo.com`, and Kagi
   Assistant is reached through `kagi.com`, so dropping either
   "unscreened" host would silently delete real screening on a
-  different surface. Anything that does leave one of these hosts as a
-  bodied `fetch`/`XHR` is still screened normally. `web_screening`
-  moves the *claim*, never the capture.
+  different surface.
+
+  *What the extension does with `none`.* The catalog's own text says
+  `web_screening` "moves the claim, never the capture", and on the
+  proxy side that is still true. In the extension it now also moves
+  the capture, on the unscreened surface's **own pages only**: the
+  generator narrows those hosts to an empty path list (see "only a
+  short list of PATHS is screened" above), so a bodied `fetch`, `XHR`
+  or beacon issued *by* `www.google.com`, `www.bing.com`,
+  `search.brave.com`, `duckduckgo.com` or `you.com` is not held.
+  Holding them bought no screening — nothing a user types there
+  travels as a body — and cost a native-host round trip per request,
+  or a block per request when the desktop app was down. A bodied
+  request from a *screened* page to one of those hosts (`duck.ai` →
+  `duckduckgo.com`) is still held, and `kagi.com` is not narrowed at
+  all while `assistant.kagi.com` has no path list of its own. The one
+  consequence worth stating: a chat that DuckDuckGo embeds on
+  `duckduckgo.com` itself (rather than on `duck.ai`) is on an
+  unscreened page and is not held; the catalog can restore that by
+  giving `duckduckgo.com` an explicit `capture_path_allowlist`, which
+  the generator honours over the empty list.
 
   *Screening navigation-borne prompts is deferred to 1.x*, and the
   reason is product design, not plumbing. For chat, masking preserves
@@ -734,7 +769,7 @@ verdict means no send. The residuals we accept and document:
   in-scope requests for the verdict round-trip, slow screening shows up as
   AI-site latency or blocked requests, not as silent pass-through. The
   binding deadline in practice is the native host's **180 s**
-  (`CAPTURE_DEADLINE`, Extension-Bridge `src/messages.rs`) so the user
+  (`CAPTURE_DEADLINE`, Bridge `src/extension/messages.rs`) so the user
   gets our reason rather than a generic failure; the service worker's
   **190 s** (`NATIVE_CALL_TIMEOUT_MS`) sits above it so the worker owns
   the specific `native-timeout` diagnosis, and the shim's **200 s**
