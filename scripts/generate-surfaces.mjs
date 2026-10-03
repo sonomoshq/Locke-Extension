@@ -17,6 +17,7 @@ import { dirname, join } from 'node:path';
 // manifest.json is edited in place, never reserialised — see the module doc
 // for why, and scripts/lib/version.mjs for the convention it follows.
 import { spliceValue, writeIfChanged } from './lib/manifest-splice.mjs';
+import { capturePathsFor, unscreenedWebHosts } from './lib/capture-paths.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -33,6 +34,19 @@ const providerByHost = {};
 for (const p of surfaces.providers) {
   for (const h of p.web_hosts || []) {
     const host = h.toLowerCase();
+    // The catalog's host rule allows ONE `*` per label since 2026-10-01
+    // (shared/constants.js `hostMatches`), and today every wildcard entry is
+    // an `api_hosts` one — the proxy's side. A wildcard `web_hosts` entry
+    // cannot be honoured HERE: a manifest match pattern can say `*.host` but
+    // not a partial label, so the shim would be injected nowhere for it while
+    // the catalog claimed the surface screened. Stop the build rather than
+    // ship that claim; the fix belongs in the catalog or in this generator,
+    // never in a silently narrower manifest.
+    if (host.includes('*')) {
+      throw new Error(
+        `ai-surfaces.json: web_host ${host} ("${p.id}") carries a wildcard, which a manifest match pattern cannot express`
+      );
+    }
     hostSet.add(host);
     // Two providers claiming one host is a catalog bug. Resolving it silently
     // by last-write-wins would let a catalog edit quietly regroup a user's own
@@ -93,16 +107,27 @@ const matches = hosts.flatMap((h) => [`https://${h}/*`, `https://*.${h}/*`]);
 //
 // Both halves, or consumers of the catalog come to disagree about which paths
 // carry a prompt.
-const capturePaths = {};
-for (const p of surfaces.providers) {
-  const hostsForProvider = (p.capture_path_allowlist || {}).hosts || {};
-  for (const [entry, paths] of Object.entries(hostsForProvider)) {
-    // Empty lists are dropped BEFORE specificity is considered: a half-written
-    // entry must behave as if never typed, not as a more-specific "declares
-    // nothing" shadowing a real list on a broader key.
-    if (Array.isArray(paths) && paths.length) capturePaths[entry.toLowerCase()] = paths;
-  }
-}
+//
+// ── and the hosts the catalog says screen NOTHING ──
+//
+// A provider declared `web_screening: "none"` (the `search` entry: Google,
+// Bing, Brave Search, DuckDuckGo, Kagi, You.com) has no screened submission
+// path — what a user types there leaves as a top-level navigation the shim
+// never sees. Until this generator read that field, every one of those hosts
+// was injected AND held wholesale: every Maps / Flights / account XHR and every
+// telemetry beacon on www.google.com was relayed through a fresh native-host
+// process, and BLOCKED whenever the desktop app was not running. Those hosts
+// now get an EMPTY allow-list — narrowed to nothing — so the shim's
+// `isScreenedPath` falls through to the same passthrough a declined path takes.
+//
+// They stay in `web_hosts`, in SONOMOS_WEB_HOSTS and in the manifest, and that
+// is not an oversight: `web_hosts` is also the shim's request-TARGET scope set
+// (duck.ai's chat XHRs target duckduckgo.com), and the shim honours an empty
+// list only on the unscreened surface's OWN pages. The rules, and the one
+// subdomain case the reduction must handle itself, are in
+// scripts/lib/capture-paths.mjs.
+const capturePaths = capturePathsFor(surfaces);
+const unscreened = unscreenedWebHosts(surfaces);
 const skipSegments = (surfaces.skip_path_segments || {}).segments || [];
 
 // The copyright header leads, in the same one-line form
@@ -175,3 +200,15 @@ console.log(
   `generated ${hosts.length} web surfaces → shim globals; ${matches.length} manifest matches` +
     (manifestChanged ? '' : ' (manifest already current — not rewritten)')
 );
+console.log(
+  `unscreened (web_screening: "none") hosts narrowed to nothing: ` +
+    (unscreened.narrowed.length ? unscreened.narrowed.join(', ') : '(none)')
+);
+// Say which unscreened hosts are still held wholesale and why, so the next
+// reader does not conclude the generator missed them.
+for (const k of unscreened.kept) {
+  const why = k.reason === 'explicit'
+    ? 'has an explicit capture_path_allowlist, which wins'
+    : `still capture-everything: ${k.screened} is a screened surface under it with no allow-list of its own`;
+  console.log(`  kept ${k.host} ("${k.provider}") — ${why}`);
+}

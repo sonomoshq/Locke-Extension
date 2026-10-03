@@ -3131,6 +3131,219 @@ test('paths: a subdomain inherits the narrowing of its apex', async () => {
   assert.equal(meshAsked, false);
 });
 
+// ── unscreened surfaces: a host narrowed to NOTHING ───────────────────────
+//
+// The catalog declares the `search` entry (www.google.com, www.bing.com,
+// search.brave.com, duckduckgo.com, kagi.com, you.com) `web_screening: "none"`:
+// no screened submission path, because what a user types there leaves as a
+// top-level navigation. The generator never read that field, so the shim held
+// EVERY bodied request on those hosts — a Google Maps or Flights XHR, an
+// account POST, a `/gen_204` telemetry beacon — relaying each through a fresh
+// native-host process, and BLOCKING each one when the desktop app was not
+// running. The generator now emits an EMPTY allow-list for them, and these
+// tests pin what the shim does with it.
+//
+// The empty list is honoured on the unscreened surface's OWN pages only. The
+// hosts stay in SONOMOS_WEB_HOSTS because that list is the request-TARGET
+// scope set: duck.ai's chat XHRs target duckduckgo.com, so a `[]` that applied
+// to every request would silently unscreen a bodied chat the catalog says is
+// screened. Both directions are pinned below.
+
+const UNSCREENED = {
+  SONOMOS_WEB_HOSTS: ['chat.openai.com', 'chatgpt.com', 'duck.ai', 'duckduckgo.com', 'www.google.com', 'www.bing.com'],
+  SONOMOS_WEB_PROVIDERS: {
+    'chat.openai.com': 'openai', 'chatgpt.com': 'openai',
+    'duck.ai': 'duckduckgo', 'duckduckgo.com': 'search',
+    'www.google.com': 'search', 'www.bing.com': 'search'
+  },
+  SONOMOS_CAPTURE_PATHS: {
+    'chatgpt.com': ['/backend-api/conversation'],
+    'duckduckgo.com': [],
+    'www.google.com': [],
+    'www.bing.com': []
+  },
+  SONOMOS_SKIP_PATH_SEGMENTS: [['telemetry']]
+};
+
+const pageAt = (host, path = '/') => ({
+  location: { href: `https://${host}${path}`, origin: `https://${host}`, hostname: host }
+});
+
+test('unscreened: a POST on a search host’s own page is not held, even with no desktop app', async () => {
+  // onCapture answers null — the "no bridge" state that BLOCKS a held request.
+  // That is the user-visible bug: Google Maps and Flights broke whenever the
+  // desktop app was not running. The request must never be held at all.
+  let meshAsked = false;
+  const { sandbox, netCalls, logs } = makeDebugWorld(
+    () => { meshAsked = true; return null; },
+    { ...UNSCREENED, ...pageAt('www.google.com', '/maps') }
+  );
+
+  const res = await sandbox.fetch('https://www.google.com/gen_204?atyp=i&ei=abc', {
+    method: 'POST', body: 'ei=abc&s=web'
+  });
+
+  assert.equal(meshAsked, false, 'nothing on an unscreened surface reaches the desktop app');
+  assert.equal(netCalls.length, 1, 'the request goes out exactly as the page issued it');
+  assert.ok(res && res.__net, 'the page gets the network’s own response');
+  const line = assertReason(logs, 'path-not-screened', 'debug');
+  assert.match(line, /\bby=unscreened\b/, 'the diagnostic names which rule declined it');
+  assert.match(line, /\bhost=www\.google\.com\b/);
+  assert.doesNotMatch(line, /atyp|ei=abc/, 'path only — the query string never reaches the console');
+  assert.equal(logs.filter((l) => l.level === 'warn').length, 0, 'passthrough is the healthy path');
+});
+
+test('unscreened: a bodied fetch and XHR on www.bing.com pass through untouched', async () => {
+  let meshAsked = false;
+  const { sandbox, netCalls } = makeXhrWorld(
+    () => { meshAsked = true; return allowVerdict; },
+    { extraGlobals: { ...UNSCREENED, ...pageAt('www.bing.com', '/search?q=x') } }
+  );
+
+  await sandbox.fetch('https://www.bing.com/fd/ls/lsp.aspx', {
+    method: 'POST', headers: { 'content-type': 'text/xml' }, body: '<ClientInstRequest/>'
+  });
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://www.bing.com/rewardsapp/reportActivity', true);
+  xhr.send('{"activity":"x"}');
+
+  assert.equal(meshAsked, false);
+  assert.equal(netCalls.length, 1, 'the fetch reached the network');
+  assert.deepEqual(xhr.sent, ['{"activity":"x"}'], 'the XHR was forwarded, not aborted');
+  assert.equal(xhr.aborted, false);
+});
+
+test('unscreened: a beacon on a search host is sent, not refused', async () => {
+  // Beacons cannot be held, so an in-scope one is REFUSED — which on
+  // www.google.com meant every telemetry beacon on the page was dropped and a
+  // warning logged for it, on a surface where nothing is screened.
+  const beacons = [];
+  const { sandbox, logs } = makeWorld(() => allowVerdict, {
+    ...UNSCREENED,
+    ...pageAt('www.google.com'),
+    SONOMOS_DEBUG: true,
+    navigator: { sendBeacon(url, data) { beacons.push([url, data]); return true; } }
+  });
+
+  assert.equal(sandbox.navigator.sendBeacon('https://www.google.com/gen_204', 'ei=abc'), true);
+  assert.equal(beacons.length, 1, 'the beacon reached the network');
+  assertReason(logs, 'not-in-scope', 'debug');
+  assert.equal(logs.filter((l) => l.level === 'warn').length, 0);
+});
+
+test('unscreened: the prompt POST on a screened host is still held (regression guard)', async () => {
+  // The same world holds a real allow-list beside the empty ones. Reading `[]`
+  // as "nothing is narrowed" anywhere would be a silent PII leak on chatgpt.com;
+  // reading a short list as `[]` would be an outage. Both must stay distinct.
+  const captured = [];
+  const { sandbox } = makeWorld((msg) => { captured.push(msg); return allowVerdict; }, UNSCREENED);
+
+  await sandbox.fetch('https://chatgpt.com/backend-api/conversation', { method: 'POST', body: '{"prompt":"hi"}' });
+  await sandbox.fetch('https://chat.openai.com/anything', { method: 'POST', body: '{"prompt":"hi"}' });
+
+  assert.equal(captured.length, 2, 'an allow-listed path, and a host with no list, are both held');
+  assert.deepEqual(captured.map((m) => m.provider), ['openai', 'openai']);
+});
+
+test('unscreened: a declined path on a screened host still reports by=paths', async () => {
+  const { sandbox, logs } = makeDebugWorld(() => allowVerdict, UNSCREENED);
+  await sandbox.fetch('https://chatgpt.com/api/auth/session', { method: 'POST', body: '{}' });
+  const line = assertReason(logs, 'path-not-screened', 'debug');
+  assert.match(line, /\bby=paths\b/, 'a short list and an empty list are different narrowings');
+});
+
+test('unscreened: chat from a screened page to an unscreened host is still held', async () => {
+  // THE reason those hosts stay in web_hosts. duck.ai is a screened chat whose
+  // XHRs target duckduckgo.com, which the catalog files under `search`. The
+  // empty list on duckduckgo.com is about duckduckgo.com's own pages; it must
+  // not reach across to a different surface's prompt.
+  const captured = [];
+  const { sandbox } = makeWorld(
+    (msg) => { captured.push(msg); return allowVerdict; },
+    { ...UNSCREENED, ...pageAt('duck.ai', '/?q=hello') }
+  );
+
+  await sandbox.fetch('https://duckduckgo.com/duckchat/v1/chat', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: '{"messages":[{"role":"user","content":"my ssn is 123-45-6789"}]}'
+  });
+
+  assert.equal(captured.length, 1, 'Duck.ai’s prompt must still be screened');
+  assert.equal(captured[0].provider, 'search', 'attributed by target, as every capture is');
+  const { head } = splitRaw(rawOf(captured[0].requestB64));
+  assert.match(head, /^POST \/duckchat\/v1\/chat HTTP\/1\.1\r\nHost: duckduckgo\.com\r\n/);
+});
+
+test('unscreened: a prompt sent FROM an unscreened page TO a screened host is still held', async () => {
+  // The empty list is a statement about the target host's own surface, not a
+  // page-wide switch: a www.google.com page that POSTs to chatgpt.com's prompt
+  // endpoint is sending a prompt to ChatGPT, and that is screened.
+  const captured = [];
+  const { sandbox } = makeWorld(
+    (msg) => { captured.push(msg); return allowVerdict; },
+    { ...UNSCREENED, ...pageAt('www.google.com') }
+  );
+  await sandbox.fetch('https://chatgpt.com/backend-api/conversation', { method: 'POST', body: '{"prompt":"hi"}' });
+  assert.equal(captured.length, 1);
+});
+
+test('unscreened: a subdomain of an unscreened host inherits the empty list on its own pages', async () => {
+  // Same rule as every other narrowing — most specific entry wins, and a
+  // subdomain with no entry of its own takes its apex's. `maps.google.com` is
+  // not in the catalog; `www.google.com`'s own subdomains are the case.
+  let meshAsked = false;
+  const { sandbox, netCalls } = makeWorld(
+    () => { meshAsked = true; return allowVerdict; },
+    { ...UNSCREENED, ...pageAt('accounts.www.google.com') }
+  );
+  await sandbox.fetch('https://accounts.www.google.com/signin', { method: 'POST', body: 'email=a@b.c' });
+  assert.equal(meshAsked, false);
+  assert.equal(netCalls.length, 1);
+});
+
+test('unscreened: a frame with no host of its own takes its creator’s answer', async () => {
+  // An about:blank child of duck.ai has no host on `location`; PAGE_HOST falls
+  // back to the inherited base, which is the surface that made the frame. A
+  // chat POST from inside it to duckduckgo.com must be held exactly as it is
+  // from the top-level page …
+  const captured = [];
+  const held = makeFrameWorld(
+    (msg) => { captured.push(msg); return allowVerdict; },
+    'about:blank', 'https://duck.ai/',
+    { documentOrigin: 'https://duck.ai', ...UNSCREENED }
+  );
+  await held.sandbox.fetch('https://duckduckgo.com/duckchat/v1/chat', { method: 'POST', body: '{"q":1}' });
+  assert.equal(captured.length, 1, 'a child frame of a screened page is still screened');
+
+  // … and a child of www.google.com inherits the passthrough its creator gets.
+  let meshAsked = false;
+  const passed = makeFrameWorld(
+    () => { meshAsked = true; return allowVerdict; },
+    'about:blank', 'https://www.google.com/maps',
+    { documentOrigin: 'https://www.google.com', ...UNSCREENED }
+  );
+  await passed.sandbox.fetch('https://www.google.com/maps/preview/place', { method: 'POST', body: 'x=1' });
+  assert.equal(meshAsked, false);
+  assert.equal(passed.netCalls.length, 1);
+});
+
+test('unscreened: the deny-list still wins, and the diagnostic says it was the deny-list', async () => {
+  // skip_path_segments is a global floor. From a duck.ai page the empty list
+  // on duckduckgo.com would have HELD this request; the deny-list is what let
+  // it through, and the diagnostic must say so rather than blame a narrowing
+  // that never got consulted.
+  const { sandbox, logs, netCalls } = makeDebugWorld(
+    () => allowVerdict,
+    { ...UNSCREENED, ...pageAt('duck.ai') }
+  );
+  await sandbox.fetch('https://duckduckgo.com/telemetry/event', { method: 'POST', body: '{}' });
+  assert.equal(netCalls.length, 1);
+  const line = assertReason(logs, 'path-not-screened', 'debug');
+  assert.match(line, /\bhost=duckduckgo\.com\b/);
+  assert.match(line, /\bby=deny-list\b/);
+  assert.equal(logs.filter((l) => l.level === 'warn').length, 0);
+});
+
 // ── surfaces an ADMIN policy excluded (managed `allowedProviders`) ──
 //
 // `managed-schema.json` declared this key and `shared/constants.js` merged it

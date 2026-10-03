@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import { capturePathsFor } from '../scripts/lib/capture-paths.mjs';
 
 // ── the doc-drift tripwire for the capture-path allow-list ──────────
 //
@@ -66,29 +67,28 @@ function parseHonestTable(markdown) {
   return out;
 }
 
-// The reduction scripts/generate-surfaces.mjs performs, repeated here so a
-// hand-edit of the generated file (which the banner forbids and nothing else
-// checks) is caught rather than trusted.
-function capturePathsFromCatalog(surfaces) {
-  const out = {};
-  for (const p of surfaces.providers) {
-    const hosts = (p.capture_path_allowlist || {}).hosts || {};
-    for (const [entry, paths] of Object.entries(hosts)) {
-      if (Array.isArray(paths) && paths.length) out[entry.toLowerCase()] = paths;
-    }
-  }
-  return out;
-}
-
+// The reduction scripts/generate-surfaces.mjs performs — the SAME code, from
+// scripts/lib/capture-paths.mjs, so a hand-edit of the generated file (which
+// the banner forbids and nothing else checks) is caught rather than trusted.
+// tests/generate-surfaces.test.js pins the reduction's own rules.
 const sortedEntries = (table) => Object.keys(table).sort()
   .map((host) => [host, [...table[host]].sort()]);
 
-test('HONEST.md lists exactly the hosts SONOMOS_CAPTURE_PATHS narrows', async () => {
-  const { paths } = await loadGeneratedGlobals();
+// The table has two kinds of entry, and HONEST.md states them in two places.
+// A host narrowed to a LIST of paths is a row in the allow-list table. A host
+// narrowed to NOTHING — the catalog's `web_screening: "none"` surfaces — has
+// no paths to tabulate and is named in the prose instead.
+const split = (paths) => ({
+  listed: Object.fromEntries(Object.entries(paths).filter(([, p]) => p.length > 0)),
+  unscreened: Object.keys(paths).filter((h) => paths[h].length === 0).sort()
+});
+
+test('HONEST.md lists exactly the hosts SONOMOS_CAPTURE_PATHS narrows to a path list', async () => {
+  const { listed } = split((await loadGeneratedGlobals()).paths);
   const documented = parseHonestTable(await readFile(url('../HONEST.md'), 'utf8'));
 
   assert.deepEqual(
-    Object.keys(documented).sort(), Object.keys(paths).sort(),
+    Object.keys(documented).sort(), Object.keys(listed).sort(),
     'HONEST.md\'s narrowed-host list has drifted from SONOMOS_CAPTURE_PATHS in ' +
     'content/web-surfaces.generated.js. A host that gained an allow-list is a host ' +
     'whose other bodied requests stopped being screened; a host that lost one is a ' +
@@ -97,18 +97,31 @@ test('HONEST.md lists exactly the hosts SONOMOS_CAPTURE_PATHS narrows', async ()
   );
 
   assert.deepEqual(
-    sortedEntries(documented), sortedEntries(paths),
+    sortedEntries(documented), sortedEntries(listed),
     'HONEST.md\'s per-host path lists have drifted from SONOMOS_CAPTURE_PATHS. Every ' +
     'path missing from the document is a path users are told is screened when it is, ' +
     'and every extra one is a path they are told is screened when it is not.'
   );
 });
 
+test('HONEST.md names every host SONOMOS_CAPTURE_PATHS narrows to nothing', async () => {
+  const { unscreened } = split((await loadGeneratedGlobals()).paths);
+  const honest = await readFile(url('../HONEST.md'), 'utf8');
+  assert.ok(unscreened.length > 0, 'the catalog\'s `search` entry is expected to narrow at least one host');
+  for (const host of unscreened) {
+    assert.ok(
+      honest.includes(`\`${host}\``),
+      `HONEST.md does not name \`${host}\`, which the extension holds NOTHING on. A host whose ` +
+      'own bodied requests pass unscreened is a coverage statement users are entitled to read.'
+    );
+  }
+});
+
 test('the generated capture paths are the vendored catalog\'s, not a hand edit', async () => {
   const { paths } = await loadGeneratedGlobals();
   const surfaces = JSON.parse(await readFile(url('../shared/ai-surfaces.json'), 'utf8'));
   assert.deepEqual(
-    sortedEntries(paths), sortedEntries(capturePathsFromCatalog(surfaces)),
+    sortedEntries(paths), sortedEntries(capturePathsFor(surfaces)),
     'content/web-surfaces.generated.js disagrees with shared/ai-surfaces.json. The ' +
     'generated file is not editable by hand — change the catalog in Service-Mesh\'s ' +
     'sonomos-vocab, re-vendor shared/ai-surfaces.json, and run `npm run generate`.'
