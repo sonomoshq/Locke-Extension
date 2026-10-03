@@ -1451,6 +1451,49 @@ test('a relay code we own is never blamed on the desktop app', async () => {
   }
 });
 
+// The dead channel, from the shim's side.
+//
+// An extension reload orphans the content script in every tab that was
+// already open, so that tab relays on a channel belonging to an extension
+// generation that no longer exists and blocks every in-scope request until
+// the page is reloaded. The block was always right; the sentence was not.
+// `verdict-missing` — what a null verdict produces, and what this used to be
+// — says "the Locke extension restarted while this request was waiting.
+// Reload the page and try again", which is advice that works for a sleeping
+// service worker and reads as boilerplate here: nothing named the cause,
+// nothing said retrying could not help, and a correct fail-closed block on a
+// healthy install was indistinguishable from Locke being broken.
+test('a page whose channel died with the last extension reload is told to reload it', async () => {
+  const { sandbox, netCalls, logs } = makeWorld(() => (
+    { ok: false, code: 'extension-reloaded', message: 'the extension was reloaded, updated or re-enabled after this page was opened' }
+  ));
+  await assert.rejects(
+    sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }),
+    (e) => {
+      // The instruction, and the one word that makes it actionable: THIS
+      // page. A user with several tabs open needs to know it is per-tab.
+      assert.match(e.message, /[Rr]eload this page/, e.message);
+      // And that retrying alone is not the fix, which is what the generic
+      // sentence implied and what this user will otherwise do all afternoon.
+      assert.match(e.message, /keep failing/, e.message);
+      // Not a finding. The whole point of the reason vocabulary.
+      assert.match(e.message, /NOT a sensitive-data block/, e.message);
+      assert.match(e.message, /\bkind=unavailable\b/, e.message);
+      // Nothing about the desktop app, which is not implicated and may well
+      // be screening happily for every other tab — the wrong-advice shape
+      // `bridge-unreachable` and `connector-not-started` were pulled out of.
+      assert.ok(!/desktop app could not be reached/.test(e.message), e.message);
+      assert.ok(!/[Ss]tart it/.test(e.message), e.message);
+      assert.ok(!/click Allow/.test(e.message), e.message);
+      return true;
+    }
+  );
+  // The posture is unchanged: this reason exists to explain a block, never to
+  // soften one.
+  assert.equal(netCalls.length, 0, 'the request must still fail closed');
+  assertBlocked(logs, 'extension-reloaded', 'unavailable');
+});
+
 test('the page-visible rejection never carries body, query or header content', async () => {
   const SECRET_BODY = 'my-social-security-number-is-078-05-1120';
   const SECRET_QUERY = 'leak-me-in-the-query';

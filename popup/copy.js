@@ -264,7 +264,33 @@ function detailFor(view, screening, recentFailure) {
   }
   // Connected, but nothing has proved anything behind the app is screening.
   // Say that, rather than the comfortable thing.
-  return `Connected to the Locke desktop app. Screening is confirmed the first time you send something it screens, on one of ${COVERED_SITES}.`;
+  //
+  // ## Why the second sentence is here, and why it is not conditional
+  //
+  // This is the exact state a user lands in after the extension is reloaded,
+  // updated or re-enabled — and it is the state in which this popup is most
+  // likely to be wrong about their experience. That event clears
+  // `storage.session`, so the status goes back through a fresh check to
+  // CONNECTED, the screening evidence and `lastCaptureFailure` are both gone,
+  // and this branch is what renders. Meanwhile every AI page they already had
+  // open is relaying on a channel that died with the previous extension
+  // generation: each one blocks every in-scope request, correctly and
+  // fail-closed, until it is reloaded (content/shim.js
+  // `extension-reloaded`).
+  //
+  // So the user reads "send something and screening will be confirmed",
+  // sends, and watches it fail — which is the reading this whole file exists
+  // to prevent, arrived at from the honest direction rather than the
+  // comfortable one.
+  //
+  // It is NOT gated on detecting that condition, because this half cannot
+  // detect it. A dead content-script channel never reaches the service
+  // worker, so no capture failure is ever recorded for it and no state field
+  // carries it; the only surface that sees it is the page, which now says so
+  // itself. Standing advice that is always true beats a conditional keyed on
+  // a signal we do not have — and it is cheap here, in the one branch where
+  // the alternative is an instruction that will not work.
+  return `Connected to the Locke desktop app. Screening is confirmed the first time you send something it screens, on one of ${COVERED_SITES}. If a page is already blocking requests, it was open before Locke was last reloaded or updated — reload that page to restore screening on it.`;
 }
 
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;

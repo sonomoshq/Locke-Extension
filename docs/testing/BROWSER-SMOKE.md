@@ -83,6 +83,18 @@ These are recorded rather than worked around, and any row they affect reads
   serves an anti-automation challenge to a driven browser, which reliably
   produces page-origin errors (a `403`, sandboxed-iframe warnings). They are
   counted, named in the run notes, and not charged to the extension.
+- **The dead channel is not exercised.** `[added 2026-09-17]` An extension
+  reload orphans the content script in every tab that was already open, and
+  the block that follows is now attributed as `extension-reloaded`
+  (`content/shim.js`). Reproducing it needs a page loaded, then the extension
+  reloaded *underneath it*, then a send in the same tab — three steps this
+  harness does not take, and two of them (reload an unpacked extension in
+  place, keep the tab) it has no API for on Firefox. `tests/content-script.test.js`
+  covers the attribution against both engines' message wordings outside a
+  browser; **that those wordings are what the shipped engines actually emit
+  is unverified here**, and it is the one assumption the attribution rests
+  on. An engine that reworded it falls back to the old unattributed block —
+  no worse than before, and no better.
 
 ## Results
 

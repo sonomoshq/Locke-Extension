@@ -1155,3 +1155,54 @@ test('the "nothing sent yet" line does not promise that any send confirms screen
   const copy = copyFor(connected({ screening: SCREENING.UNCONFIRMED }));
   assert.match(copy.detail, /the first time you send something it screens/);
 });
+
+test('the "nothing sent yet" line tells a tab orphaned by a reload to reload itself', () => {
+  // This is the state a user lands in seconds after the extension is
+  // reloaded, updated or re-enabled, and it is the state in which this popup
+  // is most likely to be wrong about their experience. That event clears
+  // storage.session, so the status goes back through a fresh check to
+  // CONNECTED and both the screening evidence and lastCaptureFailure are
+  // gone — leaving exactly this branch. Meanwhile every AI page they already
+  // had open is relaying on a channel that died with the previous extension
+  // generation and blocks every in-scope request until it is reloaded
+  // (content/shim.js `extension-reloaded`).
+  //
+  // Without the second sentence this popup said "send something and screening
+  // will be confirmed" to a user whose next send was guaranteed to fail —
+  // an instruction that does not work, which is the defect class this whole
+  // file exists to prevent.
+  //
+  // It is standing advice rather than a detection, and deliberately: a dead
+  // content-script channel never reaches the service worker, so no state
+  // field can carry it. The popup says what is always true instead of
+  // claiming to have observed something.
+  const copy = copyFor(connected({ screening: SCREENING.UNCONFIRMED }));
+  assert.match(copy.detail, /reload that page/);
+  assert.match(copy.detail, /before Locke was last reloaded or updated/);
+  // Says which page, not "the extension" — reinstalling or reloading the
+  // extension is the one remedy that makes this worse, because it orphans
+  // every other open tab too.
+  assert.ok(
+    !/reload the extension/i.test(copy.detail),
+    `the fix is the page, not the extension: ${copy.detail}`
+  );
+});
+
+test('the popup and the page name one remedy for a reload-orphaned tab, not two', async () => {
+  // Two Sonomos surfaces describing one event in words that do not line up is
+  // how a tester concludes the site is broken and Sonomos is fine — the
+  // failure this file's header names. `content/shim.js` is the surface the
+  // user actually reads (the page rendered our refusal), and the popup is the
+  // one they open next; both must send them to the same place.
+  const shim = await readFile(new URL('../content/shim.js', import.meta.url), 'utf8');
+  const sentence = shim
+    .split('\n')
+    .find((l) => l.includes('screening channel is no longer connected'));
+  assert.ok(sentence, 'content/shim.js must still carry the extension-reloaded sentence');
+  assert.match(sentence, /Reload this page/);
+
+  const detail = copyFor(connected({ screening: SCREENING.UNCONFIRMED })).detail;
+  for (const surface of [sentence, detail]) {
+    assert.match(surface, /reload(ed)? (this|that) page/i, surface);
+  }
+});
