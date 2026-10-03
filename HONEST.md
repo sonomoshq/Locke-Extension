@@ -127,7 +127,7 @@ verdict means no send. The residuals we accept and document:
 
   | Host | Paths screened — and nothing else on that host |
   | --- | --- |
-  | `chatgpt.com` | `/backend-api/conversation`, `/backend-api/f/conversation`, `/backend-anon/conversation`, `/backend-anon/f/conversation`, `/unauth-mweb/conversation/updates` |
+  | `chatgpt.com` | `/backend-api/conversation`, `/backend-api/f/conversation`, `/backend-anon/conversation`, `/backend-anon/f/conversation`, `/unauth-mweb/conversation/updates`, `/backend-api/codex/responses` |
   | `claude.ai` | `/api/organizations/*/chat_conversations/*/completion`, `/api/organizations/*/chat_conversations/*/retry_completion`, `/api/*/upload`, `/api/organizations/*/convert_document` |
   | `www.perplexity.ai` | `/rest/sse/perplexity_ask` |
 
