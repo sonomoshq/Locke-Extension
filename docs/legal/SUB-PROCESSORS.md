@@ -1,7 +1,6 @@
 # Sub-processor declaration
 
-> **DRAFT — pending revision and review by the legal reviewer.** See
-> `TODO.md`.
+> **DRAFT — pending revision and review by the legal reviewer.**
 
 ## Product PII
 

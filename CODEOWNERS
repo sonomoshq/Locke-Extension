@@ -48,7 +48,7 @@ shared/constants.js            @sonomoshq/maintainers
 .github/workflows/             @sonomoshq/maintainers
 
 # Legal docs require the legal reviewer's sign-off (@zgbrenner), tracked
-# separately in TODO.md. Deliberately an individual rather than the team:
+# separately in the internal task list. Deliberately an individual rather than the team:
 # routing these to everyone would defeat the point. Note the limit —
 # CODEOWNERS can only auto-request a review, never require that a
 # specific person's approval is the one that satisfies the rule, so this

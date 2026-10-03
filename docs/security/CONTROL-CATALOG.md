@@ -170,7 +170,7 @@ on a loopback channel that no longer carries them.
 
 ## Coverage gaps (open)
 
-These are tracked in [`TODO.md`](../../TODO.md):
+These are tracked internally:
 
 - **Native-messaging manifest integrity (added 2026-08-21).** Nothing
   re-verifies `ai.sonomos.desktop.json` after the Locke desktop app's

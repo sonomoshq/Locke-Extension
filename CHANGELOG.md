@@ -29,6 +29,11 @@ strict SemVer.
   `HONEST.md`, `README.md` and `docs/security/PERMISSIONS.md` no longer say
   bodied requests on those hosts are "screened normally".
 
+**Removed**
+- `TODO.md`. The task list is now kept internally rather than in the public
+  repository, and the documents that pointed to it say the item is tracked
+  internally. No code or package change.
+
 **Changed**
 - The extension icon is now the Locke product mark — a padlock with a green
   dot on a charcoal tile — replacing the Sonomos traffic light that had stood

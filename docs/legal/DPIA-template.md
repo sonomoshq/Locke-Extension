@@ -2,8 +2,7 @@
 
 > **DRAFT — pending revision and review by the legal reviewer.** This
 > template is a starting point for customers whose own counsel
-> requires a DPIA before deployment. See `TODO.md` for the
-> outstanding legal-review items.
+> requires a DPIA before deployment.
 
 This template covers the Sonomos Desktop Connector browser extension
 and its companion daemon. It addresses GDPR Article 35 (and the
@@ -97,7 +96,7 @@ ChatGPT directly."
 ## 4. Consultation
 
 - **Internal stakeholders**: engineering (Sonomos), security review
-  (Sonomos), legal review (see `TODO.md`).
+  (Sonomos), legal review (tracked internally).
 - **External**: customer DPOs as required; this DPIA template is
   designed to be completed by the deploying organisation rather
   than by Sonomos.

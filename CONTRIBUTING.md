@@ -300,8 +300,8 @@ If your change affects:
   [`SECURITY.md`](SECURITY.md) and call out the change in PR
   description for security review.
 - **Anything legal** (DPA, DPIA, retention, sub-processors,
-  export-control) → flag in the PR for legal review per
-  [`TODO.md`](TODO.md). Do not merge legal-doc changes without
+  export-control) → flag in the PR for legal review. Do not merge
+  legal-doc changes without
   explicit legal sign-off.
 
 Add or update entries in [`CHANGELOG.md`](CHANGELOG.md) for any

@@ -1,7 +1,6 @@
 # Export Control and Cryptography Notice
 
-> **DRAFT — pending revision and review by the legal reviewer.** See
-> `TODO.md` for the legal review checklist.
+> **DRAFT — pending revision and review by the legal reviewer.**
 
 > ## Status: UNCLASSIFIED — pending counsel
 >

@@ -60,7 +60,7 @@ combined sign-off.
    publication has a baseline to establish, not a trend to read. The
    local pre-push preflight's status, and whether it is still being
    bypassed with `--no-verify`, remains part of this input.
-5. **TODO.md status** — items closed since last review, items
+5. **Internal task list status** — items closed since last review, items
    still open, calendar slippage on any
 6. **Customer questionnaires received** — recurring questions
    become follow-up actions for ASVS-MAPPING / CONTROL-CATALOG
@@ -219,7 +219,7 @@ Scope: quarterly (first formal review for this product line)
   and the dispatch does not read the scanning half's results, which is
   the standing action item below.
 
-**`TODO.md` status**
+**Internal task list status**
 - Closed since baseline:
   - ~~Client-side encryption layer — implemented with feature
     detection~~ **Withdrawn 2026-08-21: this was never true and is not
@@ -258,8 +258,8 @@ Scope: quarterly (first formal review for this product line)
 - None yet (pre-pilot).
 
 **Legal-doc status**
-- All DRAFT. None presented to a customer. See `TODO.md` for the
-  legal-review checklist.
+- All DRAFT. None presented to a customer. The legal-review
+  checklist is tracked internally.
 
 **Threat-model deltas**
 - A4–A6 added in the round-2 IT-friendliness pass (see
@@ -294,7 +294,7 @@ add/remove/adjust during the review.)*
 
 | Action | Owner | Target |
 |---|---|---|
-| Schedule a legal-review block to walk the legal-review checklist in `TODO.md` | Operations | 2026-Q2 end |
+| Schedule a legal-review block to walk the internal legal-review checklist | Operations | 2026-Q2 end |
 | Submit CII Best Practices badge form (15-min paste from `docs/security/CII-CHECKLIST.md`) | Engineering | 2026-Q2 mid |
 | ~~Activate `.github/workflows/`~~ — **closed 2026-09-01**: eight of the nine workflows now carry real triggers; `release.yml` stays `workflow_dispatch`-only by design (Sonomos #190) | Engineering | *done* |
 | Review the first completed run of each workflow and record the baseline — nothing has run in this repository, so every "enabled" row in `CONTROL-CATALOG.md` and `ASVS-MAPPING.md` is unconfirmed until this happens (added 2026-09-01) | Engineering | First push after publication |
