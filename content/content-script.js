@@ -282,22 +282,23 @@
     return config;
   }
 
+  function postConfig(config) {
+    try {
+      // This targets the same DOCUMENT, including opaque-origin frames.
+      // Narrowing targetOrigin exposes no less to that page and would drop
+      // the safety-critical revocation update on about:blank/srcdoc frames.
+      // Only shipped settings and the consent boolean cross this boundary.
+      // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
+      window.postMessage({ type: CONFIG, config }, SAME_WINDOW);
+    } catch { /* page gone */ }
+  }
+
   function pushConfig() {
     const generation = ++configGeneration;
     readShimConfig().then((config) => {
       if (generation !== configGeneration) return;
       if (requiresConsent) dataSharingAllowed = config.dataSharingAllowed === true;
-      try {
-        // the receiving DOCUMENT's origin, not by listener, so every script in this
-        // document could read this post whatever we passed; and location.origin throws
-        // or is silently dropped in the opaque-origin frames the manifest opts into.
-        // Deliberate: targetOrigin filters by the receiving DOCUMENT origin, not
-        // by listener, so narrowing it hides nothing; and location.origin throws
-        // or is dropped in the opaque-origin frames the manifest opts into. Full
-        // reasoning at the SAME_WINDOW declaration above.
-        // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
-        window.postMessage({ type: CONFIG, config }, SAME_WINDOW);
-      } catch { /* page gone */ }
+      postConfig(config);
     }).catch(() => { /* the shim's own defaults hold */ });
   }
 
@@ -306,7 +307,7 @@
       if (requiresConsent && area === 'local' && changes[DATA_CONSENT_KEY]) {
         // Revoke synchronously before asynchronous settings/policy reads.
         dataSharingAllowed = false;
-        try { window.postMessage({ type: CONFIG, config: { dataSharingAllowed: false } }, SAME_WINDOW); } catch { /* page gone */ }
+        postConfig({ dataSharingAllowed: false });
       }
       pushConfig();
     });
