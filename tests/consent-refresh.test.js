@@ -71,6 +71,8 @@ test('a pre-action refresh cannot repaint or restart over an in-progress Allow c
 });
 
 test('an older refusal refresh cannot overwrite a newer granted choice', async () => {
+  holdReads = true;
+  permissionGranted = true;
   record = { version: 1, granted: false, technical: false };
   emitChange();
   await flush();
