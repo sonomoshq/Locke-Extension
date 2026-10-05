@@ -5,8 +5,8 @@ before it is allowed to leave, it makes a round-trip into the Locke desktop app
 for screening.
 
 The extension is a **hold-and-enforce capture surface**. When the page sends a
-bodied request to an AI web surface, the shim HOLDS it, ships the synthesized raw
-HTTP request to the desktop app, and acts on the verdict: release it unchanged
+bodied request within the host/path and user/admin scope, the shim HOLDS it
+and sends the synthesized raw HTTP request to the desktop app, and acts on the verdict: release it unchanged
 (`allow`), re-issue it with the screener's rebuilt body (`redact`), or block it.
 Detection and redaction still happen **in the desktop app**, never in the
 extension — the extension only applies the result. The failure posture is
@@ -39,7 +39,7 @@ extension — the extension only applies the result. The failure posture is
 │  │        ▼         │                                            │
 │  │  ┌────────────┐  │                                            │
 │  │  │service-    │  │  connection status, badge, audit log,      │
-│  │  │worker.js   │  │  native-messaging client. No PII logged.   │
+│  │  │worker.js   │  │  native client; local diagnostics.         │
 │  │  └─────┬──────┘  │                                            │
 │  │        │         │                                            │
 │  └────────┼─────────┘                                            │
@@ -73,54 +73,84 @@ extension — the extension only applies the result. The failure posture is
 > anything over the 8 MiB cap — is in scope but unscreenable and therefore
 > **blocked**, never sent unchecked.
 >
-> **Three things are out of scope by construction, and all are coverage gaps
-> rather than fail-open branches.** Scope is the *request's host*, so an
-> attachment `PUT` to pre-signed object storage on an unrelated host is never
-> seen as AI traffic. Only requests with a BODY are screened, so a prompt
-> carried entirely in a query string (the search surfaces) is not. And the
-> hooks live in the page's MAIN world, which a `Worker` / `ServiceWorker`
-> scope, a `<form>` submission and a top-level navigation never enter. All
-> three are catalogued in [`HONEST.md`](../../HONEST.md).
+> **Coverage is request-specific.** The catalog bounds script injection to
+> named AI hosts and matched subdomains/frames; there is no `<all_urls>`
+> grant. `isScreenedUrl` applies host/provider/disabled-site checks and
+> capture-path/skip rules. A separate `isUploadScope` path handles recognized
+> cross-origin object writes initiated by a screened page (HTTPS bodied PUT,
+> or POST with recognized object-write headers). It needs no new destination
+> host permission. Path-excluded traffic, unrecognized uploads, prompts sent
+> by navigation, WebSockets and workers remain coverage gaps. See
+> [`HONEST.md`](../../HONEST.md); supported host does not mean every request
+> on that host is screened. In-scope `fetchLater` and beacons cannot wait for
+> a verdict and are refused rather than screened.
 
 ## Where request content lives
 
 | Hop | Contains request content? | Why |
 |---|---|---|
 | User keystroke → page DOM | yes | This is where the user typed it. |
-| `shim.js` page-world | yes | Holds the outbound request; synthesizes the raw HTTP request (method, path, page-set headers, exact body bytes) as base64. |
+| `shim.js` page-world | yes | Holds the outbound request; synthesizes method, destination, path/query, page-set headers and body/file bytes as base64. |
 | `content-script.js` → service worker | yes | Relays `requestB64` via `chrome.runtime.sendMessage` and returns the verdict. |
 | `service-worker.js` | yes (passes through) | Relays `requestB64` to the native host. Never logs bodies — only the receipt metadata and shape-only audit events. |
-| Native messaging host | yes (passes through) | Forwards the base64 request to the desktop app verbatim; logs metadata only. |
+| Native messaging host | yes | Receives the base64 request and optional provider ID for the desktop app. Host implementation and retention are outside this repository. |
 | Locke desktop app | yes | Parse + scan + redaction happens here — never in the extension. |
 | Page → LLM provider | yes | Only after an `allow` (as held) or `redact` (the app's rebuilt body, as bytes). Blocked requests never leave. |
 
-## What never leaves the device via the extension
+## Local processing and remote destinations
 
-- The extension makes **no network requests of its own**. The only outbound path is
-  native messaging to the same-user native host, which relays over a local
-  `0600` UDS. There is no HTTP egress.
-- Telemetry events (logged to the service-worker console; no network egress).
+The screening copy travels through `runtime.connectNative` to
+`ai.sonomos.desktop` on the same device. There is no configured remote
+extension analytics or screening endpoint. Separately, the service worker
+uses loopback HTTP at `127.0.0.1:18795` for `/heartbeat` (`browser`, `version`)
+and Chromium `/register-extension` (`id`, `browser`, `version`). The browser
+adds the extension Origin header. Neither JSON body contains page content.
+
+The page's allowed/redacted request still goes to its original AI website or
+upload destination. “Local screening” does not mean that the user's request
+never reaches a remote provider, that no personal data is processed, or that
+the desktop app retains no metadata. See the
+[product privacy policy](https://sonomos.ai/locke/privacy) for that app's
+handling, and [RETENTION.md](../legal/RETENTION.md) for browser-side storage.
 
 ## What the record carries
 
-What the native host sends onward is one field:
+`captureViaHost` sends `{ type: "capture", requestB64, provider? }` to the
+native host. `requestB64` contains a synthesized HTTP/1.1 request:
 
-- `request` — the synthesized raw HTTP/1.1 request, base64:
-  `<METHOD> <path+query> HTTP/1.1\r\nHost: <host>\r\n<the headers the page set,
-  incl. the effective Content-Type>\r\n\r\n<exact body bytes>`. The browser's own
-  network-layer headers (cookies, `sec-fetch-*`, UA ordering) are added after the
-  shim's reach and are not part of the capture. Sensitive end to end; relayed,
-  never logged.
+`<METHOD> <path+query> HTTP/1.1`, `Host: <destination>`, page-set headers
+(including effective Content-Type), then the exact body bytes. Content can
+include prompts, conversation text, personal information and supported files.
+Page-set headers can contain authentication information. The browser-added
+Cookie header, `sec-fetch-*` and other network-layer additions are outside
+the capture. This is not a claim that every captured header is non-sensitive.
 
-Nothing accompanies those bytes: no app name, no message list, no extracted
-fields. Everything a screener needs is derivable from the request itself, so the
-extension parses nothing and asserts nothing about what it captured.
+For the separate cross-origin upload path, `synthesizeRequest(..., dropQuery)`
+omits the query from the screening copy because presigned URL queries carry
+upload credentials. The original URL is retained for the page's actual send;
+this is not a general removal of all credentials from bodies or headers.
+
+`provider`, when available, is a catalog provider ID. Native status messages
+also acknowledge the applied disabled-host list and ignored-entry count.
+They are connection/configuration metadata, not body screening records.
+
+## Scope and minimization follow-up
+
+`freezeFetchCall` runs before `isScreenedUrl` / `isUploadScope`. It snapshots
+headers and copies mutable body inputs (FormData entries, URLSearchParams,
+ArrayBuffer and typed-array bytes) even when a request is later out of scope.
+Those requests are not relayed to the native app for screening, but “never
+accessed” or “untouched” is too broad. A separate engineering review should
+assess moving unnecessary copying behind the scope gate while preserving
+request immutability and fail-closed behavior. This disclosure-only change
+does not alter that logic.
 
 ## Failure modes
 
 All of these follow the same rule: an in-scope bodied request that cannot get a
 clean verdict is **blocked** (the fetch rejects / the XHR aborts). The page's
-out-of-scope traffic is never touched.
+out-of-scope traffic is not relayed for screening (see the snapshot caveat
+above).
 
 - **Desktop app unreachable / host not registered**: the native host returns an
   error; the shim maps it to a block. The service worker's heartbeat flips the
@@ -169,8 +199,10 @@ never sent.
 
 Every one of these branches names itself on the page console as
 `[sonomos] reason=<branch> … action=block kind=<class>`, at `console.warn`.
-Shapes only — host, path (never the query string), method, byte counts, media
-types, elapsed ms. Bodies and header values never appear.
+The request-shape line contains host, path (not query), method, byte counts,
+media types and elapsed time, not body bytes or header values. Other console
+telemetry can contain a tab URL and CSP URIs, so this is not a guarantee that
+all diagnostics are free of identifying data. See the retention inventory.
 
 Beside that machine-shaped line, every block also emits the **human sentence**
 — `[sonomos] Request blocked by Sonomos: … [kind=… reason=…]` — at

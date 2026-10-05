@@ -1,87 +1,78 @@
-# Data retention policy
+# Extension data retention inventory
 
-> **DRAFT — pending revision and review by the legal reviewer.**
+> **DRAFT — legal review required.** Source reviewed on 2026-10-05.
 
-This document satisfies GDPR Art. 5(1)(e) "storage limitation" by
-declaring exactly what the Sonomos Desktop Connector extension
-stores, where, for how long, and what triggers deletion.
+This describes the browser extension's storage, not the desktop app's
+retention or a conclusion about legal compliance. Local processing includes
+personal data; absence of an extension cloud endpoint does not mean there is
+nothing to disclose or erase. For the complete product policy, including
+desktop metadata, logs and crash handling, see
+<https://sonomos.ai/locke/privacy>.
 
-The product is on-device. Sonomos infrastructure has no copy of any
-of the items below.
+## Persistent browser-profile items
 
-## Persistent items
+| Item | Location / source | Lifetime / deletion |
+|---|---|---|
+| Diagnostic audit buffer | `storage.local.auditLog`; `appendAudit` in `background/service-worker.js` | Most recent 100 entries (`AUDIT_MAX_ENTRIES`); no time-based expiry. Older entries are evicted as new ones arrive. Browser removal/clearing of extension data deletes this copy. |
+| Disabled-site configuration | `storage.local.disabledWebHosts`; `storeDisabledWebHosts` | Last applied host list and ignored-entry count from the desktop app. Persists across browser restarts and host outages; replaced when a changed configuration arrives, or removed with extension data. |
+| Local settings, if present | `storage.local.settings`; `getSettings` | Read and merged with defaults and managed policy; no automatic expiry. Replaced/cleared by configuration changes or removal of extension data. |
+| Legacy popup theme, if present | Extension-origin Web Storage `sonomosPopupTheme`; `popup/theme-init.js` | Current popup reads an existing value; it has no theme-toggle writer. Persists until that browser storage is cleared. This is not `storage.local`. |
+| Managed policy | `storage.managed`; `getManagedSettings` | Read-only policy supplied by the browser/OS; governed by the administrator. Removing the extension does not remove the administrator's policy. |
 
-| Item | Where | When written | Lifetime | Trigger for deletion |
-|---|---|---|---|---|
-| Connection-state cache | `chrome.storage.session` (in-memory; cleared on browser process exit) | On each health check (a native-messaging round trip) | Single browser session (≤ days for a long-lived browser) | Browser restart; service-worker eviction; explicit `chrome.storage.session.clear()` |
-| Theme preference | `chrome.storage.local` | When user toggles theme in popup | Until user changes it again | User toggles theme; uninstalls extension |
-| Managed-policy cache | `chrome.storage.managed` (read-only; provided by OS policy framework) | When admin-pushed via GPO/MDM | Until admin removes the policy | Admin policy change |
-| Audit log | `chrome.storage.local`, key `auditLog` | On the 7 audited event kinds (see `docs/security/PERMISSIONS.md`) | Ring buffer capped at 100 entries (`AUDIT_MAX_ENTRIES`) | Eviction by ring buffer; uninstall |
+Audit entries are timestamped diagnostic events: connection failures/recovery,
+policy-key names, screening availability and CSP violations. CSP entries can
+contain `blockedURI`, `documentURI`, `sourceFile`, a directive and line number;
+error metadata is also recorded. The buffer does not contain captured request
+bodies. “Shape-only” does not guarantee anonymous data or that every URL is
+free of identifying information. Do not publish a diagnostic export without
+reviewing its contents.
 
-## Items not retained
+## Browser-session items
 
-| Item | Why not |
-|---|---|
-| Auth token | **Corrected 2026-08-21: no such item.** A mode-`0600` daemon token cached in `chrome.storage.session` under `TOKEN_TTL_MS` used to be listed above. It retired with the daemon in the 2026-06 mesh rewrite; the extension stores no secret of any kind. |
-| Request bodies (PII) | Never persisted by the extension. Held in the screening service's memory for one request, then discarded. |
-| Response bodies | Same. |
-| User identity | The extension has no user concept. There is no account, no login, no session. |
-| Browsing history | The extension does not observe pages outside its `content_scripts.matches` list (the AI web-surface hosts), and it runs nowhere else. |
-| LLM prompts after masking | Forwarded by the user's browser to the user's chosen LLM provider. Sonomos does not interpose. |
-| LLM responses | Same. |
+`background/service-worker.js` uses `storage.session` for:
 
-## Items on Sonomos infrastructure
+- `connectionState`: health status, error/latency metadata and timestamps,
+  with the current screening summary
+- `screeningState`: recent screening evidence, timestamps and counters for
+  unchecked sends, withheld/redacted items and policy-blocked sends
+- `backoff`: health-check scheduling state
+- `registrationLastAttempt`: Chromium registration retry timestamp
 
-**None for product PII.** The architecture is loopback-only.
+These survive service-worker eviction. Browser-session storage is cleared by
+the browser on restart; it is not a disk-persistent request archive. The
+10-minute screening-evidence freshness limit affects what the popup can
+claim, not an automatic deletion deadline for the stored record or counters.
 
-For corporate operations (billing, support tickets), Sonomos retains
-customer-organisation metadata per the retention schedule on the
-public privacy policy at <https://sonomos.ai/privacy>. This metadata
-does not include customer Personal Data processed by the product.
+## Request content and diagnostics
 
-## Statutory retention obligations
+The extension copies and relays in-scope request bodies, including supported
+file bytes, plus method, destination, path/query and page-set headers, to the
+local native app for screening. The cross-origin upload screening copy omits
+the presigned URL query; the browser-added Cookie header is not captured.
+Request and rebuilt-body copies are held in memory for handling the request;
+the extension has no persistence path for those bodies. This is not a claim
+of immediate secure erasure from memory or a statement about desktop storage.
+The extension does not capture the website's response bodies.
 
-Sonomos has no statutory obligation to retain product Personal Data
-because the product holds no product Personal Data on Sonomos
-infrastructure. Customers operating in regulated industries
-(healthcare, financial services) may have their own statutory
-retention obligations on their endpoints; those are the customer's
-responsibility and unrelated to this product.
+Console diagnostics are separate from `auditLog`. They include request shape,
+host/path, sizes, verdicts and errors; telemetry handling can also log a tab ID,
+a tab URL (up to 200 characters) and CSP metadata. Browser devtools, logging
+settings or a user-created export can retain these independently. No fixed
+retention period or automatic erasure of those copies is implemented here.
 
-## Right to erasure
-
-Because Sonomos retains no product Personal Data, an Article 17
-right-to-erasure request directed at Sonomos for product data is
-satisfied trivially (there is nothing to erase). For data held by
-the customer organisation on its endpoints, the customer is the
-controller and handles the request directly.
-
-## Audit-log export
-
-The audit log (one of the persistent items above) is exportable by
-the user from the popup ("Audit log" link). It contains shape-only
-events and no PII. A customer's IT admin pulling this log during
-incident response will see entries like:
-
-```json
-{
-  "ts": 1715367600000,
-  "kind": "daemon-down",
-  "details": { "from": "connected", "error": "daemon-timeout" }
-}
-```
-
-No request bodies, no user-typed text appears (and no auth tokens —
-there are none to appear). The `daemon-` prefix on that event kind is a
-legacy spelling kept in `AUDITED_KINDS` so existing exported logs stay
-parseable; it means the Locke desktop app became unreachable.
+The page sends allowed/redacted requests to the original website, which has
+its own retention practices. Uninstalling the extension does not erase data
+held by the desktop app, an AI provider, the administrator or an exported log.
+For rights requests and product-wide retention, use the product privacy policy
+rather than claiming erasure is unnecessary because screening is local.
 
 ## Verification
 
-`docs/security/PERMISSIONS.md` lists every storage-using API and why.
-Auditors can verify the storage claims by:
-
-1. Inspecting `chrome.storage.local` and `chrome.storage.session`
-   contents from the browser's devtools (Application → Storage).
-2. Reading the audit log via the popup export.
-3. Reviewing the source files referenced in the table above.
+1. Inspect `storage.local` and `storage.session` in the extension's devtools;
+   inspect extension-origin Web Storage separately for the legacy theme key.
+2. Compare the values with `shared/constants.js`, the service-worker storage
+   calls, `popup/theme-init.js` and the [data flow](../architecture/DATA-FLOW.md).
+3. Check browser restart, worker eviction, configuration replacement and
+   extension removal separately. The current popup has no audit-export link;
+   inspecting browser storage is the verification route, not a promised UI.
+4. Review desktop retention separately before publishing product-wide claims.

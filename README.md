@@ -3,11 +3,12 @@
 **The browser piece of [Locke](https://sonomos.ai/locke) — Sonomos's on-device
 privacy screen for AI apps.**
 
-Before a prompt leaves your browser for ChatGPT, Claude, Gemini, Grok,
-Perplexity or an AI-answering search engine, this extension holds it and asks
-the Locke desktop app whether it contains anything that shouldn't leave your
-machine. The request is sent, sent redacted, or blocked — decided **entirely on
-your device**. Nothing is scanned in a cloud, because nothing goes to one.
+On supported AI chat surfaces such as ChatGPT, Claude, Gemini, Grok and
+Perplexity, this extension holds in-scope requests and asks the Locke desktop
+app to screen them before they reach the provider. The request is sent, sent
+redacted, or blocked — decided **entirely on your device**. Screening
+transfers request content to the local desktop app; allowed or redacted
+requests then continue to the website the user is using.
 
 *Formerly the Sonomos Desktop Connector.*
 
@@ -91,7 +92,10 @@ facts, because a reachable desktop app does not prove the screener behind it is 
   never addresses an AI host and so was previously unscreened. That scope is
   bounded by the *initiator*, not the destination: nothing is added to the
   surface catalog and no host permission is requested, because the shim already
-  runs inside the page. Everything else is ignored and passes through untouched.
+  runs inside the page. Other requests are not relayed for screening. The
+  fetch wrapper may still
+  snapshot their inputs before deciding scope; see the minimization follow-up
+  in [`DATA-FLOW.md`](docs/architecture/DATA-FLOW.md#scope-and-minimization-follow-up).
   `navigator.sendBeacon` is also wrapped, but a beacon cannot be held at all, so
   an in-scope one carrying data is refused rather than let through. What the
   extension does **not** cover — `WebSocket`, unrecognised upload shapes,
@@ -138,11 +142,11 @@ background/service-worker.js
     │  - heartbeat health checks (~30 s, backs off) + connection badge
     │  - presence beacon → desktop app (fixed 30 s, never backs off)
     │  - native-messaging client → the native messaging host
-    │  - shape-only audit ring buffer (no bodies, no PII)
+    │  - local audit ring buffer (events and diagnostic metadata, no bodies)
     ▼  connectNative port (4-byte length-prefixed JSON over stdio)
 native messaging host  (ai.sonomos.desktop — installed by the desktop app)
     │  one connection per held request; forwards bytes, parses nothing
-    ▼  no network hop; the browser never opens a socket to the app
+    ▼  content-screening path uses native messaging, not HTTP
 Locke desktop app  (parse + screen + redact)
 ```
 
@@ -253,19 +257,49 @@ Neither route has a second-person approval step.
 Policy — who may release, and what is actually enforced versus merely
 committed to — is [`docs/security/RELEASE-POLICY.md`](docs/security/RELEASE-POLICY.md).
 
+## Privacy and local data handling
+
+The extension handles the content of in-scope requests, including prompts,
+conversation text and uploaded file bytes. It sends them to the local Locke
+desktop app through native messaging with the request method, destination,
+path/query and page-set headers. Those headers can contain authentication
+information; the browser-added Cookie header is not captured. The separate
+cross-origin upload path omits the presigned URL's query from the screening
+copy. Allowed/redacted requests still go to the user's chosen website.
+
+Content scripts run only on catalog-listed AI hosts and their matched
+subdomains/frames, not all websites; there is no `<all_urls>` grant. Request
+path rules, provider policy and disabled-site settings further narrow
+screening. This is not complete coverage of every action on a supported site.
+See [`HONEST.md`](HONEST.md) and the [data flow](docs/architecture/DATA-FLOW.md).
+
+The extension does not persist request bodies. It does keep local diagnostic
+metadata (a 100-entry audit buffer), settings and disabled-site configuration;
+connection/screening state and counters use browser-session storage. Metadata
+can include URLs or paths and is not guaranteed anonymous. Desktop-app
+retention is separate: see the [Locke privacy policy](https://sonomos.ai/locke/privacy)
+and the [extension retention inventory](docs/legal/RETENTION.md).
+
+Store privacy declarations must describe this local handling. The source's
+Firefox `required: ["none"]` declaration and missing data-consent experience
+remain unresolved; documentation changes do not fix them or authorize a
+release. See the [store review checklist](docs/store/LISTING.md#store-specific-privacy-review-checklist).
+
 ## Security model
 
 See [SECURITY.md](SECURITY.md). TL;DR:
 
 - **Hold-and-enforce, fail-closed.** An in-scope bodied request leaves only after
   an `allow` or `redact` verdict; anything short of that blocks it. Out-of-scope
-  traffic is never touched.
-- **No remote network egress.** Page data travels only to the same-user
+  requests are not relayed for screening; see the fetch snapshot caveat above.
+- **Local screening transfer.** The screening copy travels to the same-user
   native-messaging host (`ai.sonomos.desktop`), which relays to the Locke
   desktop app over a user-only `0600` Unix domain socket. There is no HTTP
-  daemon and no URL for a policy to redirect. The single `host_permissions` entry
-  is loopback (`http://127.0.0.1/*`) and carries nothing but the
-  `{ browser, version }` presence beacon — see
+  daemon for request content and no screening URL for a policy to redirect.
+  The single `host_permissions` entry
+  is loopback (`http://127.0.0.1/*`) and supports the
+  `{ browser, version }` presence beacon and Chromium registration requests
+  containing `{ id, browser, version }` — see
   [docs/security/PERMISSIONS.md](docs/security/PERMISSIONS.md).
 - **Content scripts are scoped** to the AI web-surface host list (not `<all_urls>`);
   `scripts/store-build.mjs::validate` rejects a wildcard host in any of its
@@ -291,14 +325,15 @@ pipeline has not run yet, not because it cannot; see
 
 ## Why publish the source of a privacy product?
 
-Because "we don't read your prompts" is a claim, and claims about privacy
-software deserve to be checkable. Publishing the source lets anyone verify the
-properties that matter:
+Because local screening necessarily handles prompts, files and request
+metadata, and claims about that handling deserve to be checkable. Publishing
+the source lets anyone verify the properties that matter:
 
-- **No outbound request except loopback.** The extension's only network
-  destination is the Locke desktop app on `127.0.0.1`. This is not a policy —
-  it is enforced by CI on every change (`scripts/audit-payload.mjs` fails the
-  build on any other endpoint), and you can grep the source yourself.
+- **No extension-service network endpoint except loopback.** Its background
+  requests address the Locke desktop app on `127.0.0.1`; allowed or redacted
+  page requests still go to their original remote destinations.
+  `scripts/audit-payload.mjs` checks the shipped extension for unexpected
+  endpoint references in CI; you can inspect the source yourself.
 - **Zero runtime dependencies.** `package.json` declares none, so there is no
   third-party code in what ships and no supply chain to take on faith.
 - **Reproducible builds.** Two builds of the same commit are byte-identical,
