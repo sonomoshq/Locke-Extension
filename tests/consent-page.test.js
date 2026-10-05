@@ -23,6 +23,8 @@ const handlers = new Map();
 const listeners = [];
 let stored = {}, builtin = true, technicalGranted = false, requestAllowed = false;
 let getFails = false, setFails = false, uninstallFails = false;
+let deferStorageChange = false;
+let pendingStorageChange = null;
 const requests = [], removals = [], uninstalls = [];
 function element(id) {
   if (!elements.has(id)) elements.set(id, { disabled: true, checked: false, hidden: false, textContent: '',
@@ -39,13 +41,19 @@ globalThis.browser = {
       async set(value) {
         if (setFails) throw new Error('failed write');
         stored = { ...stored, ...value };
-        for (const fn of listeners) fn({ dataSharingConsent: { newValue: value.dataSharingConsent } }, 'local');
+        if (deferStorageChange) pendingStorageChange = value;
+        else for (const fn of listeners) fn({ dataSharingConsent: { newValue: value.dataSharingConsent } }, 'local');
       }
     },
     onChanged: { addListener: fn => listeners.push(fn) }
   },
   permissions: {
-    async getAll() { return builtin ? { data_collection: technicalGranted ? ['technicalAndInteraction'] : [] } : {}; },
+    async getAll() {
+      if (pendingStorageChange) {
+        const change = pendingStorageChange; pendingStorageChange = null;
+        for (const fn of listeners) fn({ dataSharingConsent: { newValue: change.dataSharingConsent } }, 'local');
+      }
+      return builtin ? { data_collection: technicalGranted ? ['technicalAndInteraction'] : [] } : {}; },
     request(value) { requests.push(value); technicalGranted = requestAllowed; return Promise.resolve(requestAllowed); },
     async remove(value) { removals.push(value); technicalGranted = false; return true; }
   },
@@ -118,4 +126,32 @@ test('failed storage write cannot report a successful grant', async () => {
   assert.match(element('consentStatus').textContent, /could not save/i);
   assert.equal(stored.dataSharingConsent.granted, false);
   setFails = false;
+});
+
+
+for (const builtInConsent of [false, true]) test(`delayed post-save storage event is reconciled with builtin=${builtInConsent}`, async () => {
+  builtin = builtInConsent;
+  requestAllowed = true;
+  stored = { dataSharingConsent: { version: 1, granted: false, technical: false } };
+  await load();
+  element('technicalConsent').checked = true;
+  deferStorageChange = true;
+  try {
+    await handlers.get('allowConsent:click')();
+    assert.deepEqual(stored.dataSharingConsent, { version: 1, granted: true, technical: true });
+    assert.equal(element('technicalConsent').checked, true);
+    assert.match(element('consentStatus').textContent, /enabled/);
+    assert.doesNotMatch(element('consentStatus').textContent, /could not save/);
+  } finally { deferStorageChange = false; pendingStorageChange = null; builtin = true; requestAllowed = false; }
+});
+
+
+test('a genuine consent-read failure remains an explicit error instead of retrying indefinitely', async () => {
+  getFails = true;
+  try {
+    await load();
+    assert.equal(element('allowConsent').disabled, true);
+    assert.match(element('consentStatus').textContent, /could not read/);
+    assert.doesNotMatch(element('consentStatus').textContent, /^Local screening is enabled/);
+  } finally { getFails = false; }
 });

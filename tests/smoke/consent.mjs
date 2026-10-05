@@ -50,7 +50,8 @@ try {
  assert.equal((await capture()).code,'data-consent-required'); assert.equal(native().length,0);
  console.log('PASS actual runtime rejects capture before consent');
  await consent.click('#allowConsent');
- await until(consent, ()=>document.getElementById('consentStatus').textContent.includes('enabled'));
+ await until(consent, ()=>document.getElementById('consentStatus').textContent.startsWith('Local screening is enabled'));
+ assert.equal(await consent.$eval('#technicalConsent',e=>e.checked),false);
  assert.equal((await capture()).receipt.decision,'allow');
  assert.equal(native().filter(x=>x.type==='capture').length,1);
  assert.equal(posts.length,0);
@@ -75,7 +76,7 @@ try {
  const pageSend=()=>page.evaluate(()=>fetch('/backend-api/conversation',{method:'POST',body:'synthetic consent fixture'}).then(()=>({sent:true})).catch(e=>({sent:false,error:e.message})));
  assert.match((await pageSend()).error,/Data sharing/); assert.equal(requestPosts,0);
  console.log('PASS actual page hook blocks before native transfer and before network');
- await consent.click('#allowConsent'); await until(consent, ()=>document.getElementById('consentStatus').textContent.includes('enabled'));
+ await consent.click('#allowConsent'); await until(consent, ()=>document.getElementById('consentStatus').textContent.startsWith('Local screening is enabled'));
  await new Promise(r=>setTimeout(r,100));
  assert.equal((await pageSend()).sent,true); assert.equal(requestPosts,1);
  console.log('PASS actual page -> isolated relay -> native fixture -> allowed fetch');

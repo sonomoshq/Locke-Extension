@@ -1,6 +1,6 @@
 // Copyright © 2026 Sonomos, Inc. All rights reserved.
 import { ext } from '../shared/browser.js';
-import { onDataConsentChanged, readDataConsent, saveDataConsent, TECHNICAL_DATA } from '../shared/data-consent.js';
+import { consentIsCurrent, onDataConsentChanged, readDataConsent, saveDataConsent, TECHNICAL_DATA } from '../shared/data-consent.js';
 
 const allow = document.getElementById('allowConsent');
 const pause = document.getElementById('pauseConsent');
@@ -10,11 +10,27 @@ const status = document.getElementById('consentStatus');
 const controls = [allow, pause, decline, technical];
 let busy = false;
 let current = null;
-function lock(value) { busy = value; for (const control of controls) control.disabled = value; if (current?.unavailable) allow.disabled = true; }
+let refreshSequence = 0;
+function lock(value) {
+  if (value) refreshSequence++;
+  busy = value;
+  for (const control of controls) control.disabled = value;
+  if (current?.unavailable) allow.disabled = true;
+}
 
 const PAUSED = 'Data sharing is paused. Requests Locke normally screens are held back. To browse without Locke, uninstall or disable it in your browser’s extension settings, then reload affected tabs.';
 async function refresh() {
-  const consent = await readDataConsent();
+  const sequence = ++refreshSequence;
+  let consent;
+  do {
+    consent = await readDataConsent();
+    // An older read must never repaint a newer operation or refresh.
+    if (sequence !== refreshSequence) return;
+    // A storage write can resolve before its change event is delivered. The
+    // transfer boundary correctly fails closed when that event invalidates a
+    // read; the UI must instead re-read before claiming the save failed or
+    // showing unchecked controls for a choice that was actually committed.
+  } while (!consentIsCurrent(consent));
   current = consent;
   technical.checked = consent.technical;
   allow.textContent = consent.granted ? 'Save choices' : 'Allow local screening';
