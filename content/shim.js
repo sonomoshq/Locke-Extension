@@ -702,6 +702,41 @@
     return false;
   }
 
+  // Pre-consent scope needs only a small, fixed set of upload header NAMES.
+  // Never read values (even Authorization getters), and retain canonical
+  // markers rather than page-chosen header names. Unreadable input stays in
+  // scope conservatively instead of becoming an unscreened upload.
+  function markUploadHeader(out, name) {
+    const lower = String(name).toLowerCase();
+    const marker = OBJECT_WRITE_HEADERS.find(prefix => lower.startsWith(prefix));
+    if (marker) out[marker] = '';
+  }
+  function readUploadHeaderMarkers(init, request) {
+    const out = {};
+    try {
+      const headers = init?.headers || request?.headers;
+      if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+        for (const name of headers.keys()) markUploadHeader(out, name);
+      } else if (Array.isArray(headers)) {
+        for (const pair of headers) {
+          if (!Array.isArray(pair)) throw new Error('unknown header pair');
+          markUploadHeader(out, pair[0]);
+        }
+      } else if (headers != null && typeof headers[Symbol.iterator] === 'function') {
+        // Map's intrinsic keys() does not consume its entries iterator and
+        // brand-checks even a cross-realm Map. Other iterables may be one-shot:
+        // do not consume them and silently strip the original call's headers.
+        // The catch keeps unknown iterables conservatively in upload scope.
+        for (const name of Map.prototype.keys.call(headers)) markUploadHeader(out, name);
+      } else {
+        for (const name of Object.keys(headers || {})) markUploadHeader(out, name);
+      }
+    } catch {
+      out[OBJECT_WRITE_HEADERS[0]] = '';
+    }
+    return out;
+  }
+
   function declaresBodyIntegrity(headers) {
     try {
       const h = headers || {};
@@ -792,6 +827,11 @@
 
   let enforceTimeoutMs = DEFAULT_ENFORCE_TIMEOUT_MS;
   let debugSetting = false;
+  // Browser scoping here prevents pre-consent body snapshots. This MAIN-world
+  // flag is only an early privacy guard, never authorization: the isolated
+  // relay and native boundary independently verify extension-owned storage.
+  let dataSharingAllowed = !/(?:Firefox|Edg)\//.test(globalThis.navigator?.userAgent || '');
+  let dataConsentGeneration = 0;
 
   // `SONOMOS_DEBUG = true` in this page's devtools console turns the debug
   // lines on for the current page without touching settings — the fastest path
@@ -980,6 +1020,14 @@
 
   function applyConfig(config) {
     if (!config || typeof config !== 'object') return;
+    if (typeof config.dataSharingAllowed === 'boolean') {
+      dataSharingAllowed = config.dataSharingAllowed;
+      if (!dataSharingAllowed) {
+        dataConsentGeneration++;
+        // A late native allow must not release a request held across revoke.
+        for (const resolve of pending.values()) resolve({ ok: false, code: 'data-consent-required' });
+      }
+    }
     const t = config.enforceTimeoutMs;
     if (typeof t === 'number' && Number.isFinite(t)) {
       enforceTimeoutMs = Math.min(Math.max(Math.round(t), MIN_ENFORCE_TIMEOUT_MS), MAX_ENFORCE_TIMEOUT_MS);
@@ -1033,7 +1081,8 @@
   // unexplainable. Shape:
   //   { outcome: 'verdict' | 'timeout' | 'channel-failed',
   //     verdict, elapsedMs, timeoutMs }
-  function enforce(requestB64, provider) {
+  function enforce(requestB64, provider, consentGeneration) {
+    if (!dataSharingAllowed || consentGeneration !== dataConsentGeneration) return Promise.resolve({ outcome: 'verdict', verdict: { ok: false, code: 'data-consent-required' }, elapsedMs: 0, timeoutMs: enforceTimeoutMs });
     return new Promise((resolve) => {
       const callId = nextCallId++;
       const startedAt = Date.now();
@@ -1186,6 +1235,7 @@
   // reasoning in `decide` for which codes belong where and why the fallback
   // was the bug. Every entry blocks — this table only ever chooses WORDS.
   const RELAY_BLOCK_REASON = {
+    'data-consent-required': 'data-consent-required',
     'screening-timeout': 'screening-timeout',
     'bridge-unreachable': 'bridge-unreachable',
     'receipt-too-large': 'receipt-too-large',
@@ -1511,6 +1561,8 @@
   // `reason`, which the vocabulary defines as short, non-sensitive and safe to
   // surface. Never a body, never a header, never a URL.
   const BLOCK_KIND = {
+    'data-consent-required': ['unavailable',
+      'Locke needs your permission before sending request data to the local desktop app. Open the Locke toolbar popup and choose Data sharing. To continue without Locke, uninstall or disable it, then reload this page.'],
     'decision-block': ['policy',
       'screening stopped this request.'],
 
@@ -2329,6 +2381,18 @@
   const origFetch = window.fetch;
   if (typeof origFetch === 'function') {
     window.fetch = async function (input, init) {
+      if (!dataSharingAllowed) {
+        // Route using metadata only. Do not freeze/clone/serialize the body,
+        // and do not inspect out-of-scope content while consent is absent.
+        const url = resolveUrl(input);
+        const method = init?.method || input?.method || 'GET';
+        if (hasFetchBody(input, init) && (!url || isScreenedUrl(url) ||
+            isUploadScope(url, method, () => readUploadHeaderMarkers(init, input), () => true))) {
+          throw new TypeError(blockMessage('data-consent-required'));
+        }
+        return origFetch.apply(this, arguments);
+      }
+      const consentGeneration = dataConsentGeneration;
       const frozen = freezeFetchCall(input, init);
       let action = 'send';   // out-of-scope / no-body → release the frozen call
       let rebuilt = null;    // redact: { body: Uint8Array, contentType }
@@ -2371,7 +2435,11 @@
           // allowlist arrives in the same config and is just as subtractive.
           if (!isScreenedHost(url.hostname)) scope = null;
         }
-        if (scope) {
+        if (scope && (!dataSharingAllowed || consentGeneration !== dataConsentGeneration) && hasFetchBody(frozen.input, frozen.init)) {
+          committed = true;
+          action = 'block';
+          blockReason = 'data-consent-required';
+        } else if (scope) {
           if (scope === SCOPE.UPLOAD) markUpload(shape);
           shape.method = String(method).toUpperCase();
           const headers = headersOf();
@@ -2399,7 +2467,9 @@
           } else {
             cap = NO_BODY;
           }
-          if (!cap.hadBody) {
+          if (!dataSharingAllowed || consentGeneration !== dataConsentGeneration) {
+            committed = true; action = 'block'; blockReason = 'data-consent-required';
+          } else if (!cap.hadBody) {
             say('debug', 'no-body', { action: 'send' });
           } else {
             // In scope: this request carries a body, so it must be screened
@@ -2424,8 +2494,9 @@
               };
               const raw = synthesizeRequest(method, url, headers, cap.effectiveCt, cap.bytes,
                 scope === SCOPE.UPLOAD);
-              const res = await enforce(b64FromBytes(raw), providerFor(url));
-              const d = decide(res);
+              const res = await enforce(b64FromBytes(raw), providerFor(url), consentGeneration);
+              const d = decide(!dataSharingAllowed || consentGeneration !== dataConsentGeneration
+                ? { outcome: 'verdict', verdict: { ok: false, code: 'data-consent-required' } } : res);
               action = d.action;
               let reason = d.reason;
               let extra = d.fields;
@@ -2521,7 +2592,13 @@
         //
         // arguments[2] is the async flag; only `false` means a synchronous XHR,
         // which we can't defer (see send) and therefore fail closed.
-        this.__sonomos = { method, url: resolveUrl(url), headers: {}, async: arguments[2] !== false };
+        const routed = resolveUrl(url);
+        if (!dataSharingAllowed && routed) {
+          // Classification needs protocol/host/path, never query credentials
+          // or URL userinfo for a request we cannot screen without consent.
+          routed.search = ''; routed.hash = ''; routed.username = ''; routed.password = '';
+        }
+        this.__sonomos = { method, url: routed, headers: {}, consentMissing: !dataSharingAllowed, consentGeneration: dataConsentGeneration, async: arguments[2] !== false };
       } catch { /* ignore */ }
       return origOpen.apply(this, arguments);
     };
@@ -2537,7 +2614,10 @@
       // request that has already been screened.
       if (s && s.held === true) throw invalidState('setRequestHeader');
       try {
-        if (s) s.headers[String(name).toLowerCase()] = String(value);
+        if (s) {
+          if (dataSharingAllowed && !s.consentMissing && s.consentGeneration === dataConsentGeneration) s.headers[String(name).toLowerCase()] = String(value);
+          else markUploadHeader(s.headers, name);
+        }
       } catch { /* ignore */ }
       return origSetHeader.apply(this, arguments);
     };
@@ -2667,6 +2747,11 @@
         return origSend.apply(this, arguments);
       }
 
+      if (!dataSharingAllowed || s.consentMissing || s.consentGeneration !== dataConsentGeneration) {
+        blockXhr(this, 'data-consent-required');
+        return;
+      }
+
       // In scope with a body: hold it. A sync XHR can't be deferred → fail
       // closed before we spend anything on capture.
       const xhr = this;
@@ -2717,6 +2802,10 @@
           say('debug', 'superseded-while-held', { action: 'drop' });
           return true;
         }
+        if (!dataSharingAllowed || s.consentGeneration !== dataConsentGeneration) {
+          blockXhr(xhr, 'data-consent-required');
+          return true;
+        }
         if (s.aborted === true) {
           say('debug', 'aborted-while-held', { action: 'drop' });
           return true;
@@ -2758,7 +2847,7 @@
         if (!shape.ct) shape.ct = mediaType(cap.effectiveCt);
         const raw = synthesizeRequest(s.method, s.url, s.headers, cap.effectiveCt, cap.bytes,
           scope === SCOPE.UPLOAD);
-        const res = await enforce(b64FromBytes(raw), providerFor(s.url));
+        const res = await enforce(b64FromBytes(raw), providerFor(s.url), s.consentGeneration);
         if (abandoned()) return;
         const d = decide(res);
         const veto = (d.action === 'redact' && scope === SCOPE.UPLOAD)
@@ -2919,7 +3008,8 @@
           shape.method = String(method).toUpperCase();
           const hasBody = () => hasFetchBody(input, init);
           let headerCache = null;
-          const headersOf = () => (headerCache ??= readHeaders(init, reqObj));
+          const headersOf = () => (headerCache ??= dataSharingAllowed
+            ? readHeaders(init, reqObj) : readUploadHeaderMarkers(init, reqObj));
           if (hasBody()) {
             // isScreenedHost, not isAiHost — same rule as the beacon hook
             // above, one API later: the user's own disable set decides scope,

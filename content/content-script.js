@@ -79,6 +79,12 @@
   // from failing closed on every in-scope request.
   const isGecko = typeof globalThis.browser !== 'undefined' && !!globalThis.browser?.runtime;
   const api = isGecko ? globalThis.browser : globalThis.chrome;
+  // Keep these version/key literals pinned to shared/data-consent.js by test.
+  const DATA_CONSENT_KEY = 'dataSharingConsent';
+  const DATA_CONSENT_VERSION = 1;
+  const requiresConsent = isGecko || /Edg\//.test(globalThis.navigator?.userAgent || '');
+  let dataSharingAllowed = !requiresConsent;
+  let configGeneration = 0;
 
   // ── "this tab's channel is dead" vs "the worker is asleep" ─────────────
   //
@@ -181,6 +187,11 @@
       } catch { /* page gone — nothing to answer */ }
     };
 
+    if (!dataSharingAllowed) {
+      reply({ ok: false, code: 'data-consent-required' });
+      return;
+    }
+
     // Relay to the service worker and answer the shim with its verdict. Any
     // failure (context invalidated, no receiving end during an SW restart)
     // blocks the request: a null verdict, or — for the one cause whose remedy
@@ -246,10 +257,14 @@
   // `chrome.storage.local.get(…)` there yields undefined and every profile
   // would silently fall back to SHIM_DEFAULTS — including an admin policy.
   async function readShimConfig() {
-    const config = { ...SHIM_DEFAULTS };
+    const config = { ...SHIM_DEFAULTS, ...(requiresConsent ? { dataSharingAllowed: false } : {}) };
     try {
-      const local = await api.storage.local.get([SETTINGS_KEY, DISABLED_WEB_HOSTS_KEY]);
+      const local = await api.storage.local.get([SETTINGS_KEY, DISABLED_WEB_HOSTS_KEY, DATA_CONSENT_KEY]);
       Object.assign(config, pick(local?.[SETTINGS_KEY]));
+      if (requiresConsent) {
+        const consent = local?.[DATA_CONSENT_KEY];
+        config.dataSharingAllowed = consent?.version === DATA_CONSENT_VERSION && consent.granted === true;
+      }
       // `{ hosts, ignoredCount }` — the worker stores the count alongside so
       // it can be acked; only the hosts concern the shim. Omitted rather than
       // sent empty when we have nothing stored, so the shim keeps whatever it
@@ -267,24 +282,35 @@
     return config;
   }
 
+  function postConfig(config) {
+    try {
+      // This targets the same DOCUMENT, including opaque-origin frames.
+      // Narrowing targetOrigin exposes no less to that page and would drop
+      // the safety-critical revocation update on about:blank/srcdoc frames.
+      // Only shipped settings and the consent boolean cross this boundary.
+      // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
+      window.postMessage({ type: CONFIG, config }, SAME_WINDOW);
+    } catch { /* page gone */ }
+  }
+
   function pushConfig() {
+    const generation = ++configGeneration;
     readShimConfig().then((config) => {
-      try {
-        // the receiving DOCUMENT's origin, not by listener, so every script in this
-        // document could read this post whatever we passed; and location.origin throws
-        // or is silently dropped in the opaque-origin frames the manifest opts into.
-        // Deliberate: targetOrigin filters by the receiving DOCUMENT origin, not
-        // by listener, so narrowing it hides nothing; and location.origin throws
-        // or is dropped in the opaque-origin frames the manifest opts into. Full
-        // reasoning at the SAME_WINDOW declaration above.
-        // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
-        window.postMessage({ type: CONFIG, config }, SAME_WINDOW);
-      } catch { /* page gone */ }
+      if (generation !== configGeneration) return;
+      if (requiresConsent) dataSharingAllowed = config.dataSharingAllowed === true;
+      postConfig(config);
     }).catch(() => { /* the shim's own defaults hold */ });
   }
 
   try {
-    api.storage.onChanged.addListener(pushConfig);
+    api.storage.onChanged.addListener((changes, area) => {
+      if (requiresConsent && area === 'local' && changes[DATA_CONSENT_KEY]) {
+        // Revoke synchronously before asynchronous settings/policy reads.
+        dataSharingAllowed = false;
+        postConfig({ dataSharingAllowed: false });
+      }
+      pushConfig();
+    });
   } catch { /* no storage events — the initial push still lands */ }
   pushConfig();
 })();

@@ -366,6 +366,12 @@ export function noteFor(state) {
 
 // Everything the popup renders, from one state object.
 export function copyFor(state) {
+  if (state?.error === 'data-consent-required') return {
+    view: 'setup', badge: 'Consent needed', screening: SCREENING.UNAVAILABLE,
+    screeningLabel: 'Paused',
+    detail: 'Locke needs your permission to send request data to the local desktop app. Open Data sharing below to choose. Requests Locke normally screens are held back; to browse without Locke, uninstall or disable it and reload affected tabs.',
+    note: null
+  };
   const view = viewFor(state);
   const screening = SCREENING_LABEL[state?.screening] ? state.screening : SCREENING.UNCONFIRMED;
   return {

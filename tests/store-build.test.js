@@ -65,12 +65,13 @@ test('store: the firefox manifest carries no Chromium-only keys', () => {
   });
 });
 
-test('store: AMO data-collection consent is declared as "none"', () => {
-  // Mandatory for new AMO listings since 2025-11-03. The extension sends
-  // nothing off-device, so the declaration is the explicit `none`.
+test('store: AMO declarations cover local native messaging and separate optional technical data', () => {
+  // Native messaging is transmission under Mozilla policy even on-device.
   const gecko = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'))
     .browser_specific_settings.gecko;
-  assert.deepEqual(gecko.data_collection_permissions, { required: ['none'] });
+  assert.ok(gecko.data_collection_permissions.required.includes('websiteContent'));
+  assert.ok(!gecko.data_collection_permissions.required.includes('none'));
+  assert.deepEqual(gecko.data_collection_permissions.optional, ['technicalAndInteraction']);
 });
 
 test('store: one target transform cannot leak into the other', () => {
@@ -359,6 +360,8 @@ test('store: shipping no privacy-policy link at all fails', () => {
     const staged = stage('chromium', dist);
     const popup = join(staged, 'popup/popup.html');
     writeFileSync(popup, readFileSync(popup, 'utf8').replaceAll(PRIVACY_URL, 'https://example.invalid/'));
+    const consent = join(staged, 'popup/consent.html');
+    writeFileSync(consent, readFileSync(consent, 'utf8').replaceAll(PRIVACY_URL, 'https://example.invalid/'));
     const errors = validate('chromium', staged);
     assert.ok(errors.some((e) => e.includes('no shipped page links the privacy policy')), errors.join('\n'));
   });

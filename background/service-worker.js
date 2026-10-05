@@ -1,6 +1,7 @@
 // Copyright © 2026 Sonomos, Inc. All rights reserved.
 import { ext } from '../shared/browser.js';
 import { nativeRequest } from '../shared/native-client.js';
+import { consentIsCurrent, DATA_CONSENT_REQUIRED, isFirefox, requiresDataConsent, onDataConsentChanged, readDataConsent, showDataConsentIfNeeded } from '../shared/data-consent.js';
 import { detectBrowser } from '../shared/browser-info.js';
 import { checkHealth, classifyLastError } from '../shared/health-client.js';
 import { WEB_HOSTS } from '../shared/web-surfaces.generated.js';
@@ -509,8 +510,19 @@ function runCheck(reason = 'alarm') {
   return healthCheck;
 }
 
+async function consentRequiredState() {
+  const state = { ...initialState(), error: DATA_CONSENT_REQUIRED, screening: SCREENING.UNAVAILABLE };
+  await setState(state);
+  await ext.action.setBadgeText({ text: '!' });
+  await ext.action.setBadgeBackgroundColor({ color: '#f59e0b' });
+  broadcast(state);
+  return state;
+}
+
 async function performCheck(_reason) {
   try {
+    const consent = await readDataConsent();
+    if (!consent.granted || !consentIsCurrent(consent)) return consentRequiredState();
     const settings = await getSettings();
     const prev = await getState();
     // Sent with the probe so the native host can write the extension's half
@@ -519,6 +531,8 @@ async function performCheck(_reason) {
     // not stored yet — so the ack trails the file by one heartbeat. That lag
     // is the honest content: it is the gap between written and enforced.
     const result = await checkHealth({ settings, applied: await reportedApplied() });
+
+    if (result.error === DATA_CONSENT_REQUIRED || !consentIsCurrent(consent)) return consentRequiredState();
 
     const statusChanged = result.status !== prev.status;
     const isFailure = result.status === STATUS.DISCONNECTED || result.status === STATUS.NO_BRIDGE;
@@ -587,14 +601,20 @@ async function performCheck(_reason) {
       blockedSends: screening.blockedSends ?? 0
     };
 
+    if (!consentIsCurrent(consent)) return consentRequiredState();
     await setState(next);
+    if (!consentIsCurrent(consent)) return consentRequiredState();
     await applyBadge(
       next.status, next.screening, next.lastCaptureFailure?.code ?? null, screening
     );
+    if (!consentIsCurrent(consent)) return consentRequiredState();
     await scheduleNextAlarm(next);
+    if (!consentIsCurrent(consent)) return consentRequiredState();
     broadcast(next);
     return next;
   } catch {
+    const consent = await readDataConsent();
+    if (!consent.granted || !consentIsCurrent(consent)) return consentRequiredState();
     const prev = await getState();
     const next = {
       ...prev,
@@ -609,6 +629,7 @@ async function performCheck(_reason) {
     };
     await setState(next);
     await applyBadge(next.status, next.screening);
+    if (!consentIsCurrent(consent)) return consentRequiredState();
     broadcast(next);
     return next;
   }
@@ -654,6 +675,14 @@ async function scheduleNextAlarm(state) {
 // conflation this codebase keeps having to unwind — and it would spend a
 // held request's latency on bookkeeping.
 function sendPresenceBeacon() {
+  if (requiresDataConsent()) {
+    return readDataConsent().then(consent => {
+      if (consent.granted && consent.technical && consentIsCurrent(consent)) postPresenceBeacon();
+    });
+  }
+  postPresenceBeacon();
+}
+function postPresenceBeacon() {
   try {
     fetch(PRESENCE_URL, {
       method: 'POST',
@@ -696,7 +725,10 @@ function sendPresenceBeacon() {
 async function requestHostRegistration() {
   try {
     const id = ext.runtime.id;
-    if (!/^[a-p]{32}$/.test(id)) return;
+    if (isFirefox() || !/^[a-p]{32}$/.test(id)) return;
+
+    const consent = await readDataConsent();
+    if (!consent.granted || !consent.technical || !consentIsCurrent(consent)) return;
 
     const now = Date.now();
     const stored = await ext.storage.session.get(REGISTRATION_ATTEMPT_KEY);
@@ -704,6 +736,7 @@ async function requestHostRegistration() {
     if (now - last < REGISTRATION_MIN_INTERVAL_MS) return;
     await ext.storage.session.set({ [REGISTRATION_ATTEMPT_KEY]: now });
 
+    if (!consentIsCurrent(consent)) return;
     const response = await fetch(REGISTRATION_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -879,6 +912,7 @@ async function captureViaHost(requestB64, provider) {
     noteScreening(evidenceFromRelayFailure('bridge-unknown-response'), null);
     return { ok: false, code: 'bridge-unknown-response' };
   } catch (e) {
+    if (e?.message === DATA_CONSENT_REQUIRED) return { ok: false, code: DATA_CONSENT_REQUIRED };
     const ms = Date.now() - startedAt;
     if (e?.message === 'native-timeout') {
       relayWarn('native-timeout', { ms, b64Bytes });
@@ -917,6 +951,16 @@ try {
 } catch { /* storage events unavailable — the startup read still applies */ }
 refreshDebugFlag();
 
+// Invalidate positive evidence on revoke, including while the popup is open.
+onDataConsentChanged(() => {
+  if (requiresDataConsent()) void readDataConsent().then(consent => {
+    if (!consent.granted) {
+      __cancelBlockBadgeClear();
+      void consentRequiredState();
+    }
+  });
+});
+
 // Re-arm the presence tick on every worker evaluation. Cheap (one
 // `alarms.get`), silent, and the only thing standing between a presence alarm
 // lost to an extension update and a desktop app that says "not installed"
@@ -933,6 +977,7 @@ async function ensureHealthAlarm() {
 ensureHealthAlarm();
 
 ext.runtime.onInstalled.addListener(async () => {
+  await showDataConsentIfNeeded().catch(() => {});
   await setState(initialState());
   await applyBadge(STATUS.UNKNOWN);
   await ext.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });

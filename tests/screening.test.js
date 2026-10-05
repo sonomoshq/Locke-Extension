@@ -1206,3 +1206,12 @@ test('the popup and the page name one remedy for a reload-orphaned tab, not two'
     assert.match(surface, /reload(ed)? (this|that) page/i, surface);
   }
 });
+
+test('consent refusal outranks old positive screening and names an exit path', () => {
+  const copy = copyFor({ status: 'connected', screening: 'available', error: 'data-consent-required' });
+  assert.equal(copy.badge, 'Consent needed');
+  assert.equal(copy.screeningLabel, 'Paused');
+  assert.match(copy.detail, /Data sharing/);
+  assert.match(copy.detail, /uninstall.*reload/i);
+  assert.equal(copy.note, null);
+});

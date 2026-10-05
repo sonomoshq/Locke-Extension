@@ -178,32 +178,28 @@ of a privacy declaration.
       requires accurate category declarations and a policy for personal data
       accessed, transmitted or collected.
 
-**Firefox / AMO — unresolved before a future release**
+**Firefox / AMO and Edge — consent implementation for the next release**
 
-- [ ] **[HUMAN + ENGINEERING]** Resolve the source manifest's
-      `data_collection_permissions: { "required": ["none"] }` and missing
-      data-consent UI. Mozilla's [Add-on Policies](https://extensionworkshop.com/documentation/publish/add-on-policies/#data-collection-and-transmission-disclosure-and-control)
-      include native-app transfers in data transmission and apply consent and
-      control requirements to them. Staying on-device does not justify `none`.
-- [ ] **[HUMAN + ENGINEERING]** Approve a disclosure/consent design and map
-      actual payloads to Mozilla's [taxonomy and built-in consent guidance](https://extensionworkshop.com/documentation/develop/firefox-builtin-data-consent/).
-      Evaluate content, communications, browsing and any sensitive information
-      actually transferred, as well as technical connection data. Current
-      `strict_min_version: "128.0"` includes browsers predating built-in
-      consent (desktop Firefox 140). The approved solution must address those
-      versions, fresh installs, upgrades, refusal and revocation before
-      transmission. Do not assume silent background screening qualifies for
-      implicit consent.
-- [ ] **[HUMAN]** Align any existing AMO-hosted privacy-policy copy and listing
-      link manually with <https://sonomos.ai/locke/privacy>. Editing this repo
-      does not update AMO text. Mozilla's [policy FAQ](https://extensionworkshop.com/documentation/publish/add-on-policies-faq/)
-      says AMO hosting is no longer required and recommends a policy link;
-      an existing hosted copy must not contradict that link.
+- [x] **[ENGINEERING]** Replace Firefox's `required: ["none"]` with truthful
+      request-data categories and optional `technicalAndInteraction`.
+- [x] **[ENGINEERING]** Add a focused, versioned consent flow on Firefox and
+      Edge, with an older-Firefox fallback, independent optional metadata,
+      explicit refusal/uninstall and revocation controls. Prevent request
+      content collection/transfer before consent and cancel in-flight work
+      after revocation. Chrome behavior remains unchanged.
+- [ ] **[RELEASE REVIEW]** Complete the actual-browser and signed-package
+      installation/upgrade checklist in
+      [DATA-CONSENT.md](../testing/DATA-CONSENT.md). Automated tests are not a
+      substitute for store permission prompts or the native desktop pairing.
+- [ ] **[STORE OWNER]** Align AMO-hosted privacy copy and all store descriptions,
+      links and data disclosures with <https://sonomos.ai/locke/privacy> and the
+      version being distributed. Repository edits do not update store text.
 
-**Release hold:** this documentation change leaves the manifest, consent UI
-and permissions unchanged. Do not submit a new Firefox release until an
-approved disclosure/consent solution is implemented and verified. Existing
-manifest tests accepting `none` are not evidence of policy compliance.
+**Release hold:** consent code is prepared for review; this does not publish it.
+Do not submit Firefox/Edge binaries until release verification and disclosure
+alignment are complete. The currently published binary may still have the old
+behavior. See [DATA-CONSENT.md](../testing/DATA-CONSENT.md) for the category map,
+policy sources, implemented controls and remaining browser verification.
 
 ## Required assets checklist
 
