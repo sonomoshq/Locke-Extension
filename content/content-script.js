@@ -79,6 +79,12 @@
   // from failing closed on every in-scope request.
   const isGecko = typeof globalThis.browser !== 'undefined' && !!globalThis.browser?.runtime;
   const api = isGecko ? globalThis.browser : globalThis.chrome;
+  // Keep these version/key literals pinned to shared/data-consent.js by test.
+  const DATA_CONSENT_KEY = 'dataSharingConsent';
+  const DATA_CONSENT_VERSION = 1;
+  const requiresConsent = isGecko || /Edg\//.test(globalThis.navigator?.userAgent || '');
+  let dataSharingAllowed = !requiresConsent;
+  let configGeneration = 0;
 
   // ── "this tab's channel is dead" vs "the worker is asleep" ─────────────
   //
@@ -181,6 +187,11 @@
       } catch { /* page gone — nothing to answer */ }
     };
 
+    if (!dataSharingAllowed) {
+      reply({ ok: false, code: 'data-consent-required' });
+      return;
+    }
+
     // Relay to the service worker and answer the shim with its verdict. Any
     // failure (context invalidated, no receiving end during an SW restart)
     // blocks the request: a null verdict, or — for the one cause whose remedy
@@ -246,10 +257,14 @@
   // `chrome.storage.local.get(…)` there yields undefined and every profile
   // would silently fall back to SHIM_DEFAULTS — including an admin policy.
   async function readShimConfig() {
-    const config = { ...SHIM_DEFAULTS };
+    const config = { ...SHIM_DEFAULTS, ...(requiresConsent ? { dataSharingAllowed: false } : {}) };
     try {
-      const local = await api.storage.local.get([SETTINGS_KEY, DISABLED_WEB_HOSTS_KEY]);
+      const local = await api.storage.local.get([SETTINGS_KEY, DISABLED_WEB_HOSTS_KEY, DATA_CONSENT_KEY]);
       Object.assign(config, pick(local?.[SETTINGS_KEY]));
+      if (requiresConsent) {
+        const consent = local?.[DATA_CONSENT_KEY];
+        config.dataSharingAllowed = consent?.version === DATA_CONSENT_VERSION && consent.granted === true;
+      }
       // `{ hosts, ignoredCount }` — the worker stores the count alongside so
       // it can be acked; only the hosts concern the shim. Omitted rather than
       // sent empty when we have nothing stored, so the shim keeps whatever it
@@ -268,7 +283,10 @@
   }
 
   function pushConfig() {
+    const generation = ++configGeneration;
     readShimConfig().then((config) => {
+      if (generation !== configGeneration) return;
+      if (requiresConsent) dataSharingAllowed = config.dataSharingAllowed === true;
       try {
         // the receiving DOCUMENT's origin, not by listener, so every script in this
         // document could read this post whatever we passed; and location.origin throws
@@ -284,7 +302,14 @@
   }
 
   try {
-    api.storage.onChanged.addListener(pushConfig);
+    api.storage.onChanged.addListener((changes, area) => {
+      if (requiresConsent && area === 'local' && changes[DATA_CONSENT_KEY]) {
+        // Revoke synchronously before asynchronous settings/policy reads.
+        dataSharingAllowed = false;
+        try { window.postMessage({ type: CONFIG, config: { dataSharingAllowed: false } }, SAME_WINDOW); } catch { /* page gone */ }
+      }
+      pushConfig();
+    });
   } catch { /* no storage events — the initial push still lands */ }
   pushConfig();
 })();

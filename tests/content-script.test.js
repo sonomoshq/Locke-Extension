@@ -53,6 +53,7 @@ const plain = (v) => JSON.parse(JSON.stringify(v));
 // `relay(message)` stands in for the service worker: return a promise, return
 // something that is not thenable, or throw synchronously.
 function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
+                    consentRecord = { version: 1, granted: true, technical: false },
                     location = { origin: 'https://chat.openai.com', href: 'https://chat.openai.com/' },
                     documentOrigin = null } = {}) {
   const posted = [];       // everything the content script posted to the page
@@ -64,12 +65,14 @@ function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
   const record = (level) => (...args) => { logs.push({ level, line: args.join(' ') }); };
 
   // The storage half, reached through whichever namespace the script picks.
+  const stored = { ...local, dataSharingConsent: consentRecord };
+  let storageChanged;
   const storage = {
-    local: { get: async () => local },
+    local: { get: async () => stored },
     // storage.managed throws when no policy is configured — the common case on
     // a personal install, and it must never change behaviour.
     managed: { get: async () => { if (managed === null) throw new Error('no managed schema'); return managed; } },
-    onChanged: { addListener: () => {} }
+    onChanged: { addListener: fn => { storageChanged = fn; } }
   };
 
   // Chromium: callback-only messaging, failures surface through lastError, and
@@ -169,7 +172,11 @@ function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
   const verdicts = () => posted.filter((p) => p.data?.type === 'SONOMOS_VERDICT');
   const configs = () => posted.filter((p) => p.data?.type === 'SONOMOS_CONFIG');
   const warning = (reason) => logs.find((l) => l.line.includes(`reason=${reason}`));
-  return { sandbox, posted, relayed, logs, fromPage, verdicts, configs, warning, innerWindow };
+  const changeConsent = (record) => {
+    stored.dataSharingConsent = record;
+    storageChanged({ dataSharingConsent: { newValue: record } }, 'local');
+  };
+  return { sandbox, posted, relayed, logs, fromPage, verdicts, configs, warning, innerWindow, changeConsent };
 }
 
 for (const dialect of ['chromium', 'firefox']) {
@@ -177,6 +184,8 @@ for (const dialect of ['chromium', 'firefox']) {
 
   test(`content-script (${dialect}): a valid capture is relayed once and its verdict returned under the same callId`, async () => {
     const world = makeWorld({ dialect });
+
+    await settle();
 
     world.fromPage(capture(7));
     await settle();
@@ -197,6 +206,8 @@ for (const dialect of ['chromium', 'firefox']) {
     // connection" while the worker restarts. Both must block the send.
     const world = makeWorld({ dialect, relay: async () => { throw new Error('Could not establish connection'); } });
 
+    await settle();
+
     world.fromPage(capture(3));
     await settle();
 
@@ -215,6 +226,8 @@ for (const dialect of ['chromium', 'firefox']) {
     // through to the shim's "no verdict object" path with an undefined.
     const world = makeWorld({ dialect, relay: async () => undefined });
 
+    await settle();
+
     world.fromPage(capture());
     await settle();
 
@@ -223,6 +236,8 @@ for (const dialect of ['chromium', 'firefox']) {
 
   test(`content-script (${dialect}): no diagnostic ever carries the payload`, async () => {
     const world = makeWorld({ dialect, relay: async () => { throw new Error('boom'); } });
+
+    await settle();
 
     world.fromPage(capture());
     await settle();
@@ -255,8 +270,8 @@ for (const dialect of ['chromium', 'firefox']) {
     assert.ok(pushed.length >= 1, 'the shim is pushed its config at document_start');
     assert.deepEqual(
       Object.keys(pushed[0].data.config).sort(),
-      ['allowedProviders', 'debugLogging', 'enforceTimeoutMs'],
-      'SHIM_SETTING_KEYS and nothing else — lockedSettings and heartbeatSeconds stay this side of the seam'
+      ['allowedProviders', ...(dialect === 'firefox' ? ['dataSharingAllowed'] : []), 'debugLogging', 'enforceTimeoutMs'],
+      'only shim settings and the consent boolean cross; private preferences stay isolated'
     );
     assert.equal(pushed[0].data.config.enforceTimeoutMs, 9000);
     // The policy is one of the three now, and it crosses with the value an
@@ -296,6 +311,7 @@ test('content-script: a message from anything but this window is ignored', async
   // An embedded frame posting into the top document. If this were relayed, a
   // frame we do not cover could push captures through our chain; if the
   // verdict came back, it could observe them.
+  await settle();
   world.fromPage(capture(), { notThisWindow: true });
   await settle();
 
@@ -312,6 +328,7 @@ test('content-script: a malformed capture is ignored, not answered', async () =>
     { type: 'SONOMOS_CAPTURE', callId: 1 },                      // no payload
     { type: 'SONOMOS_CAPTURE', callId: 1, requestB64: 42 }
   ]) {
+    await settle();
     world.fromPage(bad);
   }
   await settle();
@@ -338,6 +355,8 @@ test('content-script: the verdict and the config reach an opaque-origin frame', 
     documentOrigin: 'null'
   });
 
+  await settle();
+
   world.fromPage(capture());
   await settle();
 
@@ -358,6 +377,8 @@ test('content-script (firefox): a relay that hands back no promise answers null'
   // back — the trap the Chrome-compat namespace sets on Firefox.
   const world = makeWorld({ dialect: 'firefox', relay: () => ({ ok: true, receipt: { decision: 'allow' } }) });
 
+  await settle();
+
   world.fromPage(capture());
   await settle();
 
@@ -373,6 +394,8 @@ test('content-script (firefox): a relay that throws synchronously answers null',
   // unattributed null is the answer for a cause we cannot name.
   const world = makeWorld({ dialect: 'firefox', relay: () => { throw new TypeError('sendMessage is not a function'); } });
 
+  await settle();
+
   world.fromPage(capture());
   await settle();
 
@@ -386,6 +409,8 @@ test('content-script (chromium): a sendMessage that throws is a rejected relay, 
   // request from hanging forever. Same note as above on the message: an
   // unrecognised one must still be answered, and answered with a block.
   const world = makeWorld({ dialect: 'chromium', relay: () => { throw new Error('port closed before a response was received'); } });
+
+  await settle();
 
   world.fromPage(capture(9));
   await settle();
@@ -435,6 +460,8 @@ for (const [dialect, message] of [
     // the remedy a user is given depends on their browser.
     const world = makeWorld({ dialect, relay: () => { throw new Error(message); } });
 
+    await settle();
+
     world.fromPage(capture(4));
     await settle();
 
@@ -478,6 +505,8 @@ test('content-script: a relay failure we cannot attribute stays an unattributed 
       dialect,
       relay: async () => { throw new Error('Could not establish connection. Receiving end does not exist.'); }
     });
+
+    await settle();
 
     world.fromPage(capture(5));
     await settle();
@@ -538,6 +567,8 @@ for (const dialect of ['chromium', 'firefox']) {
 test('content-script: the shim\'s provider claim is relayed to the worker', async () => {
   const world = makeWorld({});
 
+  await settle();
+
   world.fromPage({ ...capture(11), provider: 'google' });
   await settle();
 
@@ -554,6 +585,8 @@ test('content-script: the shim\'s provider claim is relayed to the worker', asyn
 test('content-script: a capture with no provider relays no provider key', async () => {
   const world = makeWorld({});
 
+  await settle();
+
   world.fromPage(capture(12));
   await settle();
 
@@ -567,6 +600,7 @@ test('content-script: a malformed provider claim is dropped, not relayed', async
 
   for (const junk of [{ evil: true }, 42, '', null]) {
     world.relayed.length = 0;
+    await settle();
     world.fromPage({ ...capture(13), provider: junk });
     await settle();
     assert.deepEqual(
@@ -582,6 +616,7 @@ for (const dialect of ['chromium', 'firefox']) {
     const world = makeWorld({ dialect });
     const claims = ['synthetic@example.invalid', 'google\nsynthetic-secret', '未知の秘密', 'future-provider', 'Google'];
     for (const [index, provider] of claims.entries()) {
+      await settle();
       world.fromPage({ ...capture(index + 20), provider });
       await settle();
       assert.deepEqual(plain(world.relayed[index]), {
@@ -596,6 +631,7 @@ for (const dialect of ['chromium', 'firefox']) {
   test(`content-script (${dialect}): canonical identities for aliased and split hosts keep their labels`, async () => {
     const world = makeWorld({ dialect });
     for (const [index, provider] of ['openai', 'anthropic', 'duckduckgo', 'kagi', 'search'].entries()) {
+      await settle();
       world.fromPage({ ...capture(index + 40), provider });
       await settle();
       assert.equal(world.relayed[index].provider, provider);
@@ -603,3 +639,32 @@ for (const dialect of ['chromium', 'firefox']) {
     }
   });
 }
+
+test('content consent gate starts closed, rejects forged captures, resumes and revokes without tab reload', async () => {
+  const world = makeWorld({ dialect: 'firefox', consentRecord: null });
+  world.fromPage(capture());
+  await settle();
+  assert.equal(world.relayed.length, 0);
+  assert.equal(world.verdicts().at(-1).data.verdict.code, 'data-consent-required');
+  assert.equal(world.configs().at(-1).data.config.dataSharingAllowed, false);
+  world.changeConsent({ version: 1, granted: true, technical: false });
+  await settle();
+  world.fromPage(capture(2));
+  await settle();
+  assert.equal(world.relayed.length, 1);
+  assert.equal(world.configs().at(-1).data.config.dataSharingAllowed, true);
+  world.changeConsent({ version: 1, granted: false, technical: false });
+  world.fromPage(capture(3)); // before the asynchronous config reread
+  await settle();
+  assert.equal(world.relayed.length, 1);
+  assert.equal(world.verdicts().at(-1).data.verdict.code, 'data-consent-required');
+});
+
+test('content consent version cannot be bypassed by managed settings', async () => {
+  const world = makeWorld({ dialect: 'firefox', consentRecord: { version: 0, granted: true }, managed: { dataSharingAllowed: true, dataSharingConsent: { version: 1, granted: true } } });
+  await settle();
+  world.fromPage(capture());
+  await settle();
+  assert.equal(world.relayed.length, 0);
+  assert.equal(world.configs().at(-1).data.config.dataSharingAllowed, false);
+});

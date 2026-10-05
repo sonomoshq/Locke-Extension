@@ -3878,3 +3878,147 @@ test('generation: held XHR rejects second send and header changes like a native 
   answer(allowVerdict);
   await waitFor(() => xhr.sent.length === 1);
 });
+
+test('consent refusal blocks with consent guidance, not a desktop outage', async () => {
+  const xhr = await blockedByRelayCode('data-consent-required');
+  assert.equal(xhr.sonomosBlockReason, 'data-consent-required');
+  assert.match(xhr.sonomosBlockMessage, /Data sharing/);
+  assert.match(xhr.sonomosBlockMessage, /uninstall.*reload/i);
+});
+
+for (const userAgent of ['Mozilla/5.0 Firefox/140.0', 'Mozilla/5.0 Chrome/130.0 Edg/130.0']) {
+  test(`consent blocks ${userAgent} before body serialization and resumes/revokes in the existing tab`, async () => {
+    let captures = 0, serializations = 0;
+    class PrivateForm extends FormData {
+      forEach(...args) { serializations++; return super.forEach(...args); }
+      *entries() { serializations++; yield* super.entries(); }
+      [Symbol.iterator]() { serializations++; return super[Symbol.iterator](); }
+    }
+    const { sandbox, netCalls, deliver } = makeWorld(() => { captures++; return allowVerdict; }, { navigator: { userAgent } });
+    const body = new PrivateForm(); body.append('health', 'private');
+    await assert.rejects(sandbox.fetch(AI_URL, { method: 'POST', body }), /Data sharing/);
+    assert.equal(captures, 0);
+    assert.equal(serializations, 0);
+    assert.equal(netCalls.length, 0);
+    await sandbox.fetch('https://outside.example/status', { method: 'POST', body });
+    assert.equal(netCalls.length, 1, 'out-of-scope browsing remains usable');
+    assert.equal(serializations, 0, 'out-of-scope content is not inspected either');
+    deliver({ type: 'SONOMOS_CONFIG', config: { dataSharingAllowed: true } });
+    await sandbox.fetch(AI_URL, { method: 'POST', body: 'allowed' });
+    assert.equal(captures, 1);
+    deliver({ type: 'SONOMOS_CONFIG', config: { dataSharingAllowed: false } });
+    await assert.rejects(sandbox.fetch(AI_URL, { method: 'POST', body: 'private again' }), /Data sharing/);
+    assert.equal(captures, 1);
+  });
+}
+
+test('Edge XHR does not copy headers or serialize a body before consent', async () => {
+  let captures = 0;
+  const { sandbox, deliver } = makeXhrWorld(() => { captures++; return allowVerdict; }, { extraGlobals: { navigator: { userAgent: 'Chrome/130.0 Edg/130.0' } } });
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', AI_URL, true);
+  xhr.setRequestHeader('Authorization', 'private');
+  assert.equal(xhr.__sonomos.headers.authorization, undefined);
+  xhr.send('private health information');
+  assert.equal(xhr.sonomosBlockReason, 'data-consent-required');
+  assert.equal(captures, 0);
+  deliver({ type: 'SONOMOS_CONFIG', config: { dataSharingAllowed: true } });
+  xhr.open('POST', AI_URL, true);
+  xhr.send('allowed');
+  await waitFor(() => xhr.sent.length === 1);
+  assert.equal(captures, 1);
+});
+
+test('pre-consent upload classification reads header names without reading any values', async () => {
+  let reads = 0, deferredSends = 0;
+  const headers = { 'x-goog-upload-command': 'upload' };
+  Object.defineProperty(headers, 'authorization', { enumerable: true, get() { reads++; return 'secret'; } });
+  const { sandbox } = makeWorld(() => allowVerdict, { navigator: { userAgent: 'Chrome/130.0 Edg/130.0' }, fetchLater() { deferredSends++; } });
+  await assert.rejects(sandbox.fetch('https://storage.example/upload', { method: 'POST', headers, body: 'private' }), /Data sharing/);
+  assert.equal(reads, 0);
+  assert.throws(() => sandbox.fetchLater('https://storage.example/upload', { method: 'POST', headers, body: 'private' }));
+  assert.equal(reads, 0);
+  assert.equal(deferredSends, 0);
+});
+
+test('pre-consent XHR object-write POST remains in scope without storing header values', () => {
+  const { sandbox } = makeXhrWorld(() => allowVerdict, { extraGlobals: { navigator: { userAgent: 'Chrome/130.0 Edg/130.0' } } });
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://storage.example/upload', true);
+  xhr.setRequestHeader('x-goog-upload-command', 'private-metadata');
+  xhr.send('private health data');
+  assert.equal(xhr.sent.length, 0);
+  assert.equal(xhr.sonomosBlockReason, 'data-consent-required');
+  assert.ok(!JSON.stringify(xhr.__sonomos.headers).includes('private-metadata'));
+});
+
+test('revoke then regrant during body serialization cannot resurrect an old fetch', async () => {
+  let release, captures = 0;
+  class DeferredResponse extends Response {
+    async arrayBuffer() { await new Promise(resolve => { release = resolve; }); return super.arrayBuffer(); }
+  }
+  const { sandbox, deliver, netCalls } = makeWorld(() => { captures++; return allowVerdict; }, { navigator: { userAgent: 'Firefox/140.0' }, Response: DeferredResponse });
+  deliver({ type: 'SONOMOS_CONFIG', config: { dataSharingAllowed: true } });
+  const pending = sandbox.fetch(AI_URL, { method: 'POST', body: new Blob(['private']) });
+  await waitFor(() => release);
+  deliver({ type: 'SONOMOS_CONFIG', config: { dataSharingAllowed: false } });
+  deliver({ type: 'SONOMOS_CONFIG', config: { dataSharingAllowed: true } });
+  release();
+  await assert.rejects(pending, /Data sharing/);
+  assert.equal(captures, 0);
+  assert.equal(netCalls.length, 0);
+});
+
+test('revoke then regrant during body serialization cannot resurrect an old XHR', async () => {
+  let release, captures = 0;
+  class DeferredResponse extends Response {
+    async arrayBuffer() { await new Promise(resolve => { release = resolve; }); return super.arrayBuffer(); }
+  }
+  const { sandbox, deliver } = makeXhrWorld(() => { captures++; return allowVerdict; }, { extraGlobals: { navigator: { userAgent: 'Firefox/140.0' }, Response: DeferredResponse } });
+  deliver({ type: 'SONOMOS_CONFIG', config: { dataSharingAllowed: true } });
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', AI_URL, true); xhr.send(new Blob(['private']));
+  await waitFor(() => release);
+  deliver({ type: 'SONOMOS_CONFIG', config: { dataSharingAllowed: false } });
+  deliver({ type: 'SONOMOS_CONFIG', config: { dataSharingAllowed: true } });
+  release();
+  await waitFor(() => xhr.sent.length || xhr.aborted);
+  assert.equal(captures, 0);
+  assert.equal(xhr.sent.length, 0);
+  assert.equal(xhr.sonomosBlockReason, 'data-consent-required');
+});
+
+test('pre-consent scope recognizes iterable HeadersInit without coercing header values', async () => {
+  let reads = 0, deferredSends = 0;
+  const secret = { toString() { reads++; return 'private'; } };
+  const headers = new Map([['x-goog-upload-command', secret], ['authorization', secret]]);
+  const { sandbox, netCalls } = makeWorld(() => allowVerdict, { navigator: { userAgent: 'Chrome/130.0 Edg/130.0' }, fetchLater() { deferredSends++; } });
+  await assert.rejects(sandbox.fetch('https://storage.example/upload', { method: 'POST', headers, body: 'private' }), /Data sharing/);
+  assert.throws(() => sandbox.fetchLater('https://storage.example/upload', { method: 'POST', headers, body: 'private' }));
+  assert.equal(reads, 0);
+  assert.equal(netCalls.length, 0);
+  assert.equal(deferredSends, 0);
+});
+
+test('pre-consent classification never consumes single-use header iterators', async () => {
+  let iterations = 0, deferredSends = 0;
+  function* once() { iterations++; yield ['content-type', 'application/json']; yield ['authorization', 'private']; }
+  const headers = once();
+  const { sandbox, netCalls } = makeWorld(() => allowVerdict, { navigator: { userAgent: 'Firefox/140.0' }, fetchLater() { deferredSends++; } });
+  await assert.rejects(sandbox.fetch('https://outside.example/status', { method: 'POST', headers, body: 'private' }));
+  assert.throws(() => sandbox.fetchLater('https://outside.example/status', { method: 'POST', headers, body: 'private' }));
+  assert.equal(iterations, 0);
+  assert.equal(netCalls.length, 0);
+  assert.equal(deferredSends, 0);
+});
+
+test('pre-consent XHR keeps only routing metadata, not query credentials', () => {
+  const { sandbox } = makeXhrWorld(() => allowVerdict, { extraGlobals: { navigator: { userAgent: 'Firefox/140.0' } } });
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://user:secret@storage.example/upload?token=private#health', true);
+  assert.equal(xhr.__sonomos.url.search, '');
+  assert.equal(xhr.__sonomos.url.hash, '');
+  assert.equal(xhr.__sonomos.url.username, '');
+  assert.equal(xhr.__sonomos.url.password, '');
+  assert.equal(xhr.__sonomos.url.pathname, '/upload');
+});

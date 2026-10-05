@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<!-- Copyright © 2026 Sonomos, Inc. All rights reserved. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Locke Extension · Data sharing</title>
+  <link rel="stylesheet" href="consent.css">
+</head>
+<body>
+  <main>
+    <p class="eyebrow">LOCKE EXTENSION · DATA SHARING</p>
+    <h1>Choose what Locke can send to your desktop app</h1>
+    <p>Locke screens supported AI website requests on your device. It needs your permission before sending information outside your browser to the local Locke desktop app.</p>
+
+    <section aria-labelledby="screeningHeading">
+      <h2 id="screeningHeading">Request data for local screening</h2>
+      <p>For the requests Locke screens, the extension sends the request body (including prompts, chat messages and supported uploads), destination, path/query, page-set headers and provider identity through native messaging to the Locke desktop app. That app checks the request and returns an allow, redact or block decision.</p>
+      <p>Depending on what you send, this can include personally identifying details, health information, financial and payment information, authentication information in page-set headers or content, personal communications, location, browsing activity, website content and search terms.</p>
+      <p>The extension does not send these copies to Sonomos servers, advertising services or analytics services. Allowed or redacted requests continue to the website you are using. The desktop app has its own local retention settings; pausing sharing cannot recall or delete data it already received. See the <a href="https://sonomos.ai/locke/privacy" target="_blank" rel="noopener noreferrer">Locke privacy policy</a>.</p>
+    </section>
+
+    <section aria-labelledby="technicalHeading">
+      <h2 id="technicalHeading">Optional connection indicators</h2>
+      <label class="choice"><input id="technicalConsent" type="checkbox" disabled> <span>Allow browser type, extension version, extension ID for connector setup and applied disabled-site settings to be sent to the local desktop app</span></label>
+      <p class="hint">These help the app show the extension's presence and confirm disabled-site settings. Screening and receiving your disabled-site settings still work when this is off. No prompt or upload content is sent through the presence indicator. In Microsoft Edge, automatic connector registration also uses these indicators; with this off, set up the connector in the desktop app if needed. Newer Firefox versions also ask for an optional technical-data permission.</p>
+    </section>
+
+    <section class="impact" aria-labelledby="impactHeading">
+      <h2 id="impactHeading">What your choice means</h2>
+      <p><strong>Allow:</strong> Locke can send request data to the desktop app for screening. You can change your choices from the toolbar popup's <strong>Data sharing</strong> link.</p>
+      <p><strong>Before you allow:</strong> leaving this page grants nothing. <strong>Pause data sharing</strong> stops further request-data and connection-indicator transfers to the desktop app. Leaving this page after allowing does not pause sharing. While Locke remains installed, requests it normally screens are held back; it does not block all browsing. To continue without Locke, choose <strong>Decline and uninstall</strong>, then reload affected tabs. You can also disable Locke in your browser's extension settings and reload those tabs.</p>
+    </section>
+
+    <div class="actions">
+      <button id="allowConsent" type="button" disabled>Allow local screening</button>
+      <button id="pauseConsent" type="button" disabled>Pause data sharing</button>
+      <button id="declineConsent" type="button" disabled>Decline and uninstall</button>
+    </div>
+    <p id="consentStatus" role="status" aria-live="polite">Loading your choice…</p>
+  </main>
+  <script type="module" src="consent.js"></script>
+</body>
+</html>

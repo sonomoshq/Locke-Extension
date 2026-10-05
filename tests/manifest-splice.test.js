@@ -55,12 +55,12 @@ test('a changed value leaves every byte outside its span alone', () => {
 });
 
 test('the inline arrays the generator used to expand are preserved', () => {
-  // The regression by name: `data_collection_permissions.required` is written
+  // The regression by name: `data_collection_permissions.optional` is written
   // inline by hand and JSON.stringify expands it over three lines.
-  assert.match(MANIFEST, /"required": \["none"\]/, 'the manifest still has an inline array to protect');
+  assert.match(MANIFEST, /"optional": \["technicalAndInteraction"\]/, 'the manifest still has an inline array to protect');
   const value = JSON.parse(MANIFEST).content_scripts;
   value[0].matches = ['https://example.com/*'];
-  assert.match(spliceValue(MANIFEST, 'content_scripts', value), /"required": \["none"\]/);
+  assert.match(spliceValue(MANIFEST, 'content_scripts', value), /"optional": \["technicalAndInteraction"\]/);
 });
 
 test('valueSpan bracket-matches rather than scanning for the first close', () => {

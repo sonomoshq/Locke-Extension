@@ -1,4 +1,5 @@
 // Copyright © 2026 Sonomos, Inc. All rights reserved.
+import { DATA_CONSENT_REQUIRED } from './data-consent.js';
 import { nativeRequest } from './native-client.js';
 import { BRIDGE_MSG, DEFAULTS, MAX_DISABLED_WEB_HOSTS, SCREENING, STATUS } from './constants.js';
 
@@ -168,7 +169,8 @@ export async function checkHealth({ settings, applied } = {}) {
         : response?.type === 'error' ? (response.code || 'bridge-error') : null
     };
   } catch (err) {
-    const kind = err?.message === 'bridge-timeout' ? 'timeout' : classifyLastError(err?.message);
+    const kind = err?.message === DATA_CONSENT_REQUIRED ? DATA_CONSENT_REQUIRED
+      : err?.message === 'bridge-timeout' ? 'timeout' : classifyLastError(err?.message);
     const noBridge = kind === 'no-bridge';
     return {
       status: noBridge ? STATUS.NO_BRIDGE : STATUS.DISCONNECTED,

@@ -2,6 +2,7 @@
 import { ext } from '../shared/browser.js';
 import { MSG, SCREENING_KEY, STATE_KEY, STATUS } from '../shared/constants.js';
 import { copyFor } from './copy.js';
+import { requiresDataConsent } from '../shared/data-consent.js';
 
 const el = {
   statusBadge: document.getElementById('statusBadge'),
@@ -63,6 +64,9 @@ async function checkWorker() {
     clearTimeout(timer);
   }
 }
+
+const dataSharing = document.getElementById('dataSharingLink');
+if (dataSharing) dataSharing.hidden = !requiresDataConsent();
 
 // ── Wire up ────────────────────────────────────────────────────
 
