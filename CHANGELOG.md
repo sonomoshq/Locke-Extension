@@ -8,6 +8,14 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Documentation**
+- Correct privacy disclosures to describe local native-app transfer of
+  request content, files and metadata, plus actual browser retention and
+  request scope. Remove blanket no-data/no-PII claims from the listing and
+  permission guidance. Add separate Chrome, Edge and Firefox review steps;
+  Firefox's `none` declaration and missing consent experience remain an
+  explicit release-review blocker. No manifest or runtime behavior changed.
+
 **Fixed**
 - A tab that was already open when the extension was reloaded, updated or
   re-enabled blocked every in-scope request with a generic reason, so a

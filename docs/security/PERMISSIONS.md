@@ -7,20 +7,22 @@ truth for store-listing submissions and IT vendor reviews.
 ## API permissions
 
 ### `storage`
-**Why:** the extension persists three things: the connection-state
-cache (`storage.session`, cleared on browser restart), popup UI
-state, and an audit-log ring buffer (`storage.local`, so an admin
-investigating "what happened on this user's machine yesterday" can
-pull the trail without live debugging access). Managed-policy reads
-use `storage.managed` (see `managed-schema.json`).
+**Why:** `storage.local` holds settings, the last applied disabled-site
+configuration and a 100-entry diagnostic audit buffer. `storage.session`
+holds connection/screening state, counters and retry/scheduling metadata;
+it survives worker eviction but is cleared on browser restart. Managed
+policy uses `storage.managed` (see `managed-schema.json`). See the
+[retention inventory](../legal/RETENTION.md) for exact keys and lifetimes.
 
 The audit log captures seven event kinds: `daemon-down`,
 `daemon-recovered`, `bridge-missing`, `policy-loaded`,
 `csp-violation`, `screening-unavailable` and `screening-restored`.
 (Corrected 2026-08-21: this listed five; the two `screening-*` kinds
-were added to `AUDITED_KINDS` without the count following.) Each entry
-is shape-only — never PII, never request bodies. Adding a new kind
-requires updating `AUDITED_KINDS` in `background/service-worker.js`.
+were added to `AUDITED_KINDS` without the count following.) Entries contain
+event/error metadata, not captured request bodies. CSP events can include
+URLs and source-file information, so “shape-only” is not an anonymity
+guarantee. Adding a new kind requires updating `AUDITED_KINDS` in
+`background/service-worker.js`.
 
 **Could we do without it?** No — without it the extension would lose
 connection state on every service-worker restart (MV3 workers are
@@ -45,8 +47,10 @@ doesn't allow service workers to do.
 travels to the local native messaging host over the OS
 native-messaging channel (stdin/stdout JSON frames), which relays it
 to the Sonomos desktop app for scanning and returns the verdict the
-shim enforces. That's how page data reaches the desktop app across
-the browser-process sandbox — it never touches a network socket. The
+shim enforces. The transfer includes body/file bytes and request metadata
+(method, destination, path/query and page-set headers), plus a provider ID
+when available. It crosses the browser-process boundary on the same device;
+it is still data handling and must be disclosed. The
 `ai.sonomos.desktop` host name is pinned across the manifest
 templates, the host, `shared/constants.js`, and
 `tests/constants.test.js`.
@@ -76,10 +80,17 @@ down — the service worker POSTs `/heartbeat` with `{ "browser":
 "<id>", "version": "<manifest version>" }` so the app can show
 install/connected state per browser. The two were one tick until the
 backoff was found silencing "I am installed" for up to five minutes
-against a listener that calls a heartbeat stale at 45 seconds. The payload is exactly those two fields — no page data,
-no identifiers — and the call is fire-and-forget: the app not
+against a listener that calls a heartbeat stale at 45 seconds. The heartbeat
+JSON contains exactly those two fields, not page content; the browser also
+sends its extension Origin header. The call is fire-and-forget: the app not
 running is the normal case and every failure is swallowed
 (`sendPresenceBeacon` in `background/service-worker.js`).
+
+**Registration metadata.** On a missing/refused native-host connection,
+Chromium also POSTs `{ id, browser, version }` to `/register-extension`.
+The `id` is the extension ID, not a Sonomos account ID. This is a separate
+local connection-repair request, not the two-field heartbeat or the content
+screening channel (`requestHostRegistration`).
 
 **How the desktop app knows it is us.** Both POSTs on this origin
 (`/heartbeat` and `/register-extension`) are identified by the
@@ -111,22 +122,22 @@ unaffected — held requests never use this channel.
 
 ## Data collection declaration (Firefox / AMO)
 
-`browser_specific_settings.gecko.data_collection_permissions` is
-`{ "required": ["none"] }`. Since 2025-11-03 AMO requires every new
-add-on to declare what personal data it collects or transmits, and
-Firefox surfaces that declaration in the install prompt.
+**Unresolved before a future release:** the source still declares
+`browser_specific_settings.gecko.data_collection_permissions` as
+`{ "required": ["none"] }`, supports Firefox 128+, and has no data-consent UI.
+The earlier rationale that native messaging stays on-device and therefore
+justifies `none` is withdrawn. Mozilla's
+[Add-on Policies](https://extensionworkshop.com/documentation/publish/add-on-policies/#data-collection-and-transmission-disclosure-and-control)
+explicitly apply data-transmission disclosure and user controls to native-app
+transfers. The extension transfers request content and metadata that may
+contain personal information.
 
-`none` is the accurate answer: the extension has no analytics, no
-telemetry endpoint, and no account. What it stores stays in the
-browser profile (connection state, popup state, the shape-only audit
-log); what it sends leaves only via native messaging to the same-user
-desktop app, plus a `{ browser, version }` loopback beacon. Nothing
-crosses the machine boundary.
-
-If that ever changes — any field added to the beacon, any remote
-endpoint — this declaration must change with it in the same commit;
-`tests/store-build.test.js` pins the current value so the change
-cannot be silent.
+The [store checklist](../store/LISTING.md#store-specific-privacy-review-checklist)
+requires an approved, implemented and verified consent/disclosure solution
+covering the supported Firefox versions before the next AMO submission.
+Manifest tests pinning `none` check the current artifact, not compliance.
+This documentation correction does not change manifest permissions, consent
+behavior or store-console declarations.
 
 ## Content script matches
 
@@ -184,10 +195,11 @@ origin created but which have no matchable url of their own
 any origin that is not already in the list above: they widen *frames*,
 never *hosts*, and add no `host_permissions`.
 
-**Could we use `<all_urls>`?** Could, but extension risk-rating
-tools (Spin.AI, ExtensionTotal) score that as "broad host access" by
-default. Scoping to named hosts drops the risk score by a tier and
-matches the principle of least privilege.
+**Why no `<all_urls>`?** Screening is limited to supported AI surfaces;
+access to every website is not needed. Named hosts bound where scripts run.
+Path rules and user/admin configuration further narrow which requests are
+relayed. See [DATA-FLOW.md](../architecture/DATA-FLOW.md) for the distinction
+between injection, local input snapshots and native-app transfers.
 
 **What about the cross-origin uploads it screens?** A `matches` entry
 governs *where the script runs*, not which destinations the page it runs
@@ -220,7 +232,7 @@ the verdict. Must match the shim's host list exactly.
 | `clipboardRead` / `clipboardWrite` | The screening flow is page-bound; clipboard is out of scope. |
 | `notifications` | All user-facing UI is the toolbar badge and the popup. |
 | `geolocation` / `unlimitedStorage` / `system.cpu` | No use case. |
-| `<all_urls>` host permission | Would defeat the loopback-only architecture. |
+| `<all_urls>` host permission | Unnecessary for the supported-host scope; not requested. |
 
 This list exists so a reviewer (or store-listing maintainer) can
 scan a single doc to understand why every privilege is justified.

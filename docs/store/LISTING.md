@@ -29,37 +29,44 @@ Reused from the manifest `description` (129 chars, within every store's
 
 ## Long description
 
-Locke Extension is the browser half of the Locke desktop app. It watches a
-fixed list of AI websites (ChatGPT, Claude, Gemini, Perplexity, and the other
-in-scope chat and search surfaces) and, when a page on one of those sites
-sends a request with a body, it holds that request and relays it to the Locke
-desktop app running on your machine. The app scans it on-device and returns a
-verdict, which the extension enforces before anything leaves your browser:
+Locke Extension connects supported AI websites, including ChatGPT, Claude,
+Gemini, Grok and Perplexity, to the Locke desktop app for on-device screening.
+For in-scope fetch/XHR requests with a body, it holds the request and transfers
+the body (including conversation text and supported uploaded files), method,
+destination, path/query and page-set headers to the local app through native
+messaging. The app returns a verdict:
 
-- **allow** — the request is sent exactly as the page issued it.
-- **redact** — the request is sent with sensitive data replaced by the
-  desktop app's rebuilt version.
-- **block** — the request is not sent; the page sees a network error.
+- **allow** — send the held request to the website.
+- **redact** — send the desktop app's rebuilt body to the website.
+- **block** — do not send the request; the page sees a network error.
 
-The failure posture is fail-closed: if the desktop app is unreachable or no
-clean verdict arrives, an in-scope request is blocked rather than sent
-unscreened. Traffic to sites outside the list is never touched.
+No clean verdict means an in-scope request is blocked. A user's explicit
+time-boxed fail-open setting in the desktop app can return an unchecked
+verdict; the extension reports those sends in its popup.
 
-What it does not cover: a prompt that travels in the web address itself rather
-than in a request body. A query you type into the browser's address bar, send
-to your default search engine, or submit from a search box is sent by the
-browser as a page navigation, which this extension does not see and cannot
-hold. That applies to every site on the list, search engines included, so
-search queries are not screened today.
+Content scripts run only on catalog-listed hosts and their matched
+subdomains/frames, without `<all_urls>`. Screening is further restricted by
+request-path rules, provider policy and disabled-site settings. Some
+cross-origin uploads from those pages are also screened. Not every action on
+a supported site is covered: navigation/address-bar search prompts,
+WebSockets, worker traffic and unrecognized upload shapes are outside this
+screening path. See https://github.com/sonomoshq/Locke-Extension/blob/main/HONEST.md.
 
-All scanning and redaction happen locally in the Locke desktop app. The
-extension has no detection logic of its own, contacts no remote servers, and
-sends no data off your machine. Its only two endpoints are the desktop app's
-native-messaging host and a loopback heartbeat (`127.0.0.1`) that tells the
-app the extension is installed and connected.
+Scanning happens in the local desktop app. The extension does not send
+screening copies to a Sonomos cloud service; allowed/redacted page requests
+still reach the user's chosen website. Browser-added Cookie headers are not
+captured, but page-set headers may include authentication information. The
+cross-origin upload screening copy omits presigned URL query credentials.
 
-**Requires the Locke desktop app.** Without it, in-scope AI-website requests
-are blocked (fail-closed) and the toolbar badge shows the connection problem.
+The extension does not persist request bodies. It stores local settings,
+disabled-site configuration and a 100-entry diagnostic audit buffer, plus
+session-only connection/screening state and counters. Diagnostic metadata may
+include URLs or paths. Local connection requests carry browser/version and,
+for Chromium host registration, the extension ID. See
+https://sonomos.ai/locke/privacy for local processing and desktop retention.
+
+**Requires the Locke desktop app.** Without a working connection, in-scope
+requests are blocked and the toolbar badge shows the connection problem.
 
 ## Category
 
@@ -80,9 +87,11 @@ Ground truth: `docs/security/PERMISSIONS.md` (kept in sync with the
 manifest). Store-form phrasing:
 
 ### `storage`
-Persists the connection-state cache, popup UI state, and a 100-entry
-shape-only audit log (no page data, no PII). `storage.managed` lets IT
-admins push policy via the enterprise schema (`managed-schema.json`).
+Stores session connection/screening state and counters, and persistent
+settings, disabled-site configuration and a 100-entry diagnostic audit log.
+The audit buffer does not store request bodies; metadata may contain URLs.
+`storage.managed` lets IT admins push policy via `managed-schema.json`.
+See [`RETENTION.md`](../legal/RETENTION.md) for keys and lifetimes.
 
 ### `alarms`
 Drives two periodic ticks: the ~30-second heartbeat that checks the
@@ -95,17 +104,17 @@ is failing). MV3 service workers cannot use timers for this.
 ### `nativeMessaging`
 The core capability: held requests travel to the local Locke desktop app
 through the OS native-messaging channel (host `ai.sonomos.desktop`), not
-over the network. This is the only path page data ever takes.
+over the network. This transfers content and request metadata outside the
+browser to a native app on the same device. Allowed/redacted page requests
+subsequently travel to their original remote destinations.
 
 ### Host permission `http://127.0.0.1/*`
-A loopback-only heartbeat: every ~30 s the extension POSTs
-`{ "browser": "...", "version": "..." }` to the Locke desktop app's local
-presence listener (port 18795) so the app can show "extension connected".
-Nothing but those two fields is sent, and the endpoint is unreachable from
-off-machine. The pattern is portless because Firefox ignores match
-patterns that carry an explicit port; the extension-pages CSP pins
-`connect-src` to `http://127.0.0.1:18795`, so only that port is reachable
-in practice.
+The service worker POSTs `{ browser, version }` to the local app's
+`/heartbeat` endpoint about every 30 seconds. When Chromium native-host
+registration needs repair, `/register-extension` receives `{ id, browser,
+version }`. The browser also supplies the extension Origin. Neither carries
+request bodies. The portless host pattern accommodates Firefox; the
+extension-pages CSP pins `connect-src` to `http://127.0.0.1:18795`.
 
 ### Content-script matches (24 AI hosts)
 Content scripts run only on the fixed list of protected AI surfaces (chat
@@ -116,33 +125,85 @@ requests the extension exists to screen. It deliberately does NOT request
 
 ## Privacy disclosures
 
-- **Remote code:** none. No remote scripts, no eval, no CDN assets; the CSP
-  is `default-src 'none'` with same-origin scripts only.
-- **User data collected:** none. No analytics, no telemetry to any server,
-  no accounts. The extension stores connection state and a shape-only audit
-  log locally in the browser.
-- **Data sold / shared with third parties:** none.
-- **Processing location:** everything is on-device. Held requests go to the
-  local Locke desktop app via native messaging; the only network endpoint is
-  loopback (`127.0.0.1:18795`) and carries only `{ browser, version }`.
-- **Privacy policy URL:** <https://sonomos.ai/locke/privacy> — the
-  extension-specific policy. The company-wide policy at
-  <https://sonomos.ai/privacy> does **not** cover this extension; do not
-  submit it in the store forms.
+- **Remote code:** none; scripts ship in the package.
+- **Data handled:** in-scope request content, supported files and request
+  metadata are transferred to the local desktop app for screening. Local
+  processing is not a reason to claim that no user data is handled.
+- **Destinations:** native messaging to the local app; loopback connection
+  endpoints as described above; the page's original destination for
+  allowed/redacted requests. No extension analytics endpoint is configured.
+- **Local retention:** see [`RETENTION.md`](../legal/RETENTION.md). Do not
+  describe diagnostic metadata as guaranteed anonymous or extend the
+  extension's no-body-storage claim to desktop databases, logs or crash files.
+- **Privacy policy URL:** <https://sonomos.ai/locke/privacy>. This is the
+  product-specific policy; the company-wide <https://sonomos.ai/privacy>
+  is not a substitute for an extension disclosure.
 
-### Firefox data-collection declaration
+### Store-specific privacy review checklist
 
-AMO requires every new add-on to declare its data collection in the manifest
-(mandatory since 2025-11-03; Firefox shows it in the install prompt). Ours:
+Reviewed against official sources on **2026-10-05**. These are release-review
+items, not legal advice, a store approval guarantee, or a record that console
+settings have been changed. Build validation checks structure, not the truth
+of a privacy declaration.
 
-```json
-"data_collection_permissions": { "required": ["none"] }
-```
+**Chrome Web Store**
 
-`none` is accurate — see `docs/security/PERMISSIONS.md` for the reasoning and
-for what must change if the beacon payload ever grows. In the AMO submission
-form, answer the data-collection questions to match: no personal data, no
-technical/interaction data.
+- [ ] **[HUMAN]** Read the current Privacy practices form and reconcile its
+      category choices with the request-content/metadata inventory above.
+      The [User Data FAQ](https://developer.chrome.com/docs/webstore/program-policies/user-data-faq)
+      explicitly requires disclosure and a privacy policy for local-only
+      handling. That obligation does not itself establish which checkboxes
+      are currently selected in the developer console; inspect them directly.
+- [ ] **[HUMAN]** Verify the website policy, listing and UI describe the same
+      purpose and data flow. Review website content, communications, browsing
+      information and any sensitive categories actually handled; do not
+      copy a blanket “no data collected” answer into the console.
+- [ ] **[HUMAN]** Validate the actual Chrome-API/user-data uses and transfers
+      before approving the required [Limited Use](https://developer.chrome.com/docs/webstore/program-policies/limited-use)
+      certification and a matching affirmative statement on the product's
+      website. Do not paste a Google-API compliance claim without checking
+      what data it covers, allowed purposes, transfers and human access.
+
+**Microsoft Edge Add-ons**
+
+- [ ] **[HUMAN]** In Partner Center, declare every relevant category for the
+      actual content and metadata handled, including website content and
+      communications, and assess browsing/authentication or other sensitive
+      information present in the payload. Explain local native-app processing
+      and persistent diagnostics. Do not reuse Chrome console answers without
+      checking Edge's current form.
+- [ ] **[HUMAN]** Match the data-usage certifications, permission reasons,
+      listing and policy URL to the same inventory. The official
+      [publishing guide, Privacy section](https://learn.microsoft.com/en-us/microsoft-edge/extensions/publish/publish-extension#step-6-enter-privacy-information)
+      requires accurate category declarations and a policy for personal data
+      accessed, transmitted or collected.
+
+**Firefox / AMO — unresolved before a future release**
+
+- [ ] **[HUMAN + ENGINEERING]** Resolve the source manifest's
+      `data_collection_permissions: { "required": ["none"] }` and missing
+      data-consent UI. Mozilla's [Add-on Policies](https://extensionworkshop.com/documentation/publish/add-on-policies/#data-collection-and-transmission-disclosure-and-control)
+      include native-app transfers in data transmission and apply consent and
+      control requirements to them. Staying on-device does not justify `none`.
+- [ ] **[HUMAN + ENGINEERING]** Approve a disclosure/consent design and map
+      actual payloads to Mozilla's [taxonomy and built-in consent guidance](https://extensionworkshop.com/documentation/develop/firefox-builtin-data-consent/).
+      Evaluate content, communications, browsing and any sensitive information
+      actually transferred, as well as technical connection data. Current
+      `strict_min_version: "128.0"` includes browsers predating built-in
+      consent (desktop Firefox 140). The approved solution must address those
+      versions, fresh installs, upgrades, refusal and revocation before
+      transmission. Do not assume silent background screening qualifies for
+      implicit consent.
+- [ ] **[HUMAN]** Align any existing AMO-hosted privacy-policy copy and listing
+      link manually with <https://sonomos.ai/locke/privacy>. Editing this repo
+      does not update AMO text. Mozilla's [policy FAQ](https://extensionworkshop.com/documentation/publish/add-on-policies-faq/)
+      says AMO hosting is no longer required and recommends a policy link;
+      an existing hosted copy must not contradict that link.
+
+**Release hold:** this documentation change leaves the manifest, consent UI
+and permissions unchanged. Do not submit a new Firefox release until an
+approved disclosure/consent solution is implemented and verified. Existing
+manifest tests accepting `none` are not evidence of policy compliance.
 
 ## Required assets checklist
 
@@ -162,11 +223,10 @@ the three image files below is missing, so drop them at exactly these paths
       store's listing-icon requirement). `scripts/package.mjs` stages every
       `icons/*.png` into both artifacts; the SVG design sources are
       deliberately left out.
-- [ ] **[HUMAN]** Publish <https://sonomos.ai/locke/privacy>. As of
-      2026-08-12 it returns 404. All three stores require a reachable
-      privacy-policy URL — a dead link fails review, and a listing whose
-      policy URL later breaks can be taken down. This must be live *before*
-      the first submission, and legal sign-off must cover the extension.
+- [ ] **[HUMAN]** Verify <https://sonomos.ai/locke/privacy> is reachable and
+      its published copy matches the release's actual handling, retention and
+      disclosures. Obtain legal sign-off; a source edit alone does not publish
+      or verify the hosted policy.
 - [x] Store accounts: Chrome Web Store developer, Microsoft Partner Center,
       and Firefox Add-on Developer Hub accounts all exist under the Sonomos,
       Inc. org identity. What each one still needs is a credential in
@@ -184,7 +244,9 @@ the three image files below is missing, so drop them at exactly these paths
 
 ## Submission runbook
 
-1. `npm test && npm run validate` — both must be clean.
+1. Complete the store-specific privacy review above; the unresolved Firefox
+   consent/declaration item blocks an AMO submission. Then run
+   `npm test && npm run validate` — both must be clean.
 2. `npm run package` — writes both zips into `dist/`. The build is
    deterministic (fixed entry order and timestamps), so re-running it on
    another machine produces byte-identical artifacts; AMO source review can
@@ -221,5 +283,5 @@ or flatten the directory structure.
 
 - Edge reuses the **chromium** zip unchanged — do not build a separate
   artifact.
-- Partner Center asks the same permission/privacy questions as CWS; reuse
-  the answers above.
+- Review Partner Center's current data-usage categories independently; use
+  the Edge checklist above rather than assuming its answers match CWS.
