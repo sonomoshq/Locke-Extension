@@ -163,7 +163,8 @@ test('HONEST.md names Microsoft Copilot as unscreened and says it is planned', a
   // plain consequence and the planned sentence, with no date.
   const honest = await readFile(url('../HONEST.md'), 'utf8');
   assert.match(honest, /\*\*Microsoft Copilot is not screened\.\*\*/);
-  assert.ok(honest.includes('copilot.microsoft.com'), 'names copilot.microsoft.com');
+  // Matched as a whole parenthesised name in the prose (a doc check, not URL handling).
+  assert.match(honest, /^.*\(copilot\.microsoft\.com\).*$/m);
   assert.match(honest, /Windows is not screened by Locke either/);
   assert.match(honest, /We plan to add this in a future release\./);
 });
