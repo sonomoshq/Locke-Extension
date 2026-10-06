@@ -16,6 +16,14 @@ strict SemVer.
   Firefox's `none` declaration and missing consent experience remain an
   explicit release-review blocker. No manifest or runtime behavior changed.
 
+**Changed**
+- Audio and voice uploads (dictation, a voice clip) are no longer blocked by
+  default. Locke cannot screen audio until V2, so the desktop app allows them
+  unscreened unless the device setting or a Teams policy says Block; the
+  extension holds and relays them as before and follows that answer. Video and
+  other unreadable formats stay blocked. Decided 2026-10-06 ("Allow audio,
+  disclose"); listed in the known limitations.
+
 **Fixed**
 - Uploads that declared nothing in a header left unscreened: Perplexity's
   attachments (an S3 POST-policy form to `ppl-ai-file-upload.s3.amazonaws.com`,

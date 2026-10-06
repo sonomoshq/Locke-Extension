@@ -2628,6 +2628,97 @@ test('upload: on a search page that screens nothing, a file POST is left alone a
   assert.equal(netCalls.length, 1);
 });
 
+// ── audio and voice (Nate, 2026-10-06: "Allow audio, disclose") ─────
+//
+// Locke cannot screen audio until V2, so the desktop app's answer for an audio
+// upload is a clean allow by default, and a block when the device setting or
+// the team policy says Block. The extension does not decide that, on either
+// side: it holds the upload like any other file, relays it, and obeys the
+// verdict. These tests pin that the hold-and-relay path lets audio through on
+// an allow with the page's own bytes, stops it on a block, and is no looser
+// for video or when the desktop app cannot answer.
+
+const DICTATION_URL = 'https://chatgpt.com/backend-api/transcribe';
+
+function dictationForm(type = 'audio/webm', name = 'audio.webm') {
+  const form = new FormData();
+  form.append('file', new Blob([Uint8Array.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86])], { type }), name);
+  form.append('duration_seconds', '4.2');
+  return form;
+}
+
+test('audio: dictation (a File in a form to an unlisted ChatGPT path) is relayed and, on a clean allow, sent as the page built it', async () => {
+  const captured = [];
+  const { sandbox, netCalls, logs } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; }, CHATGPT_PATHS);
+  await sandbox.fetch(DICTATION_URL, { method: 'POST', body: dictationForm() });
+  assert.equal(captured.length, 1, 'held and relayed, so the app (and a team policy) can decide');
+  const raw = rawOf(captured[0]).toString('latin1');
+  assert.match(raw, /^POST \/backend-api\/transcribe HTTP\/1\.1\r\nHost: chatgpt\.com\r\n/);
+  assert.match(raw, /filename="audio\.webm"/);
+  assert.match(raw, /Content-Type: audio\/webm/i);
+  assert.equal(netCalls.length, 1, 'allowed: the upload leaves');
+  const shipped = Buffer.from(netCalls[0][1].body);
+  assert.ok(shipped.includes(Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86])), 'the clip itself went out unchanged');
+  assert.match(shipped.toString('latin1'), /filename="audio\.webm"/);
+  assert.equal(logs.filter((l) => l.level === 'warn').length, 0);
+});
+
+test('audio: a raw recorder blob and an XHR form are relayed and released the same way', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; });
+  await sandbox.fetch('https://uploads.example.net/voice', {
+    method: 'POST', body: new Blob([Uint8Array.from([0x1a, 0x45, 0xdf, 0xa3])], { type: 'audio/webm;codecs=opus' })
+  });
+  await sandbox.fetch('https://uploads.example.net/voice-ogg', {
+    method: 'POST', headers: { 'content-type': 'audio/ogg' }, body: Uint8Array.from([0x4f, 0x67, 0x67, 0x53])
+  });
+  assert.equal(captured.length, 2);
+  assert.equal(netCalls.length, 2);
+
+  const xhrCaptured = [];
+  const world = makeXhrWorld((msg) => { xhrCaptured.push(msg.requestB64); return allowVerdict; });
+  const xhr = new world.sandbox.XMLHttpRequest();
+  xhr.open('POST', DICTATION_URL, true);
+  xhr.send(dictationForm('audio/mp4', 'audio.m4a'));
+  await waitFor(() => xhr.sent.length === 1);
+  assert.equal(xhrCaptured.length, 1);
+  assert.equal(xhr.aborted, false);
+});
+
+test('audio: when the desktop app says Block (device setting or team policy) the upload never leaves, fetch and XHR', async () => {
+  const block = () => ({ ok: true, receipt: { decision: 'block', reason: '1 item(s) could not be examined (file: audio/webm)', redactedCount: 0 } });
+  const { sandbox, netCalls, logs } = makeWorld(block, CHATGPT_PATHS);
+  await assert.rejects(sandbox.fetch(DICTATION_URL, { method: 'POST', body: dictationForm() }), blockedError);
+  assert.equal(netCalls.length, 0);
+  assert.match(assertBlocked(logs, 'decision-block', 'policy'), /file: audio\/webm/);
+
+  const world = makeXhrWorld(block);
+  const xhr = new world.sandbox.XMLHttpRequest();
+  xhr.open('POST', DICTATION_URL, true);
+  xhr.send(dictationForm());
+  await waitFor(() => xhr.aborted);
+  assert.deepEqual(xhr.sent, [], 'the blocked clip was not uploaded');
+});
+
+test('audio: the extension adds no pass of its own — a desktop app that cannot answer still blocks it', async () => {
+  const { sandbox, netCalls } = makeWorld(() => ({ ok: false, code: 'no-bridge', message: 'not found' }), CHATGPT_PATHS);
+  await assert.rejects(sandbox.fetch(DICTATION_URL, { method: 'POST', body: dictationForm() }));
+  assert.equal(netCalls.length, 0);
+});
+
+test('audio: video and other unreadable files are held exactly as before, and a block verdict stops them', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => {
+    captured.push(msg.requestB64);
+    return { ok: true, receipt: { decision: 'block', reason: '1 item(s) could not be examined (file: video/mp4)', redactedCount: 0 } };
+  }, CHATGPT_PATHS);
+  for (const [type, name] of [['video/mp4', 'clip.mp4'], ['application/pdf', 'doc.pdf'], ['application/octet-stream', 'blob.bin']]) {
+    await assert.rejects(sandbox.fetch(DICTATION_URL, { method: 'POST', body: dictationForm(type, name) }), blockedError, type);
+  }
+  assert.equal(captured.length, 3, 'every one was held and relayed');
+  assert.equal(netCalls.length, 0);
+});
+
 test('pre-consent: a form carrying a file is in upload scope by its TYPE alone', async () => {
   let captures = 0;
   const { sandbox } = makeWorld(() => { captures++; return allowVerdict; }, { navigator: { userAgent: 'Chrome/130.0 Edg/130.0' } });
