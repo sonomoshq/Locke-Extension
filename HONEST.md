@@ -433,6 +433,16 @@ verdict means no send. The residuals we accept and document:
   object `key` — is screened; a clean `allow` ships the page's own form;
   and a `redact` on a signed form is a block (`upload-signed-form`),
   because a rebuilt body would no longer carry the signature.
+  **Audio and voice are the exception (decided 2026-10-06, "Allow audio,
+  disclose").** Locke cannot screen audio until V2. The extension still
+  holds and relays an audio upload (dictation, a voice clip) like any
+  other file, and obeys the desktop app's answer: by default the app
+  allows it, so a voice upload leaves **unscreened**; if the device
+  setting (Controls, File types) or a Teams policy says Block, the app
+  blocks it and the extension refuses it. Video and every other format
+  Locke cannot read are blocked as before. The extension never decides
+  this itself, and when the desktop app cannot answer, audio is blocked
+  like everything else.
   **What is still not covered:** a raw `POST` of file bytes that
   declares no type at all — an untyped `ArrayBuffer` or a plain string
   — is indistinguishable from telemetry by anything the page hands us,
