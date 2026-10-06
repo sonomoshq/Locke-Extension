@@ -33,3 +33,17 @@ regexes = [
   '''edge-api-key-0123456789abcdef''',
   '''amo-secret-value-0123456789abcdef''',
 ]
+
+[[allowlists]]
+description = """
+Synthetic S3 POST-policy credentials in tests/shim.test.js (teams-v1/fix-upload-leaks).
+
+The upload tests build the form a page posts to S3, so the signing fields have
+to look like a real temporary credential: an ASIA… access key id ending in
+EXAMPLE and a truncated session token. Neither has ever been valid anywhere.
+Exempted by value, so any other secret-shaped string in that file still fails.
+"""
+regexes = [
+  '''ASIAZ4TQXY3EXAMPLE7Q''',
+  '''IQoJb3JpZ2luX2VjEJr//////////wEaCXVzLWVhc3QtMSJH''',
+]
