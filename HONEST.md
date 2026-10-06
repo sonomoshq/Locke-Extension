@@ -299,6 +299,15 @@ verdict means no send. The residuals we accept and document:
   Windows is not screened by Locke either (its chat is also a WebSocket).
   GitHub Copilot in VS Code and Visual Studio is a different product and is
   screened. We plan to add this in a future release.
+  **Photo metadata is not removed.** Photo metadata, such as location,
+  isn't removed from pictures you send. We plan to add this in a future
+  release.
+  **Perplexity desktop app uploads are not screened.** File uploads from the
+  Perplexity desktop app aren't screened (this extension covers the
+  Perplexity website only). We plan to add this in a future release.
+  **Some names can be missed in two kinds of text.** The desktop app's
+  detection can miss some names in short all-capital sentences and in
+  escaped tool-result text; other personal data is not affected.
   Within the hooked transports, bodies are captured as exact bytes
   (strings, Blob, ArrayBuffer, TypedArray, URLSearchParams, FormData —
   including the multipart boundary as serialized); what can't be
