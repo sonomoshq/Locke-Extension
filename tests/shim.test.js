@@ -2258,7 +2258,8 @@ test('upload: an unexaminable attachment is blocked, never replaced with a place
   await assert.rejects(
     sandbox.fetch(STORAGE_PUT, { method: 'PUT', headers: { 'content-type': 'image/png' }, body: 'realbytes' }),
     (e) => {
-      assert.match(e.message, /could not be examined, so it was not uploaded/);
+      // D-30's notice, in the desktop app toast's own words.
+      assert.match(e.message, /this image was too large to screen, so it was not sent/);
       assert.match(e.message, /Nothing left your machine/);
       assert.match(e.message, /\bkind=unsupported\b/);
       assert.match(e.message, /\breason=upload-withheld\b/);
@@ -2393,6 +2394,245 @@ test('upload: an XHR to an ordinary third-party host is untouched', async () => 
   assert.deepEqual(xhr.sent, ['{"event":1}']);
   assert.equal(xhr.aborted, false);
   assert.equal(logs.filter((l) => l.level === 'warn').length, 0);
+});
+
+// ── POST-shaped uploads: the body says "file" (2026-10-06) ─────────
+//
+// Perplexity's attachments, observed in public client code
+// (henrique-coder/perplexity-webui-scraper core/files.py; helallao/perplexity-ai
+// client.py): /rest/uploads/create_upload_url answers an S3 POST policy, and
+// the page POSTs a multipart FORM — the signing fields plus the file — to
+// ppl-ai-file-upload.s3.amazonaws.com (images go to Cloudinary the same way).
+// No object-write header, so the header-only predicate passed every one of
+// them unscreened. What only an upload carries is the FILE in its body.
+
+const S3_POST = 'https://ppl-ai-file-upload.s3.amazonaws.com/';
+
+function s3PolicyForm(file, name = 'cv.txt') {
+  const form = new FormData();
+  form.append('key', `web/direct-files/u1/f1/${name}`);
+  form.append('x-amz-credential', 'ASIAZ4TQXY3EXAMPLE7Q/20261006/us-east-1/s3/aws4_request');
+  form.append('x-amz-security-token', 'IQoJb3JpZ2luX2VjEJr//////////wEaCXVzLWVhc3QtMSJH');
+  form.append('policy', 'eyJleHBpcmF0aW9uIjoiMjAyNi0xMC0wNlQwMDowMDowMFoifQ==');
+  form.append('x-amz-signature', '3f1e2d4c5b6a79880716253443526170f0e1d2c3b4a59687');
+  form.append('file', file, name);
+  return form;
+}
+
+test('upload: a POST-policy form carrying a file is held and screened (Perplexity to S3)', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; });
+
+  await sandbox.fetch(S3_POST, { method: 'POST', body: s3PolicyForm(new Blob(['Jane Roe, SSN 078-05-1120'], { type: 'text/plain' })) });
+
+  assert.equal(captured.length, 1, 'the form reached the desktop app');
+  const raw = rawOf(captured[0]).toString('utf8');
+  assert.match(raw, /^POST \/ HTTP\/1\.1\r\nHost: ppl-ai-file-upload\.s3\.amazonaws\.com\r\n/);
+  assert.match(raw, /content-type: multipart\/form-data; boundary=/i);
+  assert.match(raw, /Jane Roe, SSN 078-05-1120/, 'the file part itself was screened');
+  assert.match(raw, /name="key"\r\n\r\nweb\/direct-files\/u1\/f1\/cv\.txt/, 'the object key (the filename) was screened');
+  // The signing fields are a credential minted for this one upload, like a
+  // pre-signed URL's query string: they never cross the seam, so the screener
+  // cannot mask them into an upload the storage provider refuses.
+  for (const name of ['x-amz-credential', 'x-amz-security-token', 'policy', 'x-amz-signature']) {
+    assert.ok(!raw.includes(`name="${name}"`), `${name} crossed the seam`);
+  }
+  assert.ok(!raw.includes('ASIAZ4TQXY3EXAMPLE7Q'));
+  assert.equal(netCalls.length, 1, 'a clean allow releases the upload');
+  assert.equal(netCalls[0][0], S3_POST);
+  const shipped = Buffer.from(netCalls[0][1].body).toString('utf8');
+  assert.match(shipped, /ASIAZ4TQXY3EXAMPLE7Q/, 'the page\'s own signed form is what an allow releases');
+  assert.match(shipped, /Jane Roe, SSN 078-05-1120/);
+});
+
+test('upload: a form with no signature field is screened whole, whatever its fields are called', async () => {
+  const captured = [];
+  const { sandbox } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; });
+  const form = new FormData();
+  form.append('timestamp', '2026-10-06 note for Jane Roe');
+  form.append('api_key', 'not-a-signed-form');
+  form.append('file', new Blob(['hello'], { type: 'text/plain' }), 'a.txt');
+  await sandbox.fetch('https://uploads.example.net/form', { method: 'POST', body: form });
+  const raw = rawOf(captured[0]).toString('utf8');
+  assert.match(raw, /name="timestamp"\r\n\r\n2026-10-06 note for Jane Roe/);
+  assert.match(raw, /name="api_key"/);
+});
+
+test('upload: a signed form whose screen found something is blocked, never re-sent without its signature', async () => {
+  const { sandbox, netCalls, logs } = makeWorld(() => rebuiltVerdict(
+    ['POST / HTTP/1.1', 'Host: ppl-ai-file-upload.s3.amazonaws.com', 'content-type: multipart/form-data; boundary=FRESH'],
+    Buffer.from('--FRESH\r\nContent-Disposition: form-data; name="file"; filename="cv.txt"\r\n\r\nJane Roe, SSN SSN_ab12\r\n--FRESH--\r\n'),
+    1
+  ));
+  await assert.rejects(
+    sandbox.fetch(S3_POST, { method: 'POST', body: s3PolicyForm(new Blob(['Jane Roe, SSN 078-05-1120'], { type: 'text/plain' })) }),
+    (e) => {
+      assert.match(e.message, /signed form/);
+      assert.match(e.message, /Nothing left your machine/);
+      assert.match(e.message, /\breason=upload-signed-form\b/);
+      return true;
+    }
+  );
+  assert.equal(netCalls.length, 0, 'neither the original nor a rebuilt form left');
+  assertBlocked(logs, 'upload-signed-form', 'unsupported');
+});
+
+test('upload: an XHR signed form is screened without its signing fields and blocked on a redact', async () => {
+  const captured = [];
+  const { sandbox, logs } = makeXhrWorld((msg) => {
+    captured.push(msg.requestB64);
+    return rebuiltVerdict(['POST / HTTP/1.1', 'Host: ppl-ai-file-upload.s3.amazonaws.com',
+      'content-type: multipart/form-data; boundary=FRESH'], Buffer.from('--FRESH--\r\n'), 1);
+  });
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', S3_POST, true);
+  xhr.send(s3PolicyForm(new Blob(['Jane Roe, SSN 078-05-1120'], { type: 'text/plain' })));
+  await waitFor(() => xhr.aborted);
+  assert.deepEqual(xhr.sent, [], 'nothing was uploaded');
+  assert.ok(!rawOf(captured[0]).toString('utf8').includes('x-amz-signature'), 'the signature never crossed the seam');
+  assertBlocked(logs, 'upload-signed-form', 'unsupported');
+});
+
+test('upload: an image the screener withholds from a POST-policy form is blocked with the D-30 notice', async () => {
+  const { sandbox, netCalls, logs } = makeWorld(() => {
+    const v = rebuiltVerdict(['POST / HTTP/1.1', 'Host: ppl-ai-file-upload.s3.amazonaws.com',
+      'content-type: multipart/form-data; boundary=FRESH'], Buffer.from('--FRESH--\r\n'), 0);
+    v.receipt.unchecked = false;
+    v.receipt.unscreened = [pngUnscreened];
+    return v;
+  });
+
+  await assert.rejects(
+    sandbox.fetch(S3_POST, { method: 'POST', body: s3PolicyForm(new Blob([Uint8Array.from([0x89, 0x50, 0x4e, 0x47])], { type: 'image/png' }), 'scan.png') }),
+    (e) => {
+      assert.match(e.message, /this image was too large to screen, so it was not sent/);
+      assert.match(e.message, /Nothing left your machine/);
+      assert.match(e.message, /\breason=upload-withheld\b/);
+      return true;
+    }
+  );
+  assert.equal(netCalls.length, 0, 'no placeholder was uploaded into the bucket');
+  assertBlocked(logs, 'upload-withheld', 'unsupported');
+});
+
+test('upload: an XHR form carrying a file is held too', async () => {
+  const captured = [];
+  const { sandbox } = makeXhrWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; });
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://api.cloudinary.com/v1_1/pplx/image/upload', true);
+  xhr.send(s3PolicyForm(new Blob(['note'], { type: 'text/plain' }), 'note.txt'));
+  await waitFor(() => xhr.sent.length === 1);
+  assert.equal(captured.length, 1, 'the form was screened before it left');
+});
+
+test('upload: a file POSTed to the AI host itself on a path its allow-list does not name is held', async () => {
+  // A narrowed host passes every path its list does not name — right for
+  // sign-in and telemetry, a leak for an upload. An upload that the catalog
+  // does not recognise must fail closed, never pass.
+  const captured = [];
+  const { sandbox } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; }, CHATGPT_PATHS);
+  const form = new FormData();
+  form.append('file', new Blob(['Jane Roe 078-05-1120'], { type: 'text/plain' }), 'notes.txt');
+  await sandbox.fetch('https://chatgpt.com/backend-api/files/upload_direct', { method: 'POST', body: form });
+  assert.equal(captured.length, 1, 'the unlisted same-origin upload was screened');
+  assert.match(rawOf(captured[0]).toString('utf8'), /^POST \/backend-api\/files\/upload_direct HTTP\/1\.1\r\nHost: chatgpt\.com\r\n/);
+});
+
+test('upload: raw file bodies by type — a typed Blob, a tus PATCH, a File — are held', async () => {
+  const captured = [];
+  const { sandbox } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; }, { File });
+  await sandbox.fetch('https://uploads.example.net/blob', { method: 'POST', body: new Blob(['%PDF-1.7'], { type: 'application/pdf' }) });
+  await sandbox.fetch('https://uploads.example.net/files/abc', {
+    method: 'PATCH',
+    headers: { 'tus-resumable': '1.0.0', 'upload-offset': '0', 'content-type': 'application/offset+octet-stream' },
+    body: Uint8Array.from([1, 2, 3])
+  });
+  await sandbox.fetch('https://uploads.example.net/raw', { method: 'POST', body: new File(['hello'], 'hello.txt', { type: 'text/plain' }) });
+  assert.equal(captured.length, 3);
+});
+
+test('upload: a form carried on a Request object, and a deferred fetch of one, are in scope too', async () => {
+  const captured = [];
+  let deferredSends = 0;
+  const { sandbox } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; },
+    { fetchLater() { deferredSends++; } });
+  const form = () => {
+    const f = new FormData();
+    f.append('file', new Blob(['Jane Roe 078-05-1120'], { type: 'text/plain' }), 'n.txt');
+    return f;
+  };
+  // A Request's own Content-Type (multipart, minted by the Request) stands in
+  // for the body we cannot see through it.
+  await sandbox.fetch(new Request('https://uploads.example.net/r', { method: 'POST', body: form() }));
+  assert.equal(captured.length, 1, 'the Request-borne form was screened');
+  assert.throws(() => sandbox.fetchLater('https://uploads.example.net/later', { method: 'POST', body: form() }),
+    /cannot be held for screening/);
+  assert.equal(deferredSends, 0, 'a deferred upload cannot be held, so it is refused');
+});
+
+test('upload: a streamed POST body cannot be looked into, so it is held and refused', async () => {
+  let meshAsked = false;
+  const { sandbox, netCalls, logs } = makeWorld(() => { meshAsked = true; return allowVerdict; });
+  const body = new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1])); c.close(); } });
+  await assert.rejects(sandbox.fetch('https://uploads.example.net/stream', { method: 'POST', body, duplex: 'half' }));
+  assert.equal(meshAsked, false);
+  assert.equal(netCalls.length, 0, 'an unreadable upload never leaves');
+  assert.match(assertBlocked(logs, 'uncapturable-stream', 'unsupported'), /\bscope=upload\b/);
+});
+
+test('upload: a beacon carrying a file is refused; telemetry beacons are not', () => {
+  const sent = [];
+  const { sandbox, logs } = makeWorld(() => allowVerdict, {
+    navigator: { sendBeacon(url, data) { sent.push(url); return true; } }
+  });
+  const form = new FormData();
+  form.append('file', new Blob(['x'], { type: 'image/png' }), 'a.png');
+  assert.equal(sandbox.navigator.sendBeacon('https://collector.example.net/b', form), false);
+  assert.equal(sandbox.navigator.sendBeacon('https://collector.example.net/t', new Blob(['{"e":1}'], { type: 'application/json' })), true);
+  assert.equal(sandbox.navigator.sendBeacon('https://collector.example.net/t', '{"e":1}'), true);
+  assert.deepEqual(sent, ['https://collector.example.net/t', 'https://collector.example.net/t']);
+  assert.match(assertBlocked(logs, 'uncapturable-beacon'), /\bscope=upload\b/);
+});
+
+test('upload: the body test keeps the false-positive floor — telemetry shapes still pass', async () => {
+  let meshAsked = false;
+  const { sandbox, netCalls, logs } = makeDebugWorld(() => { meshAsked = true; return allowVerdict; });
+  const strings = new FormData();
+  strings.append('event', 'page_view');
+  const passers = [
+    ['https://o123.ingest.sentry.io/api/1/envelope/', { method: 'POST', body: new Blob(['{"e":1}'], { type: 'application/x-sentry-envelope' }) }],
+    ['https://api.segment.io/v1/t', { method: 'POST', body: new Blob(['{"a":1}'], { type: 'application/json' }) }],
+    ['https://browser-intake-datadoghq.com/api/v2/rum', { method: 'POST', body: new Blob(['x']) }],
+    ['https://www.google-analytics.com/g/collect', { method: 'POST', body: new URLSearchParams('v=2&tid=G-1') }],
+    ['https://forms.example.net/subscribe', { method: 'POST', body: strings }],
+    ['https://metrics.example.net/bin', { method: 'POST', body: Uint8Array.from([1, 2, 3]) }],
+    ['https://api.example.net/item/1', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{"title":"x"}' }]
+  ];
+  for (const [url, init] of passers) await sandbox.fetch(url, init);
+  assert.equal(meshAsked, false, 'not one of these may reach the desktop app');
+  assert.equal(netCalls.length, passers.length);
+  assert.equal(logs.filter((l) => l.level === 'warn').length, 0);
+});
+
+test('upload: on a search page that screens nothing, a file POST is left alone as before', async () => {
+  let meshAsked = false;
+  const { sandbox, netCalls } = makeWorld(() => { meshAsked = true; return allowVerdict; }, {
+    location: { href: 'https://www.google.com/', origin: 'https://www.google.com', hostname: 'www.google.com' },
+    SONOMOS_WEB_HOSTS: ['chatgpt.com', 'www.google.com'],
+    SONOMOS_CAPTURE_PATHS: { 'www.google.com': [] }
+  });
+  const form = new FormData();
+  form.append('encoded_image', new Blob(['x'], { type: 'image/jpeg' }), 'photo.jpg');
+  await sandbox.fetch('https://lens.google.com/v3/upload', { method: 'POST', body: form });
+  assert.equal(meshAsked, false, 'the catalog says this surface has no screened submission path');
+  assert.equal(netCalls.length, 1);
+});
+
+test('pre-consent: a form carrying a file is in upload scope by its TYPE alone', async () => {
+  let captures = 0;
+  const { sandbox } = makeWorld(() => { captures++; return allowVerdict; }, { navigator: { userAgent: 'Chrome/130.0 Edg/130.0' } });
+  await assert.rejects(sandbox.fetch(S3_POST, { method: 'POST', body: s3PolicyForm(new Blob(['private'], { type: 'text/plain' })) }), /Data sharing/);
+  assert.equal(captures, 0);
 });
 
 // ── frames with no url of their own ────────────────────────────────

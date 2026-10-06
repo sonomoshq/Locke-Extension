@@ -17,6 +17,25 @@ strict SemVer.
   explicit release-review blocker. No manifest or runtime behavior changed.
 
 **Fixed**
+- Uploads that declared nothing in a header left unscreened: Perplexity's
+  attachments (an S3 POST-policy form to `ppl-ai-file-upload.s3.amazonaws.com`,
+  images the same way to Cloudinary), a tus `PATCH`, and a file POSTed to an
+  AI host's own path that its capture-path allow-list does not name. A `POST`
+  or `PATCH` from a screened AI page is now held when its body is a file, a
+  form with a file in it, a file-typed Blob, an unreadable stream, or a
+  declared multipart/file media type; only types are read to decide, so the
+  same test blocks such an upload before data-sharing consent. A beacon
+  carrying a file is refused. Telemetry shapes (strings, JSON/text Blobs,
+  form-encoded data) still pass untouched. A signed form's credential and
+  signature fields (S3 POST policy, Cloudinary, GCS) are left out of what is
+  screened, as a pre-signed URL's query string already was, so a clean
+  upload is not masked into one the storage provider refuses; a `redact` on
+  a signed form is refused (`upload-signed-form`) rather than re-sent.
+- On the raw-upload path a withheld image is refused with decision D-30's
+  notice ("this image was too large to screen, so it was not sent"), the
+  desktop app's wording, instead of the generic "could not be examined".
+- Re-vendored the surface catalog: `chatgpt.com` admits `/backend-api/files`
+  (the attachment create call, which carries the file name).
 - A tab that was already open when the extension was reloaded, updated or
   re-enabled blocked every in-scope request with a generic reason, so a
   healthy install looked broken. The block itself was correct and stays
