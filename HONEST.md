@@ -305,9 +305,6 @@ verdict means no send. The residuals we accept and document:
   **Perplexity desktop app uploads are not screened.** File uploads from the
   Perplexity desktop app aren't screened (this extension covers the
   Perplexity website only). We plan to add this in a future release.
-  **Some names can be missed in two kinds of text.** The desktop app's
-  detection can miss some names in short all-capital sentences and in
-  escaped tool-result text; other personal data is not affected.
   Within the hooked transports, bodies are captured as exact bytes
   (strings, Blob, ArrayBuffer, TypedArray, URLSearchParams, FormData —
   including the multipart boundary as serialized); what can't be
