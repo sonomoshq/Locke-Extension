@@ -283,6 +283,14 @@ verdict means no send. The residuals we accept and document:
   than by omission. `<a ping>`, `<form method="POST">`, top-level
   navigations and CSP/reporting endpoints are not script calls and are
   out of reach of any hook in this file.
+  **Microsoft Copilot is not screened.** Copilot (copilot.microsoft.com)
+  sends your messages over a WebSocket, which this extension does not hook.
+  Prompts you type into Copilot in the browser are sent to Microsoft
+  unscreened, and Locke records nothing for them. Files and images you attach
+  are uploaded separately and are not screened either. The Copilot app for
+  Windows is not screened by Locke either (its chat is also a WebSocket).
+  GitHub Copilot in VS Code and Visual Studio is a different product and is
+  screened. We plan to add this in a future release.
   Within the hooked transports, bodies are captured as exact bytes
   (strings, Blob, ArrayBuffer, TypedArray, URLSearchParams, FormData —
   including the multipart boundary as serialized); what can't be
