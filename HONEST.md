@@ -299,6 +299,10 @@ verdict means no send. The residuals we accept and document:
   Windows is not screened by Locke either (its chat is also a WebSocket).
   GitHub Copilot in VS Code and Visual Studio is a different product and is
   screened. We plan to add this in a future release.
+  **Images are not screened.** Images and screenshots you send to an AI
+  service aren't screened, and NSFW filtering isn't in this release. An
+  image is sent as it is unless you or your Teams admin set images to
+  Block. We plan to add this in a future release.
   **Photo metadata is not removed.** Photo metadata, such as location,
   isn't removed from pictures you send. We plan to add this in a future
   release.
@@ -449,6 +453,14 @@ verdict means no send. The residuals we accept and document:
   Locke cannot read are blocked as before. The extension never decides
   this itself, and when the desktop app cannot answer, audio is blocked
   like everything else.
+  **Images are the same (decided 2026-10-06, images and NSFW are V1.X).**
+  Locke cannot screen images in this release (no text reading, no NSFW
+  filtering). The extension relays an image upload like any file and obeys
+  the desktop app's answer: by default the app allows it, so an image leaves
+  **unscreened**; if the device setting or a Teams policy says Block, the
+  app blocks it and the extension refuses it. A file whose content is
+  another format (a document or archive with an image extension, or an image
+  with a document appended) is judged by what it really is, by the app.
   **What is still not covered:** a raw `POST` of file bytes that
   declares no type at all — an untyped `ArrayBuffer` or a plain string
   — is indistinguishable from telemetry by anything the page hands us,
@@ -476,12 +488,11 @@ verdict means no send. The residuals we accept and document:
   upload of the user's file, and the model would be shown a blank
   square with nobody told. So a withhold on this path is a **block**
   (`upload-withheld`) — nothing left the machine either way, and this
-  way we can say so. Only an image is ever withheld, so the sentence the
-  user reads is decision D-30's image notice, in the desktop app's own
-  words: "this image was too large to screen, so it was not sent"
-  (updated 2026-10-06; the guard's verdict does not say WHY an image
-  could not be examined, so the same notice also covers an image the
-  screener could not read for another reason). Likewise, if the request commits to its exact
+  way we can say so. Only an image is ever withheld, and since images
+  are V1.X (2026-10-06) the only reason is the file-type setting: the
+  sentence the user reads is "this image was blocked by your file-type
+  setting, so it was not sent" (it used to be decision D-30's "too large
+  to screen", which is dormant until image screening returns). Likewise, if the request commits to its exact
   bytes (`Content-MD5`, a real `x-amz-content-sha256`, `x-goog-hash`)
   we cannot recompute the checksum for a redacted body, so a `redact`
   becomes a block (`upload-integrity-locked`) rather than an upload the

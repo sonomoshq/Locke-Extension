@@ -1866,12 +1866,14 @@
     //
     // A withhold only ever happens to an image (png/jpeg/gif/webp) — every
     // other unexaminable item is a refusal — so this is the image notice, in
-    // decision D-30's words, the same words the desktop app's toast uses
-    // (Desktop-Frontend src/hooks/use-detection-toasts.ts). The app's second
+    // the desktop app's words (Desktop-Frontend src/hooks/use-detection-toasts.ts).
+    // Images are V1.X (2026-10-06): image screening is dormant, so an image is
+    // only ever withheld because the file-type setting says Block (it used to
+    // be D-30's "too large to screen"). The app's second
     // sentence ("the rest of your message was screened and sent") is not
     // true here: on a raw upload the image IS the whole request.
     'upload-withheld': ['unsupported',
-      'this image was too large to screen, so it was not sent. Nothing left your machine — attach a smaller image, or send the details as text.'],
+      'this image was blocked by your file-type setting, so it was not sent. Nothing left your machine — change the setting in Locke, or send the details as text.'],
     'upload-integrity-locked': ['unsupported',
       'Locke found something in this file that needed removing, but the upload commits to the original bytes with a checksum, so the screened version could not be sent in its place. Nothing left your machine.'],
     'upload-signed-form': ['unsupported',

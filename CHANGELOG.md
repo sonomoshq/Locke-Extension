@@ -8,6 +8,9 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Changed**
+- Images are V1.X (2026-10-06): the extension holds and relays an image upload like any file and obeys the desktop app, which sends it unscreened by default and blocks it when the file-type setting says Block. A blocked image is refused with "this image was blocked by your file-type setting, so it was not sent" (it was D-30's "too large to screen"). NSFW filtering is not in V1; we plan to add this in a future release.
+
 **Documentation**
 - Correct privacy disclosures to describe local native-app transfer of
   request content, files and metadata, plus actual browser retention and

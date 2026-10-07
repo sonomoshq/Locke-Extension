@@ -2259,7 +2259,7 @@ test('upload: an unexaminable attachment is blocked, never replaced with a place
     sandbox.fetch(STORAGE_PUT, { method: 'PUT', headers: { 'content-type': 'image/png' }, body: 'realbytes' }),
     (e) => {
       // D-30's notice, in the desktop app toast's own words.
-      assert.match(e.message, /this image was too large to screen, so it was not sent/);
+      assert.match(e.message, /this image was blocked by your file-type setting, so it was not sent/);
       assert.match(e.message, /Nothing left your machine/);
       assert.match(e.message, /\bkind=unsupported\b/);
       assert.match(e.message, /\breason=upload-withheld\b/);
@@ -2493,7 +2493,7 @@ test('upload: an XHR signed form is screened without its signing fields and bloc
   assertBlocked(logs, 'upload-signed-form', 'unsupported');
 });
 
-test('upload: an image the screener withholds from a POST-policy form is blocked with the D-30 notice', async () => {
+test('upload: an image the screener withholds from a POST-policy form is blocked with the file-type-setting notice', async () => {
   const { sandbox, netCalls, logs } = makeWorld(() => {
     const v = rebuiltVerdict(['POST / HTTP/1.1', 'Host: ppl-ai-file-upload.s3.amazonaws.com',
       'content-type: multipart/form-data; boundary=FRESH'], Buffer.from('--FRESH--\r\n'), 0);
@@ -2505,7 +2505,7 @@ test('upload: an image the screener withholds from a POST-policy form is blocked
   await assert.rejects(
     sandbox.fetch(S3_POST, { method: 'POST', body: s3PolicyForm(new Blob([Uint8Array.from([0x89, 0x50, 0x4e, 0x47])], { type: 'image/png' }), 'scan.png') }),
     (e) => {
-      assert.match(e.message, /this image was too large to screen, so it was not sent/);
+      assert.match(e.message, /this image was blocked by your file-type setting, so it was not sent/);
       assert.match(e.message, /Nothing left your machine/);
       assert.match(e.message, /\breason=upload-withheld\b/);
       return true;
@@ -4352,4 +4352,41 @@ test('pre-consent XHR keeps only routing metadata, not query credentials', () =>
   assert.equal(xhr.__sonomos.url.username, '');
   assert.equal(xhr.__sonomos.url.password, '');
   assert.equal(xhr.__sonomos.url.pathname, '/upload');
+});
+
+// ── images (Nate, 2026-10-06: images and NSFW are V1.X) ─────────────
+//
+// Image screening is dormant in V1: the desktop app answers a clean allow for
+// an image by default (sent unscreened) and a block when the device setting or
+// the team policy says Block. The extension, as with audio, holds the upload,
+// relays it and obeys; it never decides.
+
+function imageForm(type = 'image/png', name = 'screenshot.png') {
+  const form = new FormData();
+  form.append('file', new Blob([Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])], { type }), name);
+  return form;
+}
+
+test('images: an upload is relayed and, on the allow the app gives by default, sent as the page built it', async () => {
+  const captured = [];
+  const { sandbox, netCalls, logs } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; }, CHATGPT_PATHS);
+  await sandbox.fetch(DICTATION_URL, { method: 'POST', body: imageForm() });
+  assert.equal(captured.length, 1, 'held and relayed, so the app (and a team policy) can decide');
+  assert.match(rawOf(captured[0]).toString('latin1'), /Content-Type: image\/png/i);
+  assert.equal(netCalls.length, 1, 'allowed: the image leaves, unscreened');
+  assert.ok(Buffer.from(netCalls[0][1].body).includes(Buffer.from([0x89, 0x50, 0x4e, 0x47])), 'the image itself went out unchanged');
+  assert.equal(logs.filter((l) => l.level === 'warn').length, 0);
+});
+
+test('images: when the desktop app says Block the image never leaves, and the notice names the file-type setting', async () => {
+  const block = () => ({ ok: true, receipt: { decision: 'block', reason: '1 item(s) could not be examined (file: image/png)', redactedCount: 0 } });
+  const { sandbox, netCalls } = makeWorld(block, CHATGPT_PATHS);
+  await assert.rejects(sandbox.fetch(DICTATION_URL, { method: 'POST', body: imageForm() }), blockedError);
+  assert.equal(netCalls.length, 0);
+});
+
+test('images: the extension adds no pass of its own, a desktop app that cannot answer still blocks it', async () => {
+  const { sandbox, netCalls } = makeWorld(() => ({ ok: false, code: 'no-bridge', message: 'not found' }), CHATGPT_PATHS);
+  await assert.rejects(sandbox.fetch(DICTATION_URL, { method: 'POST', body: imageForm() }));
+  assert.equal(netCalls.length, 0);
 });
