@@ -8,6 +8,34 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Changed — every website goes to the classifier (super PR #15)**
+- Content scripts now match every http/https page (`http://*/*`,
+  `https://*/*`; still no `<all_urls>`, no new host permission). Every bodied
+  fetch/XHR is held and relayed to the Locke desktop app, whose guard
+  classifies it on-device and screens only AI traffic; a request classified
+  not-AI comes back a plain `allow`. The extension no longer decides what is
+  an AI site.
+- Each capture carries a `coverage` hint from the catalog — `capture_path`
+  (a catalog prompt path, or an upload a catalog page started: screened
+  regardless), `catalog_host` or `open_web` (classified first). Unknown or
+  absent words are dropped, which the native host reads as `capture_path`.
+- Path allow-lists no longer stop a request being held; they demote it to
+  `catalog_host`. The `web_screening: "none"` search hosts' own pages are
+  classified too, instead of passed through.
+- Fail-closed is unchanged and now applies on every site: with the desktop
+  app down, bodied requests everywhere are blocked unless the user opened a
+  fail-open window in the desktop app.
+- `sendBeacon`, `fetchLater()` and synchronous XHR are refused only on
+  catalog prompt paths and sent elsewhere (they cannot be held, so cannot be
+  classified). Without data-sharing consent, only catalog prompt paths are
+  refused; everything else is released untouched.
+- Off-catalog captures claim no provider, even from a catalog page; only the
+  upload path borrows the page's provider.
+- Bodyless requests no longer wait for the page-start config window.
+- Manifest description, store listing, permission justifications, DPIA scope,
+  risk register R-07 and popup copy updated to match. Chrome/Edge will ask
+  users to re-approve the broader access on update.
+
 **Documentation**
 - Correct privacy disclosures to describe local native-app transfer of
   request content, files and metadata, plus actual browser retention and

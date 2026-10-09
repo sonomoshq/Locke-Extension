@@ -29,7 +29,7 @@
 
   // Duplicated from shared/constants.js on purpose — a content script cannot
   // import an ES module. Keep them in step (PAGE_MSG, SETTINGS_KEY,
-  // SHIM_SETTING_KEYS, and the two DEFAULTS values).
+  // SHIM_SETTING_KEYS, COVERAGE_WORDS, and the two DEFAULTS values).
   const CAPTURE = 'SONOMOS_CAPTURE';
   const VERDICT = 'SONOMOS_VERDICT';
   const CONFIG = 'SONOMOS_CONFIG';
@@ -44,6 +44,7 @@
   // storage.local only — never storage.managed, because it is not a policy
   // knob, and never merged into `settings`, because nothing here may edit it.
   const DISABLED_WEB_HOSTS_KEY = 'disabledWebHosts';
+  const COVERAGE_WORDS = new Set(['capture_path', 'catalog_host', 'open_web']);
 
   // Loaded by the manifest in THIS isolated world, independently of the
   // page's mutable MAIN-world globals. Provider labels are untrusted page
@@ -173,6 +174,14 @@
     const provider = typeof data.provider === 'string' && providerIds.has(data.provider)
       ? data.provider : null;
 
+    // How much of the capture decision the catalog already made (shim.js
+    // coverageFor): the guard screens `capture_path` regardless and classifies
+    // the rest first. Only the three known words are relayed; anything else is
+    // dropped, and an absent hint is read downstream as "screen regardless" —
+    // the old behaviour. A page that forges `open_web` on a capture path gains
+    // nothing it could not get from a pristine `fetch` (HONEST.md).
+    const coverage = COVERAGE_WORDS.has(data.coverage) ? data.coverage : null;
+
     const reply = (verdict) => {
       try {
         // the receiving DOCUMENT's origin, not by listener, so every script in this
@@ -203,7 +212,8 @@
       const resp = askWorker({
         type: 'capture',
         requestB64: data.requestB64,
-        ...(provider ? { provider } : {})
+        ...(provider ? { provider } : {}),
+        ...(coverage ? { coverage } : {})
       });
       if (resp && typeof resp.then === 'function') {
         resp.then((v) => reply(v ?? null), (e) => {

@@ -10,6 +10,7 @@ import {
   AUDIT_MAX_ENTRIES,
   BLOCK_BADGE_MS,
   BRIDGE_MSG,
+  COVERAGE_WORDS,
   DEFAULTS,
   DISABLED_WEB_HOSTS_KEY,
   hostMatches,
@@ -861,8 +862,11 @@ async function refreshDebugFlag() {
 // `provider` is the catalog id the shim attributed this capture to, relayed
 // verbatim — this worker holds no catalog of its own and must not coin one.
 // Omitted from the frame entirely when there is none, so an unattributed
-// capture is byte-identical to the frame older builds sent.
-async function captureViaHost(requestB64, provider) {
+// capture is byte-identical to the frame older builds sent. `coverage` is the
+// shim's catalog hint for the guard's discovery gate (capture_path |
+// catalog_host | open_web), relayed the same way: verbatim when it is one of
+// the known words, omitted otherwise — and omitted means "screen regardless".
+async function captureViaHost(requestB64, provider, coverage) {
   const startedAt = Date.now();
   // Base64 length, not the payload: enough to tell "a 4 MB upload timed out"
   // from "a 2 KB prompt was rejected".
@@ -871,7 +875,8 @@ async function captureViaHost(requestB64, provider) {
     const response = await nativeRequest({
       type: BRIDGE_MSG.CAPTURE,
       requestB64,
-      ...(provider ? { provider } : {})
+      ...(provider ? { provider } : {}),
+      ...(COVERAGE_WORDS.has(coverage) ? { coverage } : {})
     }, NATIVE_CALL_TIMEOUT_MS, 'native-timeout');
     const ms = Date.now() - startedAt;
     if (!response || typeof response !== 'object') {
@@ -1013,11 +1018,12 @@ ext.alarms.onAlarm.addListener((alarm) => {
 
 ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!isTrustedSender(sender)) return false;
-  // One held AI request (raw, base64) to relay to the desktop app.
+  // One held request (raw, base64) to relay to the desktop app.
   if (message?.type === MSG.CAPTURE && typeof message.requestB64 === 'string') {
     captureViaHost(
       message.requestB64,
-      typeof message.provider === 'string' && message.provider ? message.provider : null
+      typeof message.provider === 'string' && message.provider ? message.provider : null,
+      message.coverage
     )
       .then(sendResponse)
       .catch((e) => {

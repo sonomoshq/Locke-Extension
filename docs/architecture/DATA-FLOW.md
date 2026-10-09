@@ -4,10 +4,15 @@ How a single AI request travels from the page out to the LLM provider — and ho
 before it is allowed to leave, it makes a round-trip into the Locke desktop app
 for screening.
 
-The extension is a **hold-and-enforce capture surface**. When the page sends a
-bodied request within the host/path and user/admin scope, the shim HOLDS it
-and sends the synthesized raw HTTP request to the desktop app, and acts on the verdict: release it unchanged
-(`allow`), re-issue it with the screener's rebuilt body (`redact`), or block it.
+The extension is a **hold-and-enforce capture surface**. When any page sends a
+bodied request to a host the user/admin has not switched off, the shim HOLDS
+it and sends the synthesized raw HTTP request to the desktop app with a
+`coverage` hint. The app's guard first **classifies** the request (is this AI
+traffic?) and screens it only if it is — or if the hint says `capture_path`
+(a catalog AI service's prompt path, or an upload a catalog page started),
+which is screened regardless. The shim acts on the verdict: release it
+unchanged (`allow`, also the answer for a request classified not-AI), re-issue
+it with the screener's rebuilt body (`redact`), or block it.
 Detection and redaction still happen **in the desktop app**, never in the
 extension — the extension only applies the result. The failure posture is
 **fail-closed**: no verdict, no send.
@@ -25,7 +30,7 @@ extension — the extension only applies the result. The failure posture is
 │  │                  │                                            │
 │  │  ┌────────────┐  │                                            │
 │  │  │ shim.js    │  │  MAIN world; intercepts outbound fetch/XHR │
-│  │  │ (MAIN)     │  │  to AI web surfaces, HOLDS the request,    │
+│  │  │ (MAIN)     │  │  on every page, HOLDS the request,         │
 │  │  └─────┬──────┘  │  synthesizes the raw HTTP request (base64),│
 │  │        │         │  and enforces the verdict. FAIL CLOSED.    │
 │  │  postMessage     │  (SONOMOS_CAPTURE ⇄ SONOMOS_VERDICT,       │
@@ -51,7 +56,7 @@ extension — the extension only applies the result. The failure posture is
 │           │ length-prefixed JSON over a user-only 0600           │
 │           │ Unix domain socket — no network hop                  │
 │  ┌────────▼─────────────────────────────────────────────────────┐│
-│  │ Locke desktop app  (parse + screen + redact)                  ││
+│  │ Locke desktop app  (classify → parse + screen + redact)       ││
 │  └────────────────────────────────────────────────────────────────┘
 │                                                                  │
 │  The app returns a verdict, with a whole rebuilt raw request on   │
@@ -63,27 +68,34 @@ extension — the extension only applies the result. The failure posture is
 > **Page-side capture surfaces (`content/shim.js`).** `fetch` and
 > `XMLHttpRequest` are the only surfaces **held and screened**. There are no
 > `WebSocket` or `EventSource` hooks. `navigator.sendBeacon` is hooked but
-> cannot be held (it answers synchronously), so an in-scope beacon carrying
-> data is **refused** — it returns `false` and nothing is sent. Bodies are
+> cannot be held (it answers synchronously), so a beacon carrying data to a
+> catalog prompt path is **refused** — it returns `false` and nothing is sent;
+> anywhere else it cannot be classified and is sent. Bodies are
 > captured as **exact bytes**: strings as UTF-8; Blob / ArrayBuffer /
 > TypedArray / URLSearchParams / FormData serialized once via
 > `new Response(body)` (for FormData the generated multipart boundary and its
 > matching Content-Type come from that same serialization). What can't be
-> captured — a ReadableStream body, a synchronous XHR, an unresolvable target,
-> anything over the 8 MiB cap — is in scope but unscreenable and therefore
-> **blocked**, never sent unchecked.
+> captured — a ReadableStream body, an unresolvable target, anything over the
+> 8 MiB cap — is in scope but unscreenable and therefore **blocked**, never
+> sent unchecked. A synchronous XHR is blocked on a catalog prompt path and
+> sent elsewhere, for the beacon's reason.
 >
-> **Coverage is request-specific.** The catalog bounds script injection to
-> named AI hosts and matched subdomains/frames; there is no `<all_urls>`
-> grant. `isScreenedUrl` applies host/provider/disabled-site checks and
-> capture-path/skip rules. A separate `isUploadScope` path handles recognized
-> cross-origin object writes initiated by a screened page (HTTPS bodied PUT,
-> or POST with recognized object-write headers). It needs no new destination
-> host permission. Path-excluded traffic, unrecognized uploads, prompts sent
-> by navigation, WebSockets and workers remain coverage gaps. See
-> [`HONEST.md`](../../HONEST.md); supported host does not mean every request
-> on that host is screened. In-scope `fetchLater` and beacons cannot wait for
-> a verdict and are refused rather than screened.
+> **Coverage is request-specific.** Scripts are injected on every http(s)
+> page (`http://*/*`, `https://*/*`; no `<all_urls>`, so no `file://`).
+> `isScreenedUrl` applies provider/disabled-site checks only; the catalog's
+> host and capture-path/skip rules now set the `coverage` hint
+> (`coverageFor`): `capture_path`, `catalog_host` or `open_web`. A separate
+> `isUploadScope` path handles recognized cross-origin object writes initiated
+> by a catalog page (HTTPS bodied PUT, or POST with recognized object-write
+> headers) and always claims `capture_path`. It needs no new destination host
+> permission. Requests the classifier gets wrong, prompts sent by navigation,
+> WebSockets, workers, and unholdable sends (`fetchLater`, beacons, sync XHR)
+> off catalog prompt paths remain coverage gaps. See
+> [`HONEST.md`](../../HONEST.md).
+>
+> **Without data-sharing consent** (where the browser requires it), nothing
+> is relayed: catalog prompt paths are refused, and every other request is
+> released untouched, since it could not be classified.
 
 ## Where request content lives
 
@@ -93,8 +105,8 @@ extension — the extension only applies the result. The failure posture is
 | `shim.js` page-world | yes | Holds the outbound request; synthesizes method, destination, path/query, page-set headers and body/file bytes as base64. |
 | `content-script.js` → service worker | yes | Relays `requestB64` via `chrome.runtime.sendMessage` and returns the verdict. |
 | `service-worker.js` | yes (passes through) | Relays `requestB64` to the native host. Never logs bodies — only the receipt metadata and shape-only audit events. |
-| Native messaging host | yes | Receives the base64 request and optional provider ID for the desktop app. Host implementation and retention are outside this repository. |
-| Locke desktop app | yes | Parse + scan + redaction happens here — never in the extension. |
+| Native messaging host | yes | Receives the base64 request, optional provider ID and `coverage` hint for the desktop app. Host implementation and retention are outside this repository. |
+| Locke desktop app | yes | Classification, then parse + scan + redaction, happen here — never in the extension. A request classified not-AI is answered `allow` without being scanned. |
 | Page → LLM provider | yes | Only after an `allow` (as held) or `redact` (the app's rebuilt body, as bytes). Blocked requests never leave. |
 
 ## Local processing and remote destinations
@@ -106,7 +118,7 @@ uses loopback HTTP at `127.0.0.1:18795` for `/heartbeat` (`browser`, `version`)
 and Chromium `/register-extension` (`id`, `browser`, `version`). The browser
 adds the extension Origin header. Neither JSON body contains page content.
 
-The page's allowed/redacted request still goes to its original AI website or
+The page's allowed/redacted request still goes to its original website or
 upload destination. “Local screening” does not mean that the user's request
 never reaches a remote provider, that no personal data is processed, or that
 the desktop app retains no metadata. See the
@@ -176,11 +188,12 @@ above).
   purely because the shim gave up first.
 - **Uncapturable body** (stream / oversized / unreadable): blocked without a
   round-trip — the desktop app never saw it, so it doesn't leave.
-- **Unholdable transport** (synchronous XHR, `navigator.sendBeacon` with data):
-  refused without a round-trip. There is no point at which a verdict could be
+- **Unholdable transport** (synchronous XHR, `navigator.sendBeacon` with data)
+  on a catalog prompt path: refused without a round-trip. Elsewhere it is
+  sent, because it cannot be classified. There is no point at which a verdict could be
   applied, so there is nothing to wait for.
 - **Unresolvable target** (a bodied request whose URL will not parse): blocked.
-  The shim runs on AI surfaces and nowhere else, so a request we cannot even
+  The shim treats every page as in scope, so a request we cannot even
   address is a "couldn't check" state, not somebody else's traffic.
 
 ### Which KIND of block

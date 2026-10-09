@@ -611,6 +611,34 @@ test('content-script: a malformed provider claim is dropped, not relayed', async
   }
 });
 
+// ── the coverage hint (the discovery gate) ──────────────────────────────
+//
+// The shim says how much of the capture decision the catalog already made;
+// the guard screens `capture_path` regardless and classifies the rest. Only
+// the three known words cross this hop — anything else is dropped, and an
+// absent hint is read downstream as "screen regardless".
+
+test('content-script: a known coverage word is relayed to the worker', async () => {
+  const world = makeWorld({});
+  for (const [i, coverage] of ['capture_path', 'catalog_host', 'open_web'].entries()) {
+    world.relayed.length = 0;
+    world.fromPage({ ...capture(20 + i), coverage });
+    await settle();
+    assert.deepEqual(plain(world.relayed[0]), { type: 'capture', requestB64: PAYLOAD_B64, coverage });
+  }
+});
+
+test('content-script: an unknown coverage word is dropped, not relayed', async () => {
+  const world = makeWorld({});
+  for (const junk of ['everything', 'CAPTURE_PATH', { evil: true }, 42, '', null]) {
+    world.relayed.length = 0;
+    world.fromPage({ ...capture(30), coverage: junk });
+    await settle();
+    assert.deepEqual(plain(world.relayed[0]), { type: 'capture', requestB64: PAYLOAD_B64 },
+      `coverage ${JSON.stringify(junk)} must not reach the worker`);
+  }
+});
+
 for (const dialect of ['chromium', 'firefox']) {
   test(`content-script (${dialect}): unknown provider content never crosses the relay boundary`, async () => {
     const world = makeWorld({ dialect });

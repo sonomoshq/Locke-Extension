@@ -1,9 +1,10 @@
 // Copyright © 2026 Sonomos, Inc. All rights reserved.
 // Runs in the page's MAIN world at document_start (declared in manifest.json).
 //
-// Job: intercept outbound `fetch` / `XMLHttpRequest` calls to AI web surfaces,
-// HOLD the request, send it to the Locke desktop app for screening, get the
-// verdict back, and act on it before anything leaves.
+// Job: intercept outbound `fetch` / `XMLHttpRequest` calls on every web page,
+// HOLD each bodied request, send it to the Locke desktop app — whose guard
+// first CLASSIFIES it (is this AI traffic?) and screens it when it is — get
+// the verdict back, and act on it before anything leaves.
 //
 // v3 wire (the parse-and-reconstruct redesign): the shim parses NOTHING. It
 // captures the exact body bytes the page is about to send, SYNTHESIZES a raw
@@ -32,17 +33,31 @@
 // never a decision the extension makes; when it is exercised, the verdict says
 // so (`unchecked`) and we say so too.
 //
-// Hard rule: out-of-scope requests (non-AI host, or no body to scan) must pass
-// through untouched — every hook wraps its scoping work in try/catch and only
-// ever alters requests it has deliberately committed to enforcing.
+// Hard rule: out-of-scope requests (a host the user switched off, or no body
+// to scan) must pass through untouched — every hook wraps its scoping work in
+// try/catch and only ever alters requests it has deliberately committed to
+// enforcing.
 //
-// SCOPE is two things, not one. The first is the request's HOST being a
-// catalog AI surface. The second — see SCOPE.UPLOAD below — is a cross-origin
-// object write initiated BY a catalog AI surface: the pre-signed `PUT` an AI
-// web app uses to send an attachment straight to object storage, which by
-// definition never addresses an AI host and used to leave unscreened. Both are
-// bounded by the same catalog, because the shim only ever runs on a page the
-// catalog names; neither adds a host to it.
+// SCOPE is every bodied http(s) request on every page (super PR #15, the
+// discovery gate). The extension no longer decides what counts as AI traffic:
+// the guard's classifier does, the same one the Proxy now defers to. What the
+// extension still knows, and the classifier cannot, is WHERE a request sits
+// relative to the catalog, so every capture carries a `coverage` hint (see
+// coverageFor) that tells the guard how much to trust its own classification:
+//
+//   capture_path — a catalog host on a path its allow-list names as carrying a
+//                  prompt (today's screened set), or a cross-origin upload a
+//                  catalog surface initiated (SCOPE.UPLOAD below): screened
+//                  whatever the classifier says, exactly as before.
+//   catalog_host — a catalog host, off its capture paths (sign-in, billing,
+//                  telemetry): classified, screened only if it looks like AI.
+//   open_web     — anything else: classified, screened only if it looks like
+//                  AI. A request classified not-AI comes back a plain allow.
+//
+// The catalog still bounds the two places the extension acts on its own:
+// SCOPE.UPLOAD (initiated BY a catalog surface) and the unholdable transports
+// (sendBeacon / fetchLater), which are refused only on capture paths — they
+// cannot be classified, and refusing them on every site would break the web.
 //
 // TRANSPORTS: `fetch` and `XMLHttpRequest` are held and screened.
 // `navigator.sendBeacon` and `fetchLater()` cannot be held at all (both answer
@@ -243,29 +258,39 @@
     return pathDeclinedBy(host, path) === null;
   }
 
-  // The request-level gate. `isScreenedHost` answers for a HOST; this answers
-  // for a REQUEST, and every hook that has a URL must ask this one — a hook
-  // that asks the host-only question holds sentinel again.
+  // The request-level gate: every http(s) request to a host still in scope.
+  // Path no longer decides whether a request is HELD — the guard's classifier
+  // does that now, and the path's say travels as the `coverage` hint instead
+  // (coverageFor). Holding sentinel and sign-in again is safe for that reason:
+  // they arrive as `catalog_host`, classify not-AI, and come back a plain
+  // allow without ever being screened.
+  function isScreenedUrl(url) {
+    try {
+      if (!url || (url.protocol !== 'https:' && url.protocol !== 'http:')) return false;
+      return isScreenedHost(url.hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  // The OLD request-level gate — catalog host AND capture path — kept for the
+  // one place it still decides: the transports that cannot be held
+  // (sendBeacon, fetchLater) and so cannot be classified either. Refusing
+  // those on a capture path is what this file always did; refusing them on
+  // every site would break analytics and unload saves across the whole web.
   //
   // ## Why the narrowed case is logged
   //
-  // A path the allow-list declines never leaves the browser, so it appears in
-  // NO file log anywhere: nothing downstream ever saw it, nothing was relayed,
-  // the audit log has no connection to record. From every log an operator can
-  // read, "we deliberately did not screen this path" and "this was never our
-  // host" are the same silence — and telling those two apart is most of the
-  // work of explaining why a surface looks unscreened.
-  //
-  // So the narrowing says so. Only when the HOST is one we screen: an
-  // ordinary third-party request must stay silent, or a busy page turns this
-  // into the noise everyone learns to ignore. `console.debug`, because a
-  // narrowed passthrough is the healthy path, not a failure — the path is
-  // being left alone on purpose. Path only, never `url.search`: a query string
-  // can carry the prompt itself. `by` names the rule that declined it — see
-  // pathDeclinedBy.
-  function isScreenedUrl(url) {
+  // A beacon the allow-list declines never leaves the browser for screening,
+  // so it appears in NO file log anywhere. From every log an operator can read,
+  // "we deliberately did not refuse this path" and "this was never our host"
+  // are the same silence — so the narrowing says so, only for a catalog host
+  // (an ordinary third-party beacon must stay silent), path only, never
+  // `url.search`: a query string can carry the prompt itself. `by` names the
+  // rule that declined it — see pathDeclinedBy.
+  function isCapturePathUrl(url) {
     try {
-      if (!url || !isScreenedHost(url.hostname)) return false;
+      if (!url || !isCatalogSurface(url.hostname)) return false;
       const declined = pathDeclinedBy(url.hostname, url.pathname);
       if (declined === null) return true;
       debug('path-not-screened', { host: url.hostname, path: url.pathname, by: declined });
@@ -316,15 +341,47 @@
   // Normally the request's own target. The exception is the cross-origin
   // upload path: those go to S3/GCS/Azure, which are in nobody's catalog, so
   // the target names no provider. Falling back to the page we are running in
-  // is not a guess — this shim is injected on catalog surfaces and nowhere
-  // else, so the page IS the surface the user is sending to, and an attachment
-  // to a Claude conversation belongs on the same row as the prompt it went
-  // with. `null` when neither resolves: absent is honest, and the receiver
-  // renders it as "unknown" rather than mislabelling the row.
-  function providerFor(url) {
+  // is not a guess there — SCOPE.UPLOAD only ever fires on a catalog page, so
+  // the page IS the surface the user is sending to, and an attachment to a
+  // Claude conversation belongs on the same row as the prompt it went with.
+  // ONLY there: now that every request is captured, a chatgpt.com page's
+  // analytics POST to a third party is not OpenAI traffic, and filing it under
+  // "openai" would be inventing a provider. `null` when nothing resolves:
+  // absent is honest, and the receiver renders it as "unknown".
+  function providerFor(url, scope) {
     let host = null;
     try { host = url && url.hostname; } catch { host = null; }
-    return providerForHost(host) || providerForHost(location.hostname) || null;
+    return providerForHost(host) ||
+      (scope === SCOPE.UPLOAD ? providerForHost(location.hostname) : null) || null;
+  }
+
+  // ── how much of a capture decision the catalog already made ─────────────
+  //
+  // The `coverage` hint every capture carries to the guard (see the header).
+  // Computed from the catalog only — host and path, never the body — so a
+  // hostile page cannot talk its own request down a tier by shaping it: the
+  // most it can do is be ordinary open-web traffic, which the classifier
+  // still sees in full. An upload a catalog surface initiated is a capture
+  // path by definition: attachment bytes do not look like an AI request, so
+  // left to the classifier they would go unscreened, which is the exact gap
+  // SCOPE.UPLOAD exists to close.
+  const COVERAGE = Object.freeze({
+    CAPTURE_PATH: 'capture_path',
+    CATALOG_HOST: 'catalog_host',
+    OPEN_WEB: 'open_web'
+  });
+
+  function coverageFor(url, scope) {
+    try {
+      if (scope === SCOPE.UPLOAD) return COVERAGE.CAPTURE_PATH;
+      if (!url || !isAiHost(url.hostname)) return COVERAGE.OPEN_WEB;
+      return isScreenedPath(url.hostname, url.pathname)
+        ? COVERAGE.CAPTURE_PATH : COVERAGE.CATALOG_HOST;
+    } catch {
+      // Can't tell: claim the most, so the guard screens regardless. A wrong
+      // `capture_path` costs a screen; a wrong `open_web` could cost one.
+      return COVERAGE.CAPTURE_PATH;
+    }
   }
 
   // ── surfaces the user switched off ──────────────────────────────────────
@@ -335,9 +392,9 @@
   // it only ever removes a host from it.
   //
   // SUBTRACTIVE, and that is the whole security story. Nothing in this set can
-  // put a host INTO scope — AI_HOSTS is generated into the package at build
-  // time and the manifest only injects us on those hosts, so a host that is
-  // not already in both is unreachable from here in any configuration.
+  // put a host INTO scope — every host already is — so the worst a config can
+  // do is switch screening off, which only the desktop app's own settings
+  // (and a hostile page, below) can reach.
   //
   // A hostile page can forge SONOMOS_CONFIG and switch itself off. It gains
   // nothing: HONEST.md's forgeable-channel bullet already grants that a
@@ -415,12 +472,20 @@
     return allowedProviders.has(id);
   }
 
-  // The catalog says which hosts we screen; the user's own settings and an
-  // admin's policy can each take one back out. Every scope decision goes
-  // through here rather than calling isAiHost directly, so there is one place
-  // where "in scope" is decided.
+  // Every host is screened; the user's own settings and an admin's policy can
+  // each take one back out. Every scope decision goes through here, so there
+  // is one place where "in scope" is decided. An empty host (an opaque URL) is
+  // not a host at all.
   function isScreenedHost(host) {
-    return isAiHost(host) && !isDisabledHost(host) && isProviderAllowed(host);
+    const h = String(host || '').replace(/\.+$/, '');
+    return h !== '' && !isDisabledHost(h) && isProviderAllowed(h);
+  }
+
+  // A catalog surface still in scope: the bound on the two decisions the
+  // extension still makes on its own (SCOPE.UPLOAD and the unholdable
+  // transports — see the header).
+  function isCatalogSurface(host) {
+    return isAiHost(host) && isScreenedHost(host);
   }
 
   // ── the page-start race for the disable set ─────────────────────────────
@@ -451,11 +516,11 @@
   // quarter-second and never again, however long it stays open.
   //
   // In practice the wait is invisible even when it is taken in full, because
-  // the only requests that take it are ones about to be held for screening
-  // against a 200 s enforce ceiling (DEFAULT_ENFORCE_TIMEOUT_MS below). It is
-  // never paid by an out-of-scope request: hosts the catalog does not name
-  // cannot be affected by a subtractive set, so they are answered without ever
-  // consulting it.
+  // the only requests that take it are bodied ones about to be held for
+  // screening against a 200 s enforce ceiling (DEFAULT_ENFORCE_TIMEOUT_MS
+  // below). Every host is in scope now, so every page pays it — but only for a
+  // bodied request in its opening quarter-second, which is a handful of
+  // requests on any page and none on most.
   //
   // SCOPE.UPLOAD deliberately takes no wait. Its disable question is about the
   // PAGE's host, and the page is a catalog surface by construction — so waiting
@@ -521,9 +586,8 @@
   // exactly one situation: this frame's own location has an opaque path
   // (`about:blank`, `about:srcdoc`, `blob:`, `data:`), so a relative URL has
   // nothing to hang off. Those documents inherit their base from the document
-  // that created them (HTML's "about base URL"), which — because we are only
-  // ever injected into such a frame on behalf of a catalog surface, see the
-  // manifest's `match_origin_as_fallback` — is the AI page itself. Resolving
+  // that created them (HTML's "about base URL"), which — see the manifest's
+  // `match_origin_as_fallback` — is the page that made the frame. Resolving
   // there is resolving the request the way the browser will actually issue it.
   //
   // Absolute URLs never reach the fallback; they resolve against any base. So
@@ -569,14 +633,11 @@
 
   // ── the page we are running in ──────────────────────────────────────────
   //
-  // True by construction: `content_scripts.matches` is generated from this
-  // same web_hosts list, so the shim only ever runs on a catalog surface, or
-  // in a frame such a surface created. We compute and check it anyway, because
-  // it is the bound on everything below. The cross-origin upload scope acts
-  // only on requests a known AI surface initiated, and writing that down as
-  // code rather than trusting the manifest means a `matches` list that widened
-  // later — or an injection we did not anticipate — cannot silently widen what
-  // this file holds.
+  // No longer true by construction: the shim is injected on every page now,
+  // so this is the ONLY thing standing between SCOPE.UPLOAD and every
+  // cross-origin PUT on the web being screened as an attachment. The upload
+  // scope acts only on requests a known AI surface initiated; everything else
+  // is ordinary capture, classified like any other request.
   //
   // Same two sources as resolveUrl, same order, same reason. `location.href`
   // answers for every ordinary frame. It answers '' for `about:blank` and
@@ -594,7 +655,7 @@
   // A function, not the constant this used to be: the disable set arrives
   // after document_start, so a value computed once at load would keep the
   // cross-origin upload scope attached to a surface the user had switched off.
-  function pageIsAiSurface() { return isScreenedHost(PAGE_HOST); }
+  function pageIsAiSurface() { return isCatalogSurface(PAGE_HOST); }
 
   // ── scope, part two: the attachment that never goes to the AI host ──────
   //
@@ -617,8 +678,8 @@
   // ## What the extension knows that the network layer cannot
   //
   // We are inside the page. The request's INITIATOR is not something we infer
-  // from a packet — it is the document we were injected into, and the manifest
-  // guarantees that document is a catalog surface. So the question is not
+  // from a packet — it is the document we were injected into, and
+  // pageIsAiSurface() says whether that document is a catalog surface. So the question is not
   // "is this host an AI host" (it is not, and never will be) but "did an AI
   // surface just hand this file to somebody". That is answerable here and only
   // here.
@@ -630,7 +691,7 @@
   //
   //   1. the initiating page is a catalog AI surface (pageIsAiSurface());
   //   2. the destination is https and is NOT itself a catalog host (a catalog
-  //      host is the ordinary scope and is handled before we get here);
+  //      host is ordinary scope, with its own capture paths);
   //   3. the request carries a body — a bodyless PUT/POST is a protocol step,
   //      not an upload;
   //   4. and it is shaped like a delegated object write:
@@ -659,13 +720,12 @@
   // used to always succeed, and it is the direction the product fails in
   // everywhere else.
   //
-  // A request that does not match passes through untouched, exactly as before.
-  // So a POST-shaped upload we did not recognise stays a coverage gap (it
-  // fails toward "we did not look", which is the state we started from), while
-  // a mis-recognised payment or telemetry POST would fail toward "we held
-  // something we should not have" — the worse direction. The predicate is
-  // biased accordingly, and the residuals are in HONEST.md rather than papered
-  // over by widening it.
+  // A request that does not match is ordinary open-web capture: still held,
+  // still classified, but screened only if it looks like AI. So a POST-shaped
+  // upload we did not recognise is a classifier call rather than a guaranteed
+  // screen, while a mis-recognised payment or telemetry POST would be screened
+  // as an attachment regardless — the worse direction. The predicate is biased
+  // accordingly, and the residuals are in HONEST.md.
   const SCOPE = Object.freeze({ AI: 'ai', UPLOAD: 'upload' });
 
   // Header-name prefixes by which a page declares "these bytes are an object
@@ -752,13 +812,13 @@
   }
 
   // Is this a cross-origin object write initiated by an AI surface? Total by
-  // construction — every failure answers `false`, which leaves the request
-  // exactly where it was before this function existed (untouched), so a bug
-  // here can never disturb the AI-host scope that runs before it.
+  // construction — every failure answers `false`, which leaves the request as
+  // ordinary capture, so a bug here can never take a request OUT of scope.
   function isUploadScope(url, method, headersOf, hasBody) {
     try {
       if (!pageIsAiSurface()) return false;
       if (!url || url.protocol !== 'https:') return false;
+      if (isAiHost(url.hostname)) return false; // a catalog host is ordinary scope
       if (!hasBody()) return false;
       const verb = String(method || 'GET').toUpperCase();
       if (verb === 'PUT') return true;
@@ -1081,7 +1141,7 @@
   // unexplainable. Shape:
   //   { outcome: 'verdict' | 'timeout' | 'channel-failed',
   //     verdict, elapsedMs, timeoutMs }
-  function enforce(requestB64, provider, consentGeneration) {
+  function enforce(requestB64, provider, consentGeneration, coverage) {
     if (!dataSharingAllowed || consentGeneration !== dataConsentGeneration) return Promise.resolve({ outcome: 'verdict', verdict: { ok: false, code: 'data-consent-required' }, elapsedMs: 0, timeoutMs: enforceTimeoutMs });
     return new Promise((resolve) => {
       const callId = nextCallId++;
@@ -1109,7 +1169,8 @@
         // reasoning at the SAME_WINDOW declaration above.
         // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
         window.postMessage(
-          { type: 'SONOMOS_CAPTURE', callId, requestB64, provider: provider || null },
+          { type: 'SONOMOS_CAPTURE', callId, requestB64, provider: provider || null,
+            coverage: coverage || COVERAGE.CAPTURE_PATH },
           SAME_WINDOW
         );
       } catch {
@@ -2384,10 +2445,17 @@
       if (!dataSharingAllowed) {
         // Route using metadata only. Do not freeze/clone/serialize the body,
         // and do not inspect out-of-scope content while consent is absent.
+        //
+        // Refused only where the CATALOG already says a prompt travels (a
+        // capture path, a catalog page's upload, or an unresolvable target on
+        // a catalog page) — the old scope. Everything the discovery gate added
+        // (catalog_host, open_web) passes untouched without consent: it can't
+        // be classified without sending it to the desktop app, which is what
+        // the user hasn't agreed to, and refusing it would break every site.
         const url = resolveUrl(input);
         const method = init?.method || input?.method || 'GET';
-        if (hasFetchBody(input, init) && (!url || isScreenedUrl(url) ||
-            isUploadScope(url, method, () => readUploadHeaderMarkers(init, input), () => true))) {
+        if (hasFetchBody(input, init) && (!url ? pageIsAiSurface() : (isCapturePathUrl(url) ||
+            isUploadScope(url, method, () => readUploadHeaderMarkers(init, input), () => true)))) {
           throw new TypeError(blockMessage('data-consent-required'));
         }
         return origFetch.apply(this, arguments);
@@ -2415,25 +2483,33 @@
         // busy chat page's hundreds of ordinary requests never pay for it.
         let headerCache = null;
         const headersOf = () => (headerCache ??= frozen.headerMap);
-        // The AI-host test is evaluated first and is untouched by any of this:
-        // isUploadScope is total and can only ever answer for a host the
-        // catalog does NOT contain, so a bug in it cannot disturb the scope
-        // this file has always enforced.
+        // The upload test goes FIRST now that every host is in scope: it is
+        // the narrower claim (a catalog page's attachment, screened whatever
+        // the classifier says), and isUploadScope is total and only ever
+        // answers for a host the catalog does NOT contain. Everything it
+        // declines falls to ordinary capture, never out of scope.
         let scope = null;
-        if (isScreenedUrl(url)) scope = SCOPE.AI;
-        else if (url && isUploadScope(url, method, headersOf, () => hasFetchBody(frozen.input, frozen.init))) {
+        if (url && isUploadScope(url, method, headersOf, () => hasFetchBody(frozen.input, frozen.init))) {
           scope = SCOPE.UPLOAD;
-        }
-        // A catalog host, decided before the disable set could arrive: give the
-        // config its page-start window and ask again. Only this branch waits —
-        // a host the catalog never named cannot be in the subtractive set, so
-        // it is already past us untouched. On timeout the set is still empty
+        } else if (isScreenedUrl(url)) scope = SCOPE.AI;
+        // Decided before the disable set could arrive: give the config its
+        // page-start window and ask again. On timeout the set is still empty
         // and the request stays in scope, which is today's behaviour exactly.
-        if (scope === SCOPE.AI && !configArrived) {
+        // Bodied requests only: every host is in scope now, so waiting on a
+        // bodyless one would put a page-start pause on every GET a page makes
+        // while loading — for a request that is about to pass untouched.
+        if (scope === SCOPE.AI && !configArrived && hasFetchBody(frozen.input, frozen.init)) {
           await waitForFirstConfig();
           // Re-ask the WHOLE chokepoint, not just the disable set: the admin
           // allowlist arrives in the same config and is just as subtractive.
           if (!isScreenedHost(url.hostname)) scope = null;
+        }
+        // Consent went away while we waited: refuse the old scope (capture
+        // path), release everything the discovery gate added — same rule as
+        // the no-consent fast path above.
+        if (scope && (!dataSharingAllowed || consentGeneration !== dataConsentGeneration) &&
+            coverageFor(url, scope) !== COVERAGE.CAPTURE_PATH) {
+          scope = null;
         }
         if (scope && (!dataSharingAllowed || consentGeneration !== dataConsentGeneration) && hasFetchBody(frozen.input, frozen.init)) {
           committed = true;
@@ -2494,7 +2570,8 @@
               };
               const raw = synthesizeRequest(method, url, headers, cap.effectiveCt, cap.bytes,
                 scope === SCOPE.UPLOAD);
-              const res = await enforce(b64FromBytes(raw), providerFor(url), consentGeneration);
+              const res = await enforce(b64FromBytes(raw), providerFor(url, scope), consentGeneration,
+                coverageFor(url, scope));
               const d = decide(!dataSharingAllowed || consentGeneration !== dataConsentGeneration
                 ? { outcome: 'verdict', verdict: { ok: false, code: 'data-consent-required' } } : res);
               action = d.action;
@@ -2519,9 +2596,9 @@
             }
           }
         } else if (!url && hasFetchBody(frozen.input, frozen.init)) {
-          // We are injected on AI surfaces and nowhere else, so a bodied
-          // request whose target we cannot even resolve is a "couldn't check"
-          // state, not somebody else's traffic. Fail closed.
+          // Every page is in scope, so a bodied request whose target we cannot
+          // even resolve is a "couldn't check" state, not somebody else's
+          // traffic. Fail closed.
           committed = true;
           action = 'block';
           blockReason = 'scope-unresolvable';
@@ -2705,16 +2782,16 @@
       // second screening round trip against the same object, after which
       // whichever verdict landed last would answer for a request it never saw.
       if (s && s.held === true) throw invalidState('send');
-      // Same two-step scope as the fetch hook, in the same order: the AI-host
-      // test first and unchanged, the cross-origin object-write test only for
-      // hosts it did not match. `body` is not consulted here — the bodyless
-      // case is answered below, before scope is used.
+      // Same two-step scope as the fetch hook, in the same order: the
+      // cross-origin object-write test first, ordinary capture for everything
+      // it declines. `body` is not consulted here — the bodyless case is
+      // answered below, before scope is used.
       let scope = null;
       try {
         if (s && s.url) {
-          scope = isScreenedUrl(s.url) ? SCOPE.AI
-            : isUploadScope(s.url, s.method, () => s.headers, () => body != null && body !== '')
-              ? SCOPE.UPLOAD : null;
+          scope = isUploadScope(s.url, s.method, () => s.headers, () => body != null && body !== '')
+            ? SCOPE.UPLOAD
+            : isScreenedUrl(s.url) ? SCOPE.AI : null;
         }
       } catch { /* ignore */ }
 
@@ -2734,20 +2811,33 @@
         return origSend.apply(this, arguments);
       }
       // A bodied send whose target we could not record or resolve — open()
-      // never ran through our wrapper, or the URL would not parse. We only run
-      // on AI surfaces, so that is a "couldn't check" state, not out-of-scope
+      // never ran through our wrapper, or the URL would not parse. Every page
+      // is in scope, so that is a "couldn't check" state, not out-of-scope
       // traffic: fail closed, exactly as the fetch hook does.
       if (!s || !s.url) {
         say('warn', 'scope-unresolvable', { action: 'block' });
         blockXhr(this, 'scope-unresolvable');
         return;
       }
-      if (!scope) { // neither an AI host nor a cross-origin upload → untouched
+      if (!scope) { // a host the user switched off, or not http(s) → untouched
         say('debug', 'not-in-scope', { action: 'send' });
         return origSend.apply(this, arguments);
       }
 
-      if (!dataSharingAllowed || s.consentMissing || s.consentGeneration !== dataConsentGeneration) {
+      // Two refusals that only the old scope (a capture path) earns. Without
+      // consent, and for a synchronous XHR that cannot be held, the request
+      // cannot reach the classifier — so a catalog_host / open_web send is
+      // released untouched, as it was before the discovery gate, rather than
+      // breaking every site that still uses either. Same rule as the fetch
+      // hook's consent path and the beacon.
+      const capturePath = coverageFor(s.url, scope) === COVERAGE.CAPTURE_PATH;
+      const consentMissing = !dataSharingAllowed || s.consentMissing ||
+        s.consentGeneration !== dataConsentGeneration;
+      if ((consentMissing || !s.async) && !capturePath) {
+        say('debug', 'not-in-scope', { action: 'send' });
+        return origSend.apply(this, arguments);
+      }
+      if (consentMissing) {
         blockXhr(this, 'data-consent-required');
         return;
       }
@@ -2814,8 +2904,8 @@
       };
 
       (async () => {
-        // The same page-start race the fetch hook handles: this is a catalog
-        // host, and the disable set had not arrived when send() ran. It can
+        // The same page-start race the fetch hook handles: the disable set
+        // had not arrived when send() ran. It can
         // only be asked here, after the synchronous branches above — a sync
         // XHR cannot be deferred at all and is already refused, and an
         // out-of-scope or bodyless send has already gone out untouched, so
@@ -2847,7 +2937,8 @@
         if (!shape.ct) shape.ct = mediaType(cap.effectiveCt);
         const raw = synthesizeRequest(s.method, s.url, s.headers, cap.effectiveCt, cap.bytes,
           scope === SCOPE.UPLOAD);
-        const res = await enforce(b64FromBytes(raw), providerFor(s.url), s.consentGeneration);
+        const res = await enforce(b64FromBytes(raw), providerFor(s.url, scope), s.consentGeneration,
+          coverageFor(s.url, scope));
         if (abandoned()) return;
         const d = decide(res);
         const veto = (d.action === 'redact' && scope === SCOPE.UPLOAD)
@@ -2899,9 +2990,13 @@
   // signal the API has. The alternative is a body reaching an AI surface with
   // no screening at all, which is the thing this file exists to prevent.
   //
-  // Bodyless beacons (a bare ping) and beacons to anywhere else are delegated
-  // untouched — the hard rule about out-of-scope traffic applies here as
-  // everywhere. That includes the cross-origin upload scope, deliberately: a
+  // ONLY ON A CAPTURE PATH (isCapturePathUrl). Every other request is held and
+  // handed to the guard's classifier, but a beacon cannot be held, so it
+  // cannot be classified either — and refusing every data-bearing beacon on
+  // every site would break analytics and unload-saves across the whole web.
+  // So beacons off the catalog's capture paths are a residual (HONEST.md), as
+  // they always were. Bodyless beacons (a bare ping) are delegated untouched —
+  // the hard rule about out-of-scope traffic applies here as everywhere. That includes the cross-origin upload scope, deliberately: a
   // beacon is always a POST and cannot carry a request header, so it can never
   // be a delegated object write, and widening it here would refuse the ordinary
   // third-party telemetry every AI page sends. Uploads do not ride beacons.
@@ -2926,7 +3021,10 @@
         const hasData = data != null && data !== '';
         if (hasData) {
           let inScope = false;
-          // isScreenedUrl (isScreenedHost + capture-path), not isAiHost:
+          // isCapturePathUrl (catalog surface + capture-path), not
+          // isScreenedUrl: a beacon cannot be held, so it cannot be
+          // classified either, and refusing every data-bearing beacon on every
+          // site would break the web. Not isAiHost either:
           // a surface the user switched off in the desktop app is out of
           // scope, and a beacon is not the one request type that ignores
           // their setting — nor the one that ignores a host's capture-path
@@ -2942,14 +3040,15 @@
           // WITH. During the page-start quarter-second the disable set may not
           // have landed yet and this reads as in scope — fail-closed, exactly
           // as before, and the window is the one it always was.
-          inScope = isScreenedUrl(target);
+          inScope = isCapturePathUrl(target);
           if (inScope) {
             say('warn', 'uncapturable-beacon', { action: 'block' });
             return false;
           }
-          if (!target) {
-            // Same rule as fetch/XHR: on an AI surface, a bodied request we
-            // cannot even address is a "couldn't check" state.
+          if (!target && pageIsAiSurface()) {
+            // Same rule as fetch/XHR, on the pages this hook still acts on: a
+            // bodied request we cannot even address is a "couldn't check"
+            // state.
             say('warn', 'scope-unresolvable', { action: 'block' });
             return false;
           }
@@ -3011,17 +3110,17 @@
           const headersOf = () => (headerCache ??= dataSharingAllowed
             ? readHeaders(init, reqObj) : readUploadHeaderMarkers(init, reqObj));
           if (hasBody()) {
-            // isScreenedHost, not isAiHost — same rule as the beacon hook
-            // above, one API later: the user's own disable set decides scope,
-            // here as everywhere else.
-            if (isScreenedUrl(url)) {
+            // isCapturePathUrl — same rule as the beacon hook above, one API
+            // later: unholdable, so unclassifiable, so refused only where the
+            // catalog already says a prompt travels.
+            if (isCapturePathUrl(url)) {
               shape.scope = SCOPE.AI;
               refuse = 'uncapturable-deferred-fetch';
             } else if (url && isUploadScope(url, method, headersOf, hasBody)) {
               markUpload(shape);
               refuse = 'uncapturable-deferred-fetch';
-            } else if (!url) {
-              // Same rule as fetch/XHR/beacon: on an AI surface, a bodied
+            } else if (!url && pageIsAiSurface()) {
+              // Same rule as the beacon: on a catalog surface, a bodied
               // request we cannot even address is a "couldn't check" state.
               refuse = 'scope-unresolvable';
             }

@@ -273,17 +273,16 @@ export function validate(target, stagedDir) {
     }
   }
 
-  // The store listing promises a fixed list of AI surfaces. A wildcard host
-  // — in any of its spellings — contradicts that, and in the MAIN world it
-  // is an unreviewable capability grab. `*.google.com` is a normal narrow
-  // subdomain pattern; `*.com` is a whole TLD, so a wildcard followed by a
-  // single label is the tell.
+  // Content scripts inject on every http(s) page (the discovery gate — the
+  // guard's classifier, not a host list, decides what is AI traffic; see
+  // docs/store/LISTING.md for the permission justification). That is the
+  // ceiling: `<all_urls>`, `*://` and every non-web scheme also reach file://
+  // and ftp://, which no web prompt travels over, so they are refused here.
   for (const cs of manifest.content_scripts ?? []) {
     for (const match of cs.matches ?? []) {
-      const host = /^(?:\*|https?|file|ftp):\/\/([^/]*)/.exec(match)?.[1];
-      if (match === '<all_urls>' || host === '*' || /^\*\.[^.]+$/.test(host ?? '')) {
+      if (!/^https?:\/\//.test(match)) {
         const where = cs.world === 'MAIN' ? ' in the MAIN world' : '';
-        fail(`content_scripts match '${match}'${where} is a wildcard host; the store listing claims a fixed AI-surface list`);
+        fail(`content_scripts match '${match}'${where} reaches beyond http(s) pages`);
       }
     }
   }

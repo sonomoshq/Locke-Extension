@@ -503,11 +503,14 @@ test('store: a non-loopback host permission fails', () => {
   assert.deepEqual(validateWith('chromium', (m) => { m.host_permissions = ['http://127.0.0.1/*']; }), []);
 });
 
-test('store: a wildcard content-script host fails in every spelling', () => {
-  for (const match of ['<all_urls>', '*://*/*', 'https://*/*', 'http://*/*', '*://*.com/*']) {
+test('store: a content-script match beyond http(s) pages fails in every spelling', () => {
+  for (const match of ['<all_urls>', '*://*/*', 'file:///*', 'ftp://*/*', '*://*.com/*']) {
     const errors = validateWith('chromium', (m) => { m.content_scripts[0].matches = [match]; });
-    assert.match(errors.join('\n'), /is a wildcard host/, match);
+    assert.match(errors.join('\n'), /reaches beyond http\(s\) pages/, match);
   }
-  // A narrow subdomain pattern is normal and must not trip the check.
-  assert.deepEqual(validateWith('chromium', (m) => { m.content_scripts[0].matches = ['https://*.google.com/*']; }), []);
+  // Every web page is the intended ceiling (the discovery gate), and a narrow
+  // pattern is still fine.
+  for (const ok of [['https://*/*', 'http://*/*'], ['https://*.google.com/*']]) {
+    assert.deepEqual(validateWith('chromium', (m) => { m.content_scripts[0].matches = ok; }), []);
+  }
 });

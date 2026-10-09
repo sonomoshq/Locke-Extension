@@ -474,11 +474,28 @@ export const MSG = Object.freeze({
   REQUEST_CHECK: 'requestCheck',
   STATE_UPDATE: 'stateUpdate',
   TELEMETRY: 'telemetry',
-  // Content script → service worker: one held AI request to relay to the
+  // Content script → service worker: one held request to relay to the
   // desktop app via the native host. Carries `requestB64` — the shim's synthesized
-  // raw HTTP request, base64 (sensitive; relayed, never logged).
+  // raw HTTP request, base64 (sensitive; relayed, never logged) — plus the
+  // optional `provider` and `coverage` labels.
   CAPTURE: 'capture'
 });
+
+// The catalog's say in a capture decision, carried on every capture as
+// `coverage` for the guard's discovery gate (content/shim.js coverageFor):
+//   capture_path — catalog host on a prompt path, or a catalog page's upload:
+//                  screened regardless of what the classifier says
+//   catalog_host — catalog host, off its capture paths: classify, then screen
+//                  only if it looks like AI
+//   open_web     — every other host: classify, then screen only if AI
+// An absent or unrecognised word is read by the native host as `capture_path`.
+// content/content-script.js keeps an inline copy of this set.
+export const COVERAGE = Object.freeze({
+  CAPTURE_PATH: 'capture_path',
+  CATALOG_HOST: 'catalog_host',
+  OPEN_WEB: 'open_web'
+});
+export const COVERAGE_WORDS = new Set(Object.values(COVERAGE));
 
 // Native-messaging host message `type`s. The host knows exactly these three.
 export const BRIDGE_MSG = Object.freeze({

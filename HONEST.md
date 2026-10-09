@@ -94,15 +94,57 @@ verdict means no send. The residuals we accept and document:
 - **The extension enforces the verdict; it does not detect.** All
   scanning and redaction happen in the Locke desktop app; the shim
   only applies the result. If the host or the desktop app is
-  unavailable, in-scope bodied requests to AI surfaces are
-  **blocked** (the fetch rejects / the XHR aborts) — the
-  availability of AI sites degrades rather than data leaking
+  unavailable, bodied requests — on every website, since the discovery
+  gate — are **blocked** (the fetch rejects / the XHR aborts) — the
+  availability of the web degrades rather than data leaking
   silently. There is no "send unmasked / cancel" prompt in the
   extension; fail-open is a per-user toggle the desktop app applies,
   not something the extension decides.
+- **Every website is in scope now, and the classifier — not a list —
+  decides what gets screened.** `[added 2026-10-08, super PR #15]` The shim
+  is injected on every http(s) page and holds every bodied fetch/XHR. The
+  Locke desktop app's guard classifies each one on-device and screens only
+  what it calls AI traffic; a request it calls not-AI comes back a plain
+  `allow` and leaves **unscreened**. The catalog still ships, but now only
+  sets a `coverage` hint: a catalog host's prompt path (and an upload a
+  catalog page started) is `capture_path` and screened whatever the
+  classifier says; everything else is classified first. Several entries
+  below were written for the old host list — read them through this one:
+
+  - *The classifier can be wrong.* An AI request it calls not-AI on an
+    unlisted site, or on a catalog host off its prompt paths, leaves
+    unscreened. Before the gate those paths left unscreened unconditionally
+    (the next entry); now they at least get classified. Uploads to a
+    catalog host's own origin off its prompt paths (`claude.ai`'s
+    attachment upload) are in that bucket, and file bytes do not look like
+    an AI request.
+  - *An outage now costs availability everywhere, not just on AI sites.*
+    With the desktop app down, every bodied request on every website is
+    **blocked** — Google Maps, a checkout POST, a login form — unless the
+    user opened a fail-open window in the desktop app. This is the default
+    by decision (fail closed), and it is the biggest user-facing cost of the
+    gate. The `web_screening: "none"` search hosts no longer get their old
+    passthrough on their own pages: they are `catalog_host`, classified,
+    and blocked in an outage like everything else.
+  - *Latency on every bodied request.* Each one now makes a native-messaging
+    round trip and a classification before it leaves, on every site.
+  - *What cannot be held cannot be classified, so off a capture path it is
+    let through.* `sendBeacon`, `fetchLater()` and synchronous XHR are still
+    refused on catalog prompt paths, and sent untouched everywhere else —
+    refusing them on every site would break analytics and unload-saves
+    across the web. An AI request riding one of those off a catalog path
+    leaves unscreened.
+  - *Without data-sharing consent* (where the browser requires it) nothing
+    is relayed: catalog prompt paths are refused as before, and every other
+    request leaves untouched and unclassified.
+  - *A hostile page can forge its own `coverage`.* It gains nothing it could
+    not get from a pristine `fetch` (the forgeable-channel entry below): the
+    worst a forged `open_web` does is let the classifier decide about the
+    page's own request.
+
 - **On three hosts, only a short list of PATHS is screened; every other
   bodied request on those hosts leaves unscreened — attachment uploads
-  included.** `[added 2026-09-08]` This is the biggest single gap between
+  included.** `[added 2026-09-08; superseded 2026-10-08 by the discovery gate above — those requests are now classified, not skipped]` This is the biggest single gap between
   what the rest of this repo reads like and what the extension does, and
   it went undocumented here from the day the mechanism landed.
 

@@ -30,10 +30,16 @@ DPIA template so customers whose own internal policy mandates a DPIA
   then completes the request with placeholders in place of PII.
   Anything short of a clean verdict blocks. (Corrected 2026-08-21: this
   described a loopback HTTP daemon that no longer exists.)
-- **Scope**: the categories of personal data the user voluntarily
-  types into AI chat surfaces or search-engine queries on the host
-  list at `manifest.json::content_scripts.matches`. The product does
-  not initiate processing on its own.
+- **Scope**: the categories of personal data carried in the body of any
+  fetch/XHR request a web page sends (`manifest.json::content_scripts.matches`
+  is every http(s) page). Every such request is transferred on-device to the
+  Locke desktop app and classified; only requests classified as AI traffic,
+  and the prompt paths of AI services in the built-in catalog, are screened
+  for personal data. Requests classified not-AI are released unchanged. No
+  request content leaves the device to Sonomos. The product does not initiate
+  processing on its own. (Widened 2026-10-08 from the AI-host list by the
+  discovery gate, super PR #15 — a DPIA that relied on the old scope needs
+  re-review: necessity and proportionality now rest on the classifier.)
 - **Context**: end-user deployment, optionally fleet-managed via
   Chrome `ExtensionSettings` / Firefox `policies.json`. See
   `docs/enterprise/DEPLOYMENT.md`.
