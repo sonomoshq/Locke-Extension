@@ -33,6 +33,7 @@ function makeWorld(onCapture, extraGlobals = {}, { settleConfig = true, document
   const netCalls = [];   // arguments the original (held) fetch was released with
   const listeners = [];  // the shim's window message listeners
   const logs = [];       // every diagnostic line the shim emitted
+  const unchecked = [];  // SONOMOS_UNCHECKED tallies the shim posted
   let innerWindow = null; // the context's OWN view of `window` (vm global proxy)
 
   // The diagnostics are a contract, so the harness captures them the way a
@@ -88,6 +89,7 @@ function makeWorld(onCapture, extraGlobals = {}, { settleConfig = true, document
     addEventListener: (type, fn) => { if (type === 'message') listeners.push(fn); },
     postMessage: (data, targetOrigin) => {
       if (!deliverable(targetOrigin)) return;
+      if (data && data.type === 'SONOMOS_UNCHECKED') { unchecked.push(data.cause); return; }
       if (!data || data.type !== 'SONOMOS_CAPTURE') return;
       Promise.resolve(onCapture(data)).then((verdict) => {
         // event.source must be what the shim sees as `window` — inside the
@@ -113,7 +115,7 @@ function makeWorld(onCapture, extraGlobals = {}, { settleConfig = true, document
   // An empty config is a real answer: the channel spoke and named nothing
   // disabled, so every catalog surface stays screened.
   if (settleConfig) deliver({ type: 'SONOMOS_CONFIG', config: {} });
-  return { sandbox, netCalls, logs, deliver };
+  return { sandbox, netCalls, logs, deliver, unchecked };
 }
 
 // A world with the debug lines on, so the healthy-path reasons are assertable.
@@ -4135,4 +4137,106 @@ test('discovery gate: a synchronous XHR off a capture path is released, on one i
   assert.equal(on.sent.length, 0, 'a capture path keeps the old refusal');
   assert.equal(on.sonomosBlockReason, 'uncapturable-sync-xhr');
   assert.equal(captures, 0);
+});
+
+// ── the desktop app's fail-open window (reqs 221-223) ──────────────
+//
+// One window, governing every "screening could not complete" block. Learned
+// only from the config push; closed by default, when absent, and once expired.
+
+const openWindow = (ms = 60_000) => ({ failOpenActive: true, failOpenUntilMs: Date.now() + ms });
+const expiredWindow = () => ({ failOpenActive: true, failOpenUntilMs: Date.now() - 1 });
+const BIG = 'x'.repeat(8 * 1024 * 1024 + 1);
+
+async function timeoutWorld(window) {
+  const w = makeWorld(() => new Promise(() => {}));
+  w.deliver({ type: 'SONOMOS_CONFIG', config: { enforceTimeoutMs: 1000, ...(window || {}) } });
+  return w;
+}
+
+test('fail-open: verdict timeout sends the original and tallies it when the window is active', async () => {
+  const { sandbox, netCalls, unchecked } = await timeoutWorld(openWindow());
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":"hi"}' });
+  assert.equal(netCalls.length, 1);
+  assert.deepEqual(unchecked, ['verdict-timeout']);
+});
+
+test('fail-open: verdict timeout still blocks when closed, absent, or expired', async () => {
+  for (const window of [{ failOpenActive: false, failOpenUntilMs: Date.now() + 60_000 }, null, expiredWindow()]) {
+    const { sandbox, netCalls, logs, unchecked } = await timeoutWorld(window);
+    await assert.rejects(sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
+    assert.equal(netCalls.length, 0);
+    assert.equal(unchecked.length, 0);
+    assertBlocked(logs, 'verdict-timeout');
+  }
+});
+
+test('fail-open: a window that lapses after the push closes by itself', async () => {
+  const { sandbox, netCalls, deliver } = makeWorld(() => null);
+  deliver({ type: 'SONOMOS_CONFIG', config: { failOpenActive: true, failOpenUntilMs: Date.now() + 50 } });
+  await sandbox.fetch(AI_URL, { method: 'POST', body: 'x' });
+  assert.equal(netCalls.length, 1);
+  await new Promise((r) => setTimeout(r, 80));
+  await assert.rejects(sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
+  assert.equal(netCalls.length, 1);
+});
+
+test('fail-open: dead channel and unavailability relay codes follow the window', async () => {
+  const dead = makeWorld(() => allowVerdict, { postMessage: () => { throw new Error('channel gone'); } });
+  dead.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  await dead.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' });
+  assert.equal(dead.netCalls.length, 1);
+
+  for (const code of ['bridge-unreachable', 'no-bridge', 'screening-timeout', 'extension-reloaded', 'native-timeout']) {
+    const open = makeWorld(() => ({ ok: false, code }));
+    open.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+    await open.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' });
+    assert.equal(open.netCalls.length, 1, code);
+    assert.deepEqual(open.unchecked, [`relay-${code}`]);
+    const closed = makeWorld(() => ({ ok: false, code }));
+    await assert.rejects(closed.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
+    assert.equal(closed.netCalls.length, 0, code);
+  }
+  const closedDead = makeWorld(() => allowVerdict, { postMessage: () => { throw new Error('channel gone'); } });
+  await assert.rejects(closedDead.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
+});
+
+test('fail-open: NOT governed - consent, malformed verdicts and guard decisions still block in an open window', async () => {
+  const verdicts = [
+    { ok: false, code: 'data-consent-required' },
+    { ok: false, code: 'bad-request' },
+    { ok: true },                                      // malformed: no receipt
+    { ok: true, receipt: { decision: 'redact' } },     // redact missing request
+    { ok: true, receipt: {} },                         // decision missing
+    { ok: true, receipt: { decision: 'block', reason: 'found a key' } }
+  ];
+  for (const verdict of verdicts) {
+    const w = makeWorld(() => verdict);
+    w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+    await assert.rejects(w.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
+    assert.equal(w.netCalls.length, 0);
+    assert.equal(w.unchecked.length, 0);
+  }
+});
+
+test('fail-open: oversize, stream and unreadable bodies send unscreened in an open window, block otherwise', async () => {
+  const bodies = [
+    BIG,
+    new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1])); c.close(); } }),
+    { toString() { throw new Error('nope'); } }
+  ];
+  for (const body of bodies) {
+    const open = makeWorld(() => allowVerdict);
+    open.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+    await open.sandbox.fetch(AI_URL, { method: 'POST', body, duplex: 'half' });
+    assert.equal(open.netCalls.length, 1);
+    assert.equal(open.unchecked.length, 1);
+    assert.match(open.unchecked[0], /^uncapturable-/);
+
+    const expired = makeWorld(() => allowVerdict);
+    expired.deliver({ type: 'SONOMOS_CONFIG', config: expiredWindow() });
+    await assert.rejects(expired.sandbox.fetch(AI_URL, { method: 'POST', body, duplex: 'half' }), blockedError);
+    assert.equal(expired.netCalls.length, 0);
+    assert.equal(expired.unchecked.length, 0);
+  }
 });

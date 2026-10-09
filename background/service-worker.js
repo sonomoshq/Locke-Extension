@@ -23,6 +23,7 @@ import {
   REGISTRATION_URL,
   SCREENING,
   SCREENING_KEY,
+  FAIL_OPEN_KEY,
   STATE_KEY,
   SETTINGS_KEY,
   STATUS
@@ -193,6 +194,28 @@ async function storeDisabledWebHosts(served) {
     await ext.storage.local.set({ [DISABLED_WEB_HOSTS_KEY]: applied });
   } catch { /* storage unavailable — the previous set stands */ }
   return applied;
+}
+
+// Content scripts read the fail-open window straight from storage.session
+// (see content-script.js), which Chromium hides from them by default.
+try {
+  const lifted = ext.storage.session.setAccessLevel?.({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' });
+  if (lifted && typeof lifted.catch === 'function') lifted.catch(() => {});
+} catch { /* no such API (Firefox) — content scripts then read closed */ }
+
+// Persist the fail-open window the host reported. Only a status reply that
+// said something rewrites it (`served` null leaves the last answer, which
+// expires on its own). Written only on change, so content scripts re-push
+// config exactly when the answer moved.
+async function storeFailOpen(served) {
+  if (!served) return;
+  try {
+    const stored = (await ext.storage.session.get(FAIL_OPEN_KEY))?.[FAIL_OPEN_KEY];
+    if (stored && stored.failOpen === served.failOpen && stored.untilMs === served.untilMs) return;
+    await ext.storage.session.set({
+      [FAIL_OPEN_KEY]: { failOpen: served.failOpen, untilMs: served.untilMs, receivedAt: Date.now() }
+    });
+  } catch { /* storage unavailable — the previous answer stands, and expires */ }
 }
 
 // What this extension is currently enforcing, for the ack. Read from storage
@@ -571,6 +594,8 @@ async function performCheck(_reason) {
     if (result.disabledWebHosts) {
       await storeDisabledWebHosts(result.disabledWebHosts);
     }
+
+    await storeFailOpen(result.failOpen);
 
     const next = {
       status: result.status,
@@ -1032,6 +1057,12 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, code: 'capture-error' });
       });
     return true;
+  }
+  if (message?.type === MSG.UNCHECKED) {
+    // A send that left unscreened under the desktop app's fail-open window:
+    // same tally as an `unchecked` receipt. Shape-only, no content.
+    noteScreening(null, { uncheckedSends: 1, withheldItems: 0, redactedItems: 0, blockedSends: 0 });
+    return false;
   }
   if (message?.type === MSG.REQUEST_CHECK) {
     // The popup is open, so the worker is awake and the user is looking at

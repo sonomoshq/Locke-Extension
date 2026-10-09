@@ -890,6 +890,25 @@
   // Browser scoping here prevents pre-consent body snapshots. This MAIN-world
   // flag is only an early privacy guard, never authorization: the isolated
   // relay and native boundary independently verify extension-owned storage.
+  // The desktop app's fail-open window, learned ONLY from the config push (the
+  // service worker reads it off the native host's status reply). The extension
+  // has no setting of its own and never asks the user. Closed unless the push
+  // says active AND the expiry is still in the future, re-judged on every use
+  // so a window that lapses between pushes closes by itself.
+  let failOpenFlag = false;
+  let failOpenUntilMs = 0;
+  function failOpenActive() {
+    return failOpenFlag === true && Number.isFinite(failOpenUntilMs) && Date.now() < failOpenUntilMs;
+  }
+  // Tell the content script (→ service worker) that a request just left
+  // unscreened, so it lands in the same tally an `unchecked` receipt does.
+  // Content-free: only our own closed cause string.
+  function noteUncheckedSend(cause) {
+    try {
+      // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
+      window.postMessage({ type: 'SONOMOS_UNCHECKED', cause: String(cause).slice(0, 64) }, SAME_WINDOW);
+    } catch { /* page gone — the send itself is unaffected */ }
+  }
   let dataSharingAllowed = !/(?:Firefox|Edg)\//.test(globalThis.navigator?.userAgent || '');
   let dataConsentGeneration = 0;
 
@@ -964,7 +983,7 @@
   // that went out without a complete screen, and a send whose attachment was
   // dropped on the way. Both are "you need to know this happened", and
   // neither may depend on someone having flipped a flag first.
-  const LOUD = new Set(['allow-unchecked', 'redact-unchecked', 'redact-withheld']);
+  const LOUD = new Set(['unchecked-fail-open', 'allow-unchecked', 'redact-unchecked', 'redact-withheld']);
 
   function levelFor(action, reason) {
     return action === 'block' || LOUD.has(reason) ? 'warn' : 'debug';
@@ -1087,6 +1106,10 @@
         // A late native allow must not release a request held across revoke.
         for (const resolve of pending.values()) resolve({ ok: false, code: 'data-consent-required' });
       }
+    }
+    if (typeof config.failOpenActive === 'boolean') {
+      failOpenFlag = config.failOpenActive;
+      failOpenUntilMs = typeof config.failOpenUntilMs === 'number' ? config.failOpenUntilMs : 0;
     }
     const t = config.enforceTimeoutMs;
     if (typeof t === 'number' && Number.isFinite(t)) {
@@ -1332,8 +1355,34 @@
   // Verdict shape (the SW's reply): { ok, receipt: { decision, reason,
   // redactedCount, unchecked, unscreened, requestB64?, … } }, or
   // { ok: false, code, message } when the relay itself failed.
+  // Relay codes that mean "screening could not complete" (an outage), as
+  // opposed to a malformed answer (our/guard bug) or consent. Under the
+  // desktop app's fail-open window these send the original; otherwise they
+  // block as before. Absent codes fall to `native-call-failed` = unavailable.
+  const RELAY_CODES_KEEP_BLOCKING = new Set([
+    'data-consent-required', 'bridge-empty', 'bridge-unknown-response',
+    'bridge-protocol-mismatch', 'capture-error', 'bad-request'
+  ]);
+  function failOpenSend(cause, waitedMs) {
+    noteUncheckedSend(cause);
+    return {
+      action: 'send',
+      reason: 'unchecked-fail-open',
+      fields: { waitedMs, cause, because: 'user-fail-open-window' }
+    };
+  }
+
   function decide(res) {
     const waitedMs = res.elapsedMs;
+    if (res.outcome === 'timeout' && failOpenActive()) return failOpenSend('verdict-timeout', waitedMs);
+    if (res.outcome === 'channel-failed' && failOpenActive()) return failOpenSend('verdict-channel-failed', waitedMs);
+    if (res.outcome === 'verdict' && failOpenActive()) {
+      const v0 = res.verdict;
+      if (!v0) return failOpenSend('verdict-missing', waitedMs);
+      if (v0.ok !== true && !RELAY_CODES_KEEP_BLOCKING.has(v0.code)) {
+        return failOpenSend(`relay-${clip(v0.code) || 'unknown'}`, waitedMs);
+      }
+    }
     if (res.outcome === 'timeout') {
       // The single most important line in this file. A timeout is NOT a
       // finding: no verdict arrived, so we blocked on principle rather than on
@@ -2552,7 +2601,13 @@
             // before it can leave. From here we NEVER send the original
             // unscreened body.
             committed = true;
-            if (cap.bytes == null) {
+            if (cap.bytes == null && failOpenActive()) {
+              // The desktop app's fail-open window: send the original
+              // unscreened (releaseFrozenFetch below) and tally it.
+              action = 'send';
+              noteUncheckedSend(cap.reason);
+              say('warn', 'unchecked-fail-open', { action: 'send', cause: cap.reason, bytes: cap.byteLength ?? null, because: 'user-fail-open-window' });
+            } else if (cap.bytes == null) {
               action = 'block'; // uncapturable body → fail closed, no round-trip
               blockReason = cap.reason;
               blockFields = { bytes: cap.byteLength ?? null };
@@ -2845,6 +2900,11 @@
       // In scope with a body: hold it. A sync XHR can't be deferred → fail
       // closed before we spend anything on capture.
       const xhr = this;
+      if (!s.async && failOpenActive()) {
+        noteUncheckedSend('uncapturable-sync-xhr');
+        say('warn', 'unchecked-fail-open', { action: 'send', cause: 'uncapturable-sync-xhr', because: 'user-fail-open-window' });
+        return origSend.apply(this, arguments);
+      }
       if (!s.async) {
         say('warn', 'uncapturable-sync-xhr', { action: 'block' });
         blockXhr(xhr, 'uncapturable-sync-xhr');
@@ -2924,6 +2984,13 @@
         if (abandoned()) return;
         if (!cap.hadBody) { // empty after all → untouched
           say('debug', 'no-body', { action: 'send' });
+          releaseXhr(xhr);
+          origSend.call(xhr, frozen);
+          return;
+        }
+        if (cap.bytes == null && failOpenActive()) {
+          noteUncheckedSend(cap.reason);
+          say('warn', 'unchecked-fail-open', { action: 'send', cause: cap.reason, bytes: cap.byteLength ?? null, because: 'user-fail-open-window' });
           releaseXhr(xhr);
           origSend.call(xhr, frozen);
           return;
@@ -3041,6 +3108,11 @@
           // have landed yet and this reads as in scope — fail-closed, exactly
           // as before, and the window is the one it always was.
           inScope = isCapturePathUrl(target);
+          if (inScope && failOpenActive()) {
+            noteUncheckedSend('uncapturable-beacon');
+            say('warn', 'unchecked-fail-open', { action: 'send', cause: 'uncapturable-beacon', because: 'user-fail-open-window' });
+            return origSendBeacon.apply(this, arguments);
+          }
           if (inScope) {
             say('warn', 'uncapturable-beacon', { action: 'block' });
             return false;
@@ -3134,6 +3206,11 @@
           return origFetchLater.apply(this, arguments);
         }
         const say = reporter(shape, Date.now());
+        if (refuse === 'uncapturable-deferred-fetch' && failOpenActive()) {
+          noteUncheckedSend(refuse);
+          say('warn', 'unchecked-fail-open', { action: 'send', cause: refuse, because: 'user-fail-open-window' });
+          return origFetchLater.apply(this, arguments);
+        }
         if (refuse) {
           say('warn', refuse, { action: 'block' });
           throw new TypeError(blockMessage(refuse, null));

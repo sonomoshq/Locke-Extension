@@ -8,7 +8,7 @@ import { strict as assert } from 'node:assert';
 // the global, but the module-level import does.
 globalThis.chrome = { runtime: {} };
 
-const { classify, classifyLastError, classifyLastErrorDetail, disabledWebHostsFromStatus, sanitizeBody, screeningFromStatus } = await import('../shared/health-client.js');
+const { failOpenFromStatus, classify, classifyLastError, classifyLastErrorDetail, disabledWebHostsFromStatus, sanitizeBody, screeningFromStatus } = await import('../shared/health-client.js');
 const { SCREENING, STATUS } = await import('../shared/constants.js');
 
 // ── classifyLastError ──────────────────────────────────────────────
@@ -278,4 +278,12 @@ test('disabledWebHostsFromStatus: junk entries and non-status replies are refuse
   );
   assert.equal(disabledWebHostsFromStatus({ type: 'error', disabledWebHosts: ['chatgpt.com'] }), null);
   assert.equal(disabledWebHostsFromStatus(null), null);
+});
+
+test('failOpenFromStatus: only a status frame speaks; absent fields mean closed', () => {
+  assert.equal(failOpenFromStatus(null), null);
+  assert.equal(failOpenFromStatus({ type: 'error' }), null);
+  assert.deepEqual(failOpenFromStatus({ type: 'status' }), { failOpen: false, untilMs: null });
+  assert.deepEqual(failOpenFromStatus({ type: 'status', fail_open: true, fail_open_until_ms: 5 }), { failOpen: true, untilMs: 5 });
+  assert.deepEqual(failOpenFromStatus({ type: 'status', fail_open: 'yes' }), { failOpen: false, untilMs: null });
 });

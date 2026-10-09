@@ -44,6 +44,10 @@
   // storage.local only — never storage.managed, because it is not a policy
   // knob, and never merged into `settings`, because nothing here may edit it.
   const DISABLED_WEB_HOSTS_KEY = 'disabledWebHosts';
+  // Desktop-owned fail-open window (shared/constants.js FAIL_OPEN_KEY), read
+  // from storage.session. Never a setting here; absent or expired reads closed.
+  const FAIL_OPEN_KEY = 'failOpenWindow';
+  const UNCHECKED = 'SONOMOS_UNCHECKED';
   const COVERAGE_WORDS = new Set(['capture_path', 'catalog_host', 'open_web']);
 
   // Loaded by the manifest in THIS isolated world, independently of the
@@ -180,6 +184,16 @@
     // embedded frames or other origins.
     if (event.source !== window) return;
     const data = event.data;
+    // The shim sent a request unscreened under the desktop app's fail-open
+    // window: forward the tally. Content-free; best effort (a dead channel
+    // cannot be told, and the send already happened).
+    if (data && data.type === UNCHECKED) {
+      try {
+        const p = askWorker({ type: 'uncheckedSend' });
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      } catch { /* nothing to tell */ }
+      return;
+    }
     if (!data || data.type !== CAPTURE || typeof data.callId !== 'number' ||
         typeof data.requestB64 !== 'string') return;
 
@@ -282,7 +296,19 @@
   // `chrome.storage.local.get(…)` there yields undefined and every profile
   // would silently fall back to SHIM_DEFAULTS — including an admin policy.
   async function readShimConfig() {
-    const config = { ...SHIM_DEFAULTS, ...(requiresConsent ? { dataSharingAllowed: false } : {}) };
+    const config = {
+      ...SHIM_DEFAULTS,
+      ...(requiresConsent ? { dataSharingAllowed: false } : {}),
+      failOpenActive: false,
+      failOpenUntilMs: 0
+    };
+    try {
+      const w = (await api.storage.session.get(FAIL_OPEN_KEY))?.[FAIL_OPEN_KEY];
+      if (w && w.failOpen === true && Number.isFinite(w.untilMs) && Date.now() < w.untilMs) {
+        config.failOpenActive = true;
+        config.failOpenUntilMs = w.untilMs;
+      }
+    } catch { /* unreadable → closed */ }
     try {
       const local = await api.storage.local.get([SETTINGS_KEY, DISABLED_WEB_HOSTS_KEY, DATA_CONSENT_KEY]);
       Object.assign(config, pick(local?.[SETTINGS_KEY]));

@@ -52,7 +52,7 @@ const plain = (v) => JSON.parse(JSON.stringify(v));
 
 // `relay(message)` stands in for the service worker: return a promise, return
 // something that is not thenable, or throw synchronously.
-function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null, userAgent = '',
+function makeWorld({ dialect = 'chromium', relay, local = {}, session = {}, managed = null, userAgent = '',
                     consentRecord = { version: 1, granted: true, technical: false },
                     location = { origin: 'https://chat.openai.com', href: 'https://chat.openai.com/' },
                     documentOrigin = null } = {}) {
@@ -69,6 +69,7 @@ function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null, us
   let storageChanged;
   const storage = {
     local: { get: async () => stored },
+    session: { get: async (key) => (typeof key === 'string' ? { [key]: session[key] } : { ...session }) },
     // storage.managed throws when no policy is configured — the common case on
     // a personal install, and it must never change behaviour.
     managed: { get: async () => { if (managed === null) throw new Error('no managed schema'); return managed; } },
@@ -280,7 +281,7 @@ for (const dialect of ['chromium', 'firefox']) {
     assert.ok(pushed.length >= 1, 'the shim is pushed its config at document_start');
     assert.deepEqual(
       Object.keys(pushed[0].data.config).sort(),
-      ['allowedProviders', ...(dialect === 'firefox' ? ['dataSharingAllowed'] : []), 'debugLogging', 'enforceTimeoutMs'],
+      ['allowedProviders', ...(dialect === 'firefox' ? ['dataSharingAllowed'] : []), 'debugLogging', 'enforceTimeoutMs', 'failOpenActive', 'failOpenUntilMs'],
       'only shim settings and the consent boolean cross; private preferences stay isolated'
     );
     assert.equal(pushed[0].data.config.enforceTimeoutMs, 9000);
@@ -727,3 +728,28 @@ test('content consent version cannot be bypassed by managed settings', async () 
   assert.equal(world.relayed.length, 0);
   assert.equal(world.configs().at(-1).data.config.dataSharingAllowed, false);
 });
+
+// ── the desktop app's fail-open window ─────────────────────────────
+//
+// Desktop-owned, read from storage.session. Active only while the stored
+// window is on AND unexpired; anything else pushes closed.
+
+for (const dialect of ['chromium', 'firefox']) {
+  test(`content-script (${dialect}): the fail-open window crosses only while active and unexpired`, async () => {
+    const until = Date.now() + 60_000;
+    const cases = [
+      [{ failOpenWindow: { failOpen: true, untilMs: until } }, true],
+      [{ failOpenWindow: { failOpen: true, untilMs: Date.now() - 1 } }, false],
+      [{ failOpenWindow: { failOpen: false, untilMs: until } }, false],
+      [{ failOpenWindow: { failOpen: true, untilMs: null } }, false],
+      [{}, false]
+    ];
+    for (const [session, expected] of cases) {
+      const world = makeWorld({ dialect, session });
+      await settle();
+      const config = plain(world.configs().at(-1).data.config);
+      assert.equal(config.failOpenActive, expected, JSON.stringify(session));
+      assert.equal(config.failOpenUntilMs, expected ? until : 0);
+    }
+  });
+}

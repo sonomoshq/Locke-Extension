@@ -180,6 +180,13 @@ export const AUDIT_MAX_ENTRIES = 100;
 // otherwise the site the user took out of scope is the one that starts
 // failing closed the moment the desktop app stops.
 export const DISABLED_WEB_HOSTS_KEY = 'disabledWebHosts';
+
+// The desktop app's fail-open window, as the native host's last status reply
+// reported it: { failOpen, untilMs, receivedAt } in storage.session. Desktop-
+// owned like DISABLED_WEB_HOSTS_KEY: the extension has no setting for it and
+// never asks the user. Active only while `failOpen && Date.now() < untilMs`;
+// absent / never probed / expired all mean CLOSED (block, as always).
+export const FAIL_OPEN_KEY = 'failOpenWindow';
 // Matches the cap the host and the desktop writer both apply.
 export const MAX_DISABLED_WEB_HOSTS = 64;
 
@@ -478,7 +485,10 @@ export const MSG = Object.freeze({
   // desktop app via the native host. Carries `requestB64` — the shim's synthesized
   // raw HTTP request, base64 (sensitive; relayed, never logged) — plus the
   // optional `provider` and `coverage` labels.
-  CAPTURE: 'capture'
+  CAPTURE: 'capture',
+  // Content script → service worker: a request left unscreened under the
+  // desktop app's fail-open window. Tallied like an `unchecked` receipt.
+  UNCHECKED: 'uncheckedSend'
 });
 
 // The catalog's say in a capture decision, carried on every capture as
