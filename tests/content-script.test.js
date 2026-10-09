@@ -52,7 +52,7 @@ const plain = (v) => JSON.parse(JSON.stringify(v));
 
 // `relay(message)` stands in for the service worker: return a promise, return
 // something that is not thenable, or throw synchronously.
-function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
+function makeWorld({ dialect = 'chromium', relay, local = {}, session = {}, managed = null, userAgent = '',
                     consentRecord = { version: 1, granted: true, technical: false },
                     location = { origin: 'https://chat.openai.com', href: 'https://chat.openai.com/' },
                     documentOrigin = null } = {}) {
@@ -69,6 +69,7 @@ function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
   let storageChanged;
   const storage = {
     local: { get: async () => stored },
+    session: { get: async (key) => (typeof key === 'string' ? { [key]: session[key] } : { ...session }) },
     // storage.managed throws when no policy is configured — the common case on
     // a personal install, and it must never change behaviour.
     managed: { get: async () => { if (managed === null) throw new Error('no managed schema'); return managed; } },
@@ -80,6 +81,7 @@ function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
   const chromeNs = {
     runtime: {
       lastError: null,
+      getURL: (path) => `chrome-extension://abcdefghijklmnop/${path}`,
       sendMessage(message, callback) {
         relayed.push(message);
         const out = answer(message);   // may throw, as an invalidated context does
@@ -102,6 +104,7 @@ function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
   const browserNs = {
     runtime: {
       lastError: null,
+      getURL: (path) => `moz-extension://0e2b6c1a-uuid/${path}`,
       sendMessage(message, options) {
         if (options !== undefined) throw new TypeError('Incorrect argument types for runtime.sendMessage');
         relayed.push(message);
@@ -122,9 +125,16 @@ function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
     }
   };
 
+  // Chrome 153+: a promise-based `browser` alongside `chrome`, both Chromium.
+  // `browser` is picked for messaging, exactly as on Firefox, so the relay is
+  // the promise path — but the extension URL is chrome-extension:.
+  const chromeBrowserNs = { ...browserNs, runtime: { ...browserNs.runtime, getURL: chromeNs.runtime.getURL } };
+
   const namespace = dialect === 'firefox'
     ? { browser: browserNs, chrome: geckoCompatChrome }
-    : { chrome: chromeNs };
+    : dialect === 'chrome-with-browser'
+      ? { browser: chromeBrowserNs, chrome: chromeNs }
+      : { chrome: chromeNs };
 
   // What the browser does with postMessage's second argument, which this
   // harness used to record and ignore. A targetOrigin that does not parse
@@ -150,6 +160,7 @@ function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
 
   const sandbox = {
     location,
+    navigator: { userAgent },
     console: { log: record('log'), warn: record('warn'), debug: record('debug'), error: record('error') },
     addEventListener: (type, fn) => { if (type === 'message') listeners.push(fn); },
     postMessage: (data, targetOrigin) => {
@@ -270,7 +281,7 @@ for (const dialect of ['chromium', 'firefox']) {
     assert.ok(pushed.length >= 1, 'the shim is pushed its config at document_start');
     assert.deepEqual(
       Object.keys(pushed[0].data.config).sort(),
-      ['allowedProviders', ...(dialect === 'firefox' ? ['dataSharingAllowed'] : []), 'debugLogging', 'enforceTimeoutMs'],
+      ['allowedProviders', ...(dialect === 'firefox' ? ['dataSharingAllowed'] : []), 'debugLogging', 'enforceTimeoutMs', 'failOpenActive', 'failOpenUntilMs'],
       'only shim settings and the consent boolean cross; private preferences stay isolated'
     );
     assert.equal(pushed[0].data.config.enforceTimeoutMs, 9000);
@@ -611,6 +622,34 @@ test('content-script: a malformed provider claim is dropped, not relayed', async
   }
 });
 
+// ── the coverage hint (the discovery gate) ──────────────────────────────
+//
+// The shim says how much of the capture decision the catalog already made;
+// the guard screens `capture_path` regardless and classifies the rest. Only
+// the three known words cross this hop — anything else is dropped, and an
+// absent hint is read downstream as "screen regardless".
+
+test('content-script: a known coverage word is relayed to the worker', async () => {
+  const world = makeWorld({});
+  for (const [i, coverage] of ['capture_path', 'catalog_host', 'open_web'].entries()) {
+    world.relayed.length = 0;
+    world.fromPage({ ...capture(20 + i), coverage });
+    await settle();
+    assert.deepEqual(plain(world.relayed[0]), { type: 'capture', requestB64: PAYLOAD_B64, coverage });
+  }
+});
+
+test('content-script: an unknown coverage word is dropped, not relayed', async () => {
+  const world = makeWorld({});
+  for (const junk of ['everything', 'CAPTURE_PATH', { evil: true }, 42, '', null]) {
+    world.relayed.length = 0;
+    world.fromPage({ ...capture(30), coverage: junk });
+    await settle();
+    assert.deepEqual(plain(world.relayed[0]), { type: 'capture', requestB64: PAYLOAD_B64 },
+      `coverage ${JSON.stringify(junk)} must not reach the worker`);
+  }
+});
+
 for (const dialect of ['chromium', 'firefox']) {
   test(`content-script (${dialect}): unknown provider content never crosses the relay boundary`, async () => {
     const world = makeWorld({ dialect });
@@ -660,6 +699,27 @@ test('content consent gate starts closed, rejects forged captures, resumes and r
   assert.equal(world.verdicts().at(-1).data.verdict.code, 'data-consent-required');
 });
 
+// Chrome 153 exposes `browser.runtime` too. Reading that as "Firefox" left
+// Chrome stuck in consent-required with every in-scope prompt blocked.
+test('content consent: Chrome with a `browser` namespace needs no consent', async () => {
+  const world = makeWorld({ dialect: 'chrome-with-browser', consentRecord: null,
+    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36' });
+  await settle();
+  world.fromPage(capture());
+  await settle();
+  assert.equal(world.relayed.length, 1);
+  assert.notEqual(world.configs().at(-1)?.data.config.dataSharingAllowed, false);
+});
+
+test('content consent: Edge still needs consent, whatever namespace it exposes', async () => {
+  const world = makeWorld({ dialect: 'chrome-with-browser', consentRecord: null,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0' });
+  world.fromPage(capture());
+  await settle();
+  assert.equal(world.relayed.length, 0);
+  assert.equal(world.verdicts().at(-1).data.verdict.code, 'data-consent-required');
+});
+
 test('content consent version cannot be bypassed by managed settings', async () => {
   const world = makeWorld({ dialect: 'firefox', consentRecord: { version: 0, granted: true }, managed: { dataSharingAllowed: true, dataSharingConsent: { version: 1, granted: true } } });
   await settle();
@@ -668,3 +728,28 @@ test('content consent version cannot be bypassed by managed settings', async () 
   assert.equal(world.relayed.length, 0);
   assert.equal(world.configs().at(-1).data.config.dataSharingAllowed, false);
 });
+
+// ── the desktop app's fail-open window ─────────────────────────────
+//
+// Desktop-owned, read from storage.session. Active only while the stored
+// window is on AND unexpired; anything else pushes closed.
+
+for (const dialect of ['chromium', 'firefox']) {
+  test(`content-script (${dialect}): the fail-open window crosses only while active and unexpired`, async () => {
+    const until = Date.now() + 60_000;
+    const cases = [
+      [{ failOpenWindow: { failOpen: true, untilMs: until } }, true],
+      [{ failOpenWindow: { failOpen: true, untilMs: Date.now() - 1 } }, false],
+      [{ failOpenWindow: { failOpen: false, untilMs: until } }, false],
+      [{ failOpenWindow: { failOpen: true, untilMs: null } }, false],
+      [{}, false]
+    ];
+    for (const [session, expected] of cases) {
+      const world = makeWorld({ dialect, session });
+      await settle();
+      const config = plain(world.configs().at(-1).data.config);
+      assert.equal(config.failOpenActive, expected, JSON.stringify(session));
+      assert.equal(config.failOpenUntilMs, expected ? until : 0);
+    }
+  });
+}

@@ -11,11 +11,11 @@
   <main>
     <p class="eyebrow">LOCKE EXTENSION · DATA SHARING</p>
     <h1>Choose what Locke can send to your desktop app</h1>
-    <p>Locke screens supported AI website requests on your device. It needs your permission before sending information outside your browser to the local Locke desktop app.</p>
+    <p>Locke checks requests you send on any website, on your device: the local Locke desktop app classifies each one, and screens the ones that look like an AI prompt or upload. It needs your permission before sending information outside your browser to that app.</p>
 
     <section aria-labelledby="screeningHeading">
       <h2 id="screeningHeading">Request data for local screening</h2>
-      <p>For the requests Locke screens, the extension sends the request body (including prompts, chat messages and supported uploads), destination, path/query, page-set headers and provider identity through native messaging to the Locke desktop app. That app checks the request and returns an allow, redact or block decision.</p>
+      <p>For each request a page sends with a body — on any website, not only AI sites — the extension sends the request body (including prompts, chat messages and supported uploads), destination, path/query, page-set headers and provider identity through native messaging to the Locke desktop app. That app first decides whether the request is AI traffic; one that is not is allowed unchanged and not screened. AI requests are checked and get an allow, redact or block decision.</p>
       <p>Depending on what you send, this can include personally identifying details, health information, financial and payment information, authentication information in page-set headers or content, personal communications, location, browsing activity, website content and search terms.</p>
       <p>The extension does not send these copies to Sonomos servers, advertising services or analytics services. Allowed or redacted requests continue to the website you are using. The desktop app has its own local retention settings; pausing sharing cannot recall or delete data it already received. See the <a href="https://sonomos.ai/locke/privacy" target="_blank" rel="noopener noreferrer">Locke privacy policy</a>.</p>
     </section>

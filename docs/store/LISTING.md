@@ -21,22 +21,27 @@ remains below is copy and human judgement.
 
 ## Summary (short description)
 
-Reused from the manifest `description` (129 chars, within every store's
+Reused from the manifest `description` (131 chars, within every store's
 132-char limit):
 
-> Connects your browser to the Locke desktop app so AI website requests are
-> held and scanned on-device before leaving your machine.
+> Connects your browser to the Locke desktop app so web requests are checked
+> on-device for AI traffic and screened before they leave.
 
 ## Long description
 
-Locke Extension connects supported AI websites, including ChatGPT, Claude,
-Gemini, Grok and Perplexity, to the Locke desktop app for on-device screening.
-For in-scope fetch/XHR requests with a body, it holds the request and transfers
-the body (including conversation text and supported uploaded files), method,
-destination, path/query and page-set headers to the local app through native
-messaging. The app returns a verdict:
+Locke Extension connects your browser to the Locke desktop app for on-device
+AI-traffic screening. On every website, for fetch/XHR requests with a body, it
+holds the request and transfers the body (including conversation text and
+supported uploaded files), method, destination, path/query and page-set headers
+to the local app through native messaging. The app first classifies the
+request locally — is this AI traffic? — and screens it only if it is, or if it
+targets a known AI service's prompt path (ChatGPT, Claude, Gemini, Grok,
+Perplexity and others in the built-in catalog), where it is always screened.
+The app returns a verdict:
 
-- **allow** — send the held request to the website.
+- **allow** — send the held request to the website (also the answer for a
+  request classified as not AI, which is released unchanged without being
+  screened).
 - **redact** — send the desktop app's rebuilt body to the website.
 - **block** — do not send the request; the page sees a network error.
 
@@ -44,13 +49,14 @@ No clean verdict means an in-scope request is blocked. A user's explicit
 time-boxed fail-open setting in the desktop app can return an unchecked
 verdict; the extension reports those sends in its popup.
 
-Content scripts run only on catalog-listed hosts and their matched
-subdomains/frames, without `<all_urls>`. Screening is further restricted by
-request-path rules, provider policy and disabled-site settings. Some
-cross-origin uploads from those pages are also screened. Not every action on
-a supported site is covered: navigation/address-bar search prompts,
-WebSockets, worker traffic and unrecognized upload shapes are outside this
-screening path. See https://github.com/sonomoshq/Locke-Extension/blob/main/HONEST.md.
+Content scripts run on every http/https page (never `file://`; no
+`<all_urls>`), because the extension no longer decides in the browser which
+sites are AI sites — the desktop app's classifier does. Provider policy and
+disabled-site settings can take sites back out. Cross-origin uploads started
+by a known AI service's page are always screened. Not every action is
+covered: navigation/address-bar search prompts, WebSockets, worker traffic,
+and beacons or synchronous requests off known AI prompt paths (which cannot
+be held, so cannot be classified) are outside this screening path. See https://github.com/sonomoshq/Locke-Extension/blob/main/HONEST.md.
 
 Scanning happens in the local desktop app. The extension does not send
 screening copies to a Sonomos cloud service; allowed/redacted page requests
@@ -65,8 +71,10 @@ include URLs or paths. Local connection requests carry browser/version and,
 for Chromium host registration, the extension ID. See
 https://sonomos.ai/locke/privacy for local processing and desktop retention.
 
-**Requires the Locke desktop app.** Without a working connection, in-scope
-requests are blocked and the toolbar badge shows the connection problem.
+**Requires the Locke desktop app.** Without a working connection, requests
+with a body are blocked — on every website — and the toolbar badge shows the
+connection problem, unless the user has opened a time-boxed fail-open window
+in the desktop app.
 
 ## Category
 
@@ -76,10 +84,10 @@ requests are blocked and the toolbar badge shows the connection problem.
 
 ## Single-purpose statement (Chrome Web Store)
 
-> Locke Extension has one purpose: it holds requests that AI websites send
-> from your browser and lets the local Locke desktop app scan them on-device,
-> enforcing the app's allow/redact/block verdict before the request leaves
-> your machine.
+> Locke Extension has one purpose: it holds the requests your browser sends
+> so the local Locke desktop app can tell, on-device, which are AI traffic and
+> scan those, enforcing the app's allow/redact/block verdict before the request
+> leaves your machine.
 
 ## Permission justifications
 
@@ -116,18 +124,30 @@ version }`. The browser also supplies the extension Origin. Neither carries
 request bodies. The portless host pattern accommodates Firefox; the
 extension-pages CSP pins `connect-src` to `http://127.0.0.1:18795`.
 
-### Content-script matches (24 AI hosts)
-Content scripts run only on the fixed list of protected AI surfaces (chat
-UIs, plus search hosts that carry chat traffic) generated from the product's surface
-catalog (`scripts/generate-surfaces.mjs`). These are the sites whose
-requests the extension exists to screen. It deliberately does NOT request
-`<all_urls>`.
+### Content-script matches (`http://*/*`, `https://*/*`)
+Content scripts run on every http and https page. AI services are not a fixed
+list: new AI sites, embedded assistants and AI features inside ordinary sites
+appear constantly, and a host list always lags them, leaving exactly the
+traffic the user does not know about unscreened. So the extension holds every
+request with a body and the desktop app's on-device classifier decides which
+ones are AI traffic; the rest are released unchanged, unscreened. Nothing is
+sent off the device. The catalog of known AI services still ships in the
+package, to mark their prompt paths as always-screened. It deliberately does
+NOT request `<all_urls>` (no `file://`/`ftp://`), and adds no host
+permission: the only host permission remains loopback.
+
+**Review note.** This is a broad-host-access change from 2.0.x, which matched
+24 catalog hosts. Chrome and Edge will show "Read and change all your data on
+all websites" and disable the extension on update until the user re-approves;
+Firefox prompts similarly. Chrome Web Store review for broad host access is
+typically slower — budget for it.
 
 ## Privacy disclosures
 
 - **Remote code:** none; scripts ship in the package.
-- **Data handled:** in-scope request content, supported files and request
-  metadata are transferred to the local desktop app for screening. Local
+- **Data handled:** request content, supported files and request metadata
+  from requests with a body, on any website, are transferred to the local
+  desktop app for classification and, where AI, screening. Local
   processing is not a reason to claim that no user data is handled.
 - **Destinations:** native messaging to the local app; loopback connection
   endpoints as described above; the page's original destination for

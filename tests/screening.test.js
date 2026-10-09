@@ -859,14 +859,11 @@ test('a malformed lastCaptureFailure is ignored rather than guessed at', () => {
 });
 
 // A reported failure: "Locke is blocking requests on
-// google.com — since when is Google an AI site?" `www.google.com` is a real,
-// deliberate catalog entry (shared/ai-surfaces.json's `search` provider —
-// AI-answer search engines are treated like chat surfaces) — but "AI sites"
-// asserts a category a plain search page visibly does not belong to. The copy
-// must describe what actually decides scope (catalog membership: AI apps AND
-// search engines) rather than assert a property of the site a user can
-// correctly dispute.
-test('every "held back" sentence names AI apps AND search engines, never bare "AI sites"', () => {
+// google.com — since when is Google an AI site?" — "AI sites" asserts a
+// category a plain page visibly does not belong to. Since the discovery gate
+// (super PR #15) every website is in scope and the classifier decides, so the
+// copy names the sites Locke covers without claiming they are AI sites.
+test('every "held back" sentence names the websites Locke covers, never bare "AI sites"', () => {
   const details = [
     copyFor({ status: STATUS.CONNECTED, error: 'worker-error' }).detail,
     copyFor({ status: STATUS.DISCONNECTED }).detail,
@@ -880,8 +877,8 @@ test('every "held back" sentence names AI apps AND search engines, never bare "A
   ];
   for (const detail of details) {
     assert.ok(!/\bAI sites\b/.test(detail), `must not say the bare, disputable phrase: ${detail}`);
-    assert.match(detail, /search engines/, `must name search engines specifically: ${detail}`);
-    assert.match(detail, /AI apps/, `must still name AI apps: ${detail}`);
+    assert.match(detail, /websites (Locke|it) covers/, `must name the covered websites: ${detail}`);
+    assert.ok(!/AI apps and search engines/.test(detail), `the old catalog list is gone: ${detail}`);
   }
 });
 

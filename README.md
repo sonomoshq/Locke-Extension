@@ -38,14 +38,14 @@ requests then continue to the website the user is using.
 > ([`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 This is a deliberately simple hold-and-enforce capture surface. It contains no
-detection or redaction logic of its own: when the page sends a bodied request to
-an AI web surface, the extension holds it, ships the raw request to the Locke
-desktop app, and applies the verdict — send it unchanged (`allow`), send the
+detection or redaction logic of its own: when a page on any website sends a bodied
+request, the extension holds it, ships the raw request to the Locke
+desktop app — which classifies it and screens only AI-shaped traffic — and applies the verdict — send it unchanged (`allow`), send the
 app's rebuilt request (`redact`), or block it. All scanning and redaction happen
 **in the desktop app**. The failure posture is **fail-closed**: no verdict, no
 send.
 
-It covers browser-based AI web apps. Locke screens desktop / native AI apps by a
+It covers every website in the browser; the desktop app decides which requests are AI traffic. Locke screens desktop / native AI apps by a
 separate path that this extension does not feed; the two are independent, and
 this repository is only the browser half.
 
@@ -64,40 +64,43 @@ facts, because a reachable desktop app does not prove the screener behind it is 
 > **Read `HONEST.md` before reading this section as a coverage claim.** Only
 > requests with a BODY are screened. A prompt that reaches a provider as a
 > top-level navigation — address bar, default search engine, `?q=` deep link,
-> `<form>` submit — is not screened on **any** host, search hosts included;
-> the search entries in `web_hosts` are declared `web_screening: "none"` in
-> the catalog and are there because those hostnames also carry other surfaces'
-> chat traffic. On those hosts' own pages the extension holds **nothing** —
-> the generator narrows them to an empty path list — so a Google Maps XHR or a
-> Bing telemetry beacon is neither screened nor blocked. Screening
-> navigation-borne prompts is deferred to 1.x.
+> `<form>` submit — is not screened on **any** host, search hosts included.
+> Screening navigation-borne prompts is deferred to 1.x.
+>
+> **Every website is in scope** (the discovery gate, super PR #15). The shim
+> runs on every http(s) page and holds every bodied fetch/XHR; the Locke
+> desktop app's on-device classifier decides which are AI traffic and screens
+> only those. Requests classified not-AI are released unchanged. With the
+> desktop app down, every bodied request is **blocked** — on every site —
+> unless the user opened a fail-open window in the desktop app.
 
 - **Page-world fetch / XHR interception** (`content/shim.js`) — runs in the page's
-  MAIN world and wraps outbound `fetch` and `XMLHttpRequest`. If the request host
-  matches an AI **web surface** (ChatGPT, Claude, Gemini, Grok, Perplexity, and the
-  in-scope search hosts — from `shared/ai-surfaces.json` → `web_hosts`, baked into
-  `content/web-surfaces.generated.js` as `SONOMOS_WEB_HOSTS`) and carries a body,
-  the shim HOLDS it, captures the exact body bytes, synthesizes the raw HTTP
-  request, and enforces the verdict it gets back — **except on a host the
-  catalog narrows to a list of paths.** `chatgpt.com`, `claude.ai` and
-  `www.perplexity.ai` each declare a `capture_path_allowlist`
-  (`SONOMOS_CAPTURE_PATHS` in the same generated file), and on those three
-  hosts a bodied request whose path is not on the list is **not held** — it
-  goes out as the page issued it. That currently includes `claude.ai`'s
-  same-origin attachment upload. The paths, and what the gap means, are in
-  [`HONEST.md`](HONEST.md) ("only a short list of PATHS is screened"); read
-  that before treating this bullet as a coverage claim. It also holds a **cross-origin
+  MAIN world and wraps outbound `fetch` and `XMLHttpRequest`. If the request
+  carries a body and its host is not switched off, the shim HOLDS it, captures
+  the exact body bytes, synthesizes the raw HTTP request, relays it with a
+  `coverage` hint, and enforces the verdict it gets back. The hint comes from
+  the AI **web surface** catalog (`shared/ai-surfaces.json` → `web_hosts` and
+  `capture_path_allowlist`, baked into `content/web-surfaces.generated.js`):
+  `capture_path` — a catalog host's prompt path, screened regardless of the
+  classifier; `catalog_host` — a catalog host off its prompt paths (sign-in,
+  sentinel, billing; and the `web_screening: "none"` search hosts' own
+  pages); `open_web` — everything else. The last two are classified first
+  and screened only if the classifier calls them AI. So a path missing from
+  an allow-list (e.g. `claude.ai`'s same-origin attachment upload) now
+  depends on the classifier rather than going out unseen; see
+  [`HONEST.md`](HONEST.md). It also holds a **cross-origin
   object write initiated by one of those pages** — the pre-signed `PUT` an AI
   web app uses to send an attachment straight to S3 / GCS / Azure Blob, which
   never addresses an AI host and so was previously unscreened. That scope is
   bounded by the *initiator*, not the destination: nothing is added to the
   surface catalog and no host permission is requested, because the shim already
-  runs inside the page. Other requests are not relayed for screening. The
-  fetch wrapper may still
+  runs inside the page. That upload is always a `capture_path`. The
+  fetch wrapper may
   snapshot their inputs before deciding scope; see the minimization follow-up
   in [`DATA-FLOW.md`](docs/architecture/DATA-FLOW.md#scope-and-minimization-follow-up).
   `navigator.sendBeacon` is also wrapped, but a beacon cannot be held at all, so
-  an in-scope one carrying data is refused rather than let through. What the
+  one carrying data to a catalog prompt path is refused rather than let
+  through; elsewhere it cannot be classified and is sent. What the
   extension does **not** cover — `WebSocket`, unrecognised upload shapes,
   prompts carried in a query string — is catalogued in
   [`HONEST.md`](HONEST.md).
@@ -267,10 +270,10 @@ information; the browser-added Cookie header is not captured. The separate
 cross-origin upload path omits the presigned URL's query from the screening
 copy. Allowed/redacted requests still go to the user's chosen website.
 
-Content scripts run only on catalog-listed AI hosts and their matched
-subdomains/frames, not all websites; there is no `<all_urls>` grant. Request
-path rules, provider policy and disabled-site settings further narrow
-screening. This is not complete coverage of every action on a supported site.
+Content scripts run on every http/https page (no `<all_urls>` grant, so no
+`file://`), and every bodied request is relayed to the local desktop app for
+classification; only requests it classifies as AI, and catalog prompt paths,
+are screened. Provider policy and disabled-site settings take sites out. This is not complete coverage of every action on a supported site.
 See [`HONEST.md`](HONEST.md) and the [data flow](docs/architecture/DATA-FLOW.md).
 
 The extension does not persist request bodies. It does keep local diagnostic
