@@ -641,6 +641,26 @@ test('capture: no provider named means no provider key on the frame', async () =
   assert.ok(!('provider' in frames[0]), 'an absent claim must not become a null one');
 });
 
+// The coverage hint rides the native frame the same way the provider does:
+// verbatim when it is a known word, omitted otherwise — and omitted means the
+// native host screens regardless.
+test('capture: a known coverage hint rides the native frame; anything else is omitted', async () => {
+  const frames = [];
+  nativeHandler = (payload) => {
+    frames.push(payload);
+    return { type: 'receipt', receipt: { decision: 'allow', redactedCount: 0 } };
+  };
+
+  await deliver({ ...captureMsg, coverage: 'open_web' }, TRUSTED);
+  await deliver({ ...captureMsg, coverage: 'screen-nothing' }, TRUSTED);
+  await deliver(captureMsg, TRUSTED);
+
+  assert.equal(frames.length, 3);
+  assert.equal(frames[0].coverage, 'open_web');
+  assert.ok(!('coverage' in frames[1]), 'an unknown word must not reach the native host');
+  assert.ok(!('coverage' in frames[2]), 'an absent hint must not become a null one');
+});
+
 // The badge moved only in `runCheck`, on the heartbeat, so screening that
 // died between beats left the toolbar clean for up to 30 s while
 // every in-scope request on the page was already being refused. The evidence

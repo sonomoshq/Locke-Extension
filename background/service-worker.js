@@ -10,6 +10,7 @@ import {
   AUDIT_MAX_ENTRIES,
   BLOCK_BADGE_MS,
   BRIDGE_MSG,
+  COVERAGE_WORDS,
   DEFAULTS,
   DISABLED_WEB_HOSTS_KEY,
   hostMatches,
@@ -22,6 +23,7 @@ import {
   REGISTRATION_URL,
   SCREENING,
   SCREENING_KEY,
+  FAIL_OPEN_KEY,
   STATE_KEY,
   SETTINGS_KEY,
   STATUS
@@ -192,6 +194,28 @@ async function storeDisabledWebHosts(served) {
     await ext.storage.local.set({ [DISABLED_WEB_HOSTS_KEY]: applied });
   } catch { /* storage unavailable — the previous set stands */ }
   return applied;
+}
+
+// Content scripts read the fail-open window straight from storage.session
+// (see content-script.js), which Chromium hides from them by default.
+try {
+  const lifted = ext.storage.session.setAccessLevel?.({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' });
+  if (lifted && typeof lifted.catch === 'function') lifted.catch(() => {});
+} catch { /* no such API (Firefox) — content scripts then read closed */ }
+
+// Persist the fail-open window the host reported. Only a status reply that
+// said something rewrites it (`served` null leaves the last answer, which
+// expires on its own). Written only on change, so content scripts re-push
+// config exactly when the answer moved.
+async function storeFailOpen(served) {
+  if (!served) return;
+  try {
+    const stored = (await ext.storage.session.get(FAIL_OPEN_KEY))?.[FAIL_OPEN_KEY];
+    if (stored && stored.failOpen === served.failOpen && stored.untilMs === served.untilMs) return;
+    await ext.storage.session.set({
+      [FAIL_OPEN_KEY]: { failOpen: served.failOpen, untilMs: served.untilMs, receivedAt: Date.now() }
+    });
+  } catch { /* storage unavailable — the previous answer stands, and expires */ }
 }
 
 // What this extension is currently enforcing, for the ack. Read from storage
@@ -571,6 +595,8 @@ async function performCheck(_reason) {
       await storeDisabledWebHosts(result.disabledWebHosts);
     }
 
+    await storeFailOpen(result.failOpen);
+
     const next = {
       status: result.status,
       httpStatus: result.httpStatus,
@@ -861,8 +887,11 @@ async function refreshDebugFlag() {
 // `provider` is the catalog id the shim attributed this capture to, relayed
 // verbatim — this worker holds no catalog of its own and must not coin one.
 // Omitted from the frame entirely when there is none, so an unattributed
-// capture is byte-identical to the frame older builds sent.
-async function captureViaHost(requestB64, provider) {
+// capture is byte-identical to the frame older builds sent. `coverage` is the
+// shim's catalog hint for the guard's discovery gate (capture_path |
+// catalog_host | open_web), relayed the same way: verbatim when it is one of
+// the known words, omitted otherwise — and omitted means "screen regardless".
+async function captureViaHost(requestB64, provider, coverage) {
   const startedAt = Date.now();
   // Base64 length, not the payload: enough to tell "a 4 MB upload timed out"
   // from "a 2 KB prompt was rejected".
@@ -871,7 +900,8 @@ async function captureViaHost(requestB64, provider) {
     const response = await nativeRequest({
       type: BRIDGE_MSG.CAPTURE,
       requestB64,
-      ...(provider ? { provider } : {})
+      ...(provider ? { provider } : {}),
+      ...(COVERAGE_WORDS.has(coverage) ? { coverage } : {})
     }, NATIVE_CALL_TIMEOUT_MS, 'native-timeout');
     const ms = Date.now() - startedAt;
     if (!response || typeof response !== 'object') {
@@ -1013,11 +1043,12 @@ ext.alarms.onAlarm.addListener((alarm) => {
 
 ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!isTrustedSender(sender)) return false;
-  // One held AI request (raw, base64) to relay to the desktop app.
+  // One held request (raw, base64) to relay to the desktop app.
   if (message?.type === MSG.CAPTURE && typeof message.requestB64 === 'string') {
     captureViaHost(
       message.requestB64,
-      typeof message.provider === 'string' && message.provider ? message.provider : null
+      typeof message.provider === 'string' && message.provider ? message.provider : null,
+      message.coverage
     )
       .then(sendResponse)
       .catch((e) => {
@@ -1026,6 +1057,12 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, code: 'capture-error' });
       });
     return true;
+  }
+  if (message?.type === MSG.UNCHECKED) {
+    // A send that left unscreened under the desktop app's fail-open window:
+    // same tally as an `unchecked` receipt. Shape-only, no content.
+    noteScreening(null, { uncheckedSends: 1, withheldItems: 0, redactedItems: 0, blockedSends: 0 });
+    return false;
   }
   if (message?.type === MSG.REQUEST_CHECK) {
     // The popup is open, so the worker is awake and the user is looking at

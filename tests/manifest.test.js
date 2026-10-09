@@ -73,89 +73,26 @@ test('manifest: the browser minimums are at or above what these keys need', () =
     'gecko strict_min_version must be >= 128 for match_origin_as_fallback');
 });
 
-// ── the catalog is the authority on which hosts are a surface ──────
+// ── where we inject: every http(s) page, and nothing past that ─────
 //
-// The stack's ONE definition of "the same host" is true for an entry, for any
-// subdomain of it, case-insensitively,
-// with trailing dots stripped. content/shim.js implements exactly that in
-// `isAiHost`, so a request to `www.perplexity.ai` is in enforcement scope. But
-// `matches` listed the catalog's exact spellings only, so the shim was never
-// INJECTED on `www.perplexity.ai` and enforced nothing there. The catalogue
-// and the extension disagreed about what counts as a protected surface, and
-// the extension lost.
-//
-// The check is mechanical: take every spelling the catalog calls the same
-// host, and confirm the injection surface still reaches it.
+// Super PR #15 (the discovery gate) moved the "is this AI traffic?" decision
+// into the guard's classifier, so the shim runs on every page and the catalog
+// only decides each capture's `coverage` hint. These pin the new ceiling from
+// both sides: every web page is reached, and nothing that is not a web page
+// (`<all_urls>` would add file:// and ftp://) or a new host permission rides
+// along with it.
 
-// Chrome/Firefox match-pattern host matching, for the `https://<host>/*` and
-// `https://*.<host>/*` shapes this manifest uses and nothing else. Kept
-// deliberately small — an over-clever matcher here would pass tests the
-// browser fails.
-function patternMatchesHost(pattern, host) {
-  const m = /^https:\/\/([^/]+)\/\*$/.exec(pattern);
-  if (!m) return false;
-  const hostPattern = m[1].toLowerCase();
-  const h = host.toLowerCase();
-  if (hostPattern.startsWith('*.')) {
-    const base = hostPattern.slice(2);
-    // `*.example.com` covers example.com itself as well as its subdomains.
-    return h === base || h.endsWith(`.${base}`);
-  }
-  return h === hostPattern;
-}
-
-test('manifest: the pattern matcher used by these tests behaves like the browser', () => {
-  // A test whose helper can never say no proves nothing, so pin the helper.
-  assert.equal(patternMatchesHost('https://claude.ai/*', 'claude.ai'), true);
-  assert.equal(patternMatchesHost('https://claude.ai/*', 'www.claude.ai'), false);
-  assert.equal(patternMatchesHost('https://*.claude.ai/*', 'claude.ai'), true);
-  assert.equal(patternMatchesHost('https://*.claude.ai/*', 'www.claude.ai'), true);
-  assert.equal(patternMatchesHost('https://*.claude.ai/*', 'notclaude.ai'), false);
-  assert.equal(patternMatchesHost('https://*.claude.ai/*', 'evil.com'), false);
-  assert.equal(patternMatchesHost('https://claude.ai/', 'claude.ai'), false, 'non-wildcard path');
-});
-
-test('manifest: every catalog spelling of a web surface is injected on', () => {
-  assert.ok(catalogHosts.length >= 20, 'the catalog must actually have been read');
+test('manifest: both capture entries inject on every http(s) page and nothing else', () => {
   for (const cs of captureEntries) {
-    for (const host of catalogHosts) {
-      // The spellings the shared host rule calls the same host.
-      for (const spelling of [host, `www.${host}`, `chat.${host}`]) {
-        assert.ok(
-          cs.matches.some((pattern) => patternMatchesHost(pattern, spelling)),
-          `no content_scripts.matches pattern injects on ${spelling} ` +
-          `(catalog entry ${host}) — the shim enforces there but never runs there`
-        );
-      }
-    }
+    assert.deepEqual([...cs.matches].sort(), ['http://*/*', 'https://*/*'],
+      'the generator emits exactly these — re-run `npm run generate`');
   }
 });
 
-test('manifest: injection does not reach a host the catalog does not name', () => {
-  // The other direction, which is the one that fails toward "we intercepted
-  // something we should not have". `*.<entry>` must not become `*`.
-  const strangers = [
-    'example.com', 'notclaude.ai', 'claude.ai.evil.com', 'perplexity.ai.attacker.net',
-    'google.com', 'bing.com', 'mail.google.com', 'accounts.google.com'
-  ];
-  for (const cs of captureEntries) {
-    for (const stranger of strangers) {
-      assert.ok(
-        !cs.matches.some((pattern) => patternMatchesHost(pattern, stranger)),
-        `${stranger} must not be injected on`
-      );
-    }
-  }
-});
-
-test('manifest: only https, and no host permission was widened to do any of this', () => {
-  for (const cs of captureEntries) {
-    for (const pattern of cs.matches) {
-      assert.ok(pattern.startsWith('https://'), `${pattern} must be https`);
-    }
-  }
+test('manifest: no host permission was widened to do any of this', () => {
   // The capture path is native messaging; the only host permission is the
-  // desktop app's loopback presence listener. Nothing above may add to it.
+  // desktop app's loopback presence listener. Injecting everywhere is a
+  // content-script grant, not a host permission, and must stay that way.
   //
   // Portless, and asserted as such in both directions. `http://127.0.0.1/*` is
   // wider than the one port we use, and narrowing it to
@@ -196,36 +133,6 @@ test('manifest: the extension-pages CSP pins connect-src to the loopback presenc
     'exactly the origin shared/constants.js POSTs the presence beacon to, and nothing beside it'
   );
   assert.equal(new URL(PRESENCE_URL).hostname, '127.0.0.1', 'and that origin is loopback');
-});
-
-// ── the removal direction ──────────────────────────────────────────
-//
-// `manifest: every catalog spelling of a web surface is injected on` pins the
-// ADDITION direction: the catalog gains a host and `npm run generate` was run
-// to match. The removal direction had no pin at all. A host deleted from the
-// catalog but left behind in the manifest keeps being injected on, and the
-// `strangers` list above is hand-written, so nothing would notice.
-//
-// That is not hypothetical. The sync this test arrived with removed six hosts,
-// two of which (`phind.com`, `www.phind.com`) belonged to a service that had
-// shut down seven months earlier, and one of which (`chat.lechat.fr`) has no
-// DNS record at all. A dead hostname in a shipped MAIN-world injection list is
-// worse than dead weight: whoever registers that name next inherits a
-// MAIN-world content script on their pages, from us, for free.
-
-test('manifest: no match pattern names a host the catalog no longer lists', () => {
-  const catalog = new Set(catalogHosts);
-  for (const cs of captureEntries) {
-    for (const pattern of cs.matches) {
-      const host = /^https:\/\/(?:\*\.)?([^/]+)\/\*$/.exec(pattern)?.[1];
-      assert.ok(host, `match pattern ${pattern} is not a shape this generator emits`);
-      assert.ok(
-        catalog.has(host),
-        `${pattern} injects on "${host}", which shared/ai-surfaces.json does not list — ` +
-          're-run `npm run generate` after syncing the vendored catalog'
-      );
-    }
-  }
 });
 
 test('manifest: the generated host lists have not drifted from the catalog', async () => {

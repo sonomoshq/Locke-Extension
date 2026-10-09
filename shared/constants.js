@@ -180,6 +180,13 @@ export const AUDIT_MAX_ENTRIES = 100;
 // otherwise the site the user took out of scope is the one that starts
 // failing closed the moment the desktop app stops.
 export const DISABLED_WEB_HOSTS_KEY = 'disabledWebHosts';
+
+// The desktop app's fail-open window, as the native host's last status reply
+// reported it: { failOpen, untilMs, receivedAt } in storage.session. Desktop-
+// owned like DISABLED_WEB_HOSTS_KEY: the extension has no setting for it and
+// never asks the user. Active only while `failOpen && Date.now() < untilMs`;
+// absent / never probed / expired all mean CLOSED (block, as always).
+export const FAIL_OPEN_KEY = 'failOpenWindow';
 // Matches the cap the host and the desktop writer both apply.
 export const MAX_DISABLED_WEB_HOSTS = 64;
 
@@ -474,11 +481,31 @@ export const MSG = Object.freeze({
   REQUEST_CHECK: 'requestCheck',
   STATE_UPDATE: 'stateUpdate',
   TELEMETRY: 'telemetry',
-  // Content script → service worker: one held AI request to relay to the
+  // Content script → service worker: one held request to relay to the
   // desktop app via the native host. Carries `requestB64` — the shim's synthesized
-  // raw HTTP request, base64 (sensitive; relayed, never logged).
-  CAPTURE: 'capture'
+  // raw HTTP request, base64 (sensitive; relayed, never logged) — plus the
+  // optional `provider` and `coverage` labels.
+  CAPTURE: 'capture',
+  // Content script → service worker: a request left unscreened under the
+  // desktop app's fail-open window. Tallied like an `unchecked` receipt.
+  UNCHECKED: 'uncheckedSend'
 });
+
+// The catalog's say in a capture decision, carried on every capture as
+// `coverage` for the guard's discovery gate (content/shim.js coverageFor):
+//   capture_path — catalog host on a prompt path, or a catalog page's upload:
+//                  screened regardless of what the classifier says
+//   catalog_host — catalog host, off its capture paths: classify, then screen
+//                  only if it looks like AI
+//   open_web     — every other host: classify, then screen only if AI
+// An absent or unrecognised word is read by the native host as `capture_path`.
+// content/content-script.js keeps an inline copy of this set.
+export const COVERAGE = Object.freeze({
+  CAPTURE_PATH: 'capture_path',
+  CATALOG_HOST: 'catalog_host',
+  OPEN_WEB: 'open_web'
+});
+export const COVERAGE_WORDS = new Set(Object.values(COVERAGE));
 
 // Native-messaging host message `type`s. The host knows exactly these three.
 export const BRIDGE_MSG = Object.freeze({

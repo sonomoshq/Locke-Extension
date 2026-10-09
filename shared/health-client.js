@@ -144,6 +144,16 @@ export function disabledWebHostsFromStatus(payload) {
     .map((host) => host.replace(/\.+$/, '').toLowerCase());
 }
 
+// The desktop app's fail-open window from a status reply:
+// { failOpen, untilMs }. Null when the reply is not a status frame — "said
+// nothing", which must not rewrite what is stored. A status frame that omits
+// the fields (an older host) is an explicit CLOSED answer.
+export function failOpenFromStatus(payload) {
+  if (!payload || typeof payload !== 'object' || payload.type !== 'status') return null;
+  const untilMs = Number.isFinite(payload.fail_open_until_ms) ? payload.fail_open_until_ms : null;
+  return { failOpen: payload.fail_open === true, untilMs };
+}
+
 // `applied` is what the extension is currently enforcing, sent so the host can
 // write the extension's half of the surface-override ack. Omitted entirely
 // when we have nothing to report — the host then
@@ -162,6 +172,7 @@ export async function checkHealth({ settings, applied } = {}) {
       body: response?.type === 'status' ? sanitizeBody(response) : null,
       screening: screeningFromStatus(response),
       disabledWebHosts: disabledWebHostsFromStatus(response),
+      failOpen: failOpenFromStatus(response),
       latencyMs: Math.round(performance.now() - start),
       timestamp: Date.now(),
       error: response?.code === 'bridge-protocol-mismatch'
@@ -188,6 +199,7 @@ export async function checkHealth({ settings, applied } = {}) {
       // stored set stands; see DISABLED_WEB_HOSTS_KEY for why a silent host
       // must not re-enable screening the user declined.
       disabledWebHosts: null,
+      failOpen: null,
       error: kind
     };
   }

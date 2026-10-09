@@ -29,7 +29,7 @@
 
   // Duplicated from shared/constants.js on purpose — a content script cannot
   // import an ES module. Keep them in step (PAGE_MSG, SETTINGS_KEY,
-  // SHIM_SETTING_KEYS, and the two DEFAULTS values).
+  // SHIM_SETTING_KEYS, COVERAGE_WORDS, and the two DEFAULTS values).
   const CAPTURE = 'SONOMOS_CAPTURE';
   const VERDICT = 'SONOMOS_VERDICT';
   const CONFIG = 'SONOMOS_CONFIG';
@@ -44,6 +44,11 @@
   // storage.local only — never storage.managed, because it is not a policy
   // knob, and never merged into `settings`, because nothing here may edit it.
   const DISABLED_WEB_HOSTS_KEY = 'disabledWebHosts';
+  // Desktop-owned fail-open window (shared/constants.js FAIL_OPEN_KEY), read
+  // from storage.session. Never a setting here; absent or expired reads closed.
+  const FAIL_OPEN_KEY = 'failOpenWindow';
+  const UNCHECKED = 'SONOMOS_UNCHECKED';
+  const COVERAGE_WORDS = new Set(['capture_path', 'catalog_host', 'open_web']);
 
   // Loaded by the manifest in THIS isolated world, independently of the
   // page's mutable MAIN-world globals. Provider labels are untrusted page
@@ -76,13 +81,28 @@
   // the namespace pick is inlined. Firefox exposes BOTH `browser` (promises)
   // and a Chrome-compat `chrome` (callbacks only — `sendMessage` there returns
   // undefined, not a promise), so preferring `browser` is what keeps Firefox
-  // from failing closed on every in-scope request.
-  const isGecko = typeof globalThis.browser !== 'undefined' && !!globalThis.browser?.runtime;
-  const api = isGecko ? globalThis.browser : globalThis.chrome;
+  // from failing closed on every in-scope request. Chrome 153+ ALSO exposes a
+  // promise-based `browser`, so "has `browser`" picks the namespace and
+  // nothing else: it is not "is Firefox".
+  const hasBrowserNs = typeof globalThis.browser !== 'undefined' && !!globalThis.browser?.runtime;
+  const api = hasBrowserNs ? globalThis.browser : globalThis.chrome;
   // Keep these version/key literals pinned to shared/data-consent.js by test.
   const DATA_CONSENT_KEY = 'dataSharingConsent';
   const DATA_CONSENT_VERSION = 1;
-  const requiresConsent = isGecko || /Edg\//.test(globalThis.navigator?.userAgent || '');
+  // Which browser decides the consent requirement — the same answer
+  // shared/data-consent.js's requiresDataConsent() gives. That one asks
+  // `runtime.getBrowserInfo`, which content scripts don't get, so this asks
+  // the extension's own URL scheme instead: `moz-extension:` is Firefox and
+  // nothing else, and a page cannot reach this isolated world to fake it. The
+  // user-agent is only the fallback for a runtime with no getURL. Treating
+  // Chrome as Firefox here left Chrome 153 stuck in "consent required", every
+  // in-scope prompt blocked (super PR #15 review).
+  const ownUrl = (() => {
+    try { return String(api?.runtime?.getURL?.('') || ''); } catch { return ''; }
+  })();
+  const userAgent = globalThis.navigator?.userAgent || '';
+  const isFirefox = ownUrl ? ownUrl.startsWith('moz-extension:') : /Firefox\//.test(userAgent);
+  const requiresConsent = isFirefox || /Edg\//.test(userAgent);
   let dataSharingAllowed = !requiresConsent;
   let configGeneration = 0;
 
@@ -145,7 +165,7 @@
   // once per dialect would relay the same held request twice.
   // So branch on the namespace and use each one's native contract.
   function askWorker(message) {
-    if (isGecko) return api.runtime.sendMessage(message);
+    if (hasBrowserNs) return api.runtime.sendMessage(message);
     return new Promise((resolve, reject) => {
       try {
         api.runtime.sendMessage(message, (response) => {
@@ -164,6 +184,16 @@
     // embedded frames or other origins.
     if (event.source !== window) return;
     const data = event.data;
+    // The shim sent a request unscreened under the desktop app's fail-open
+    // window: forward the tally. Content-free; best effort (a dead channel
+    // cannot be told, and the send already happened).
+    if (data && data.type === UNCHECKED) {
+      try {
+        const p = askWorker({ type: 'uncheckedSend' });
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      } catch { /* nothing to tell */ }
+      return;
+    }
     if (!data || data.type !== CAPTURE || typeof data.callId !== 'number' ||
         typeof data.requestB64 !== 'string') return;
 
@@ -172,6 +202,14 @@
     // labels. The request and verdict still travel normally without a label.
     const provider = typeof data.provider === 'string' && providerIds.has(data.provider)
       ? data.provider : null;
+
+    // How much of the capture decision the catalog already made (shim.js
+    // coverageFor): the guard screens `capture_path` regardless and classifies
+    // the rest first. Only the three known words are relayed; anything else is
+    // dropped, and an absent hint is read downstream as "screen regardless" —
+    // the old behaviour. A page that forges `open_web` on a capture path gains
+    // nothing it could not get from a pristine `fetch` (HONEST.md).
+    const coverage = COVERAGE_WORDS.has(data.coverage) ? data.coverage : null;
 
     const reply = (verdict) => {
       try {
@@ -203,7 +241,8 @@
       const resp = askWorker({
         type: 'capture',
         requestB64: data.requestB64,
-        ...(provider ? { provider } : {})
+        ...(provider ? { provider } : {}),
+        ...(coverage ? { coverage } : {})
       });
       if (resp && typeof resp.then === 'function') {
         resp.then((v) => reply(v ?? null), (e) => {
@@ -257,7 +296,19 @@
   // `chrome.storage.local.get(…)` there yields undefined and every profile
   // would silently fall back to SHIM_DEFAULTS — including an admin policy.
   async function readShimConfig() {
-    const config = { ...SHIM_DEFAULTS, ...(requiresConsent ? { dataSharingAllowed: false } : {}) };
+    const config = {
+      ...SHIM_DEFAULTS,
+      ...(requiresConsent ? { dataSharingAllowed: false } : {}),
+      failOpenActive: false,
+      failOpenUntilMs: 0
+    };
+    try {
+      const w = (await api.storage.session.get(FAIL_OPEN_KEY))?.[FAIL_OPEN_KEY];
+      if (w && w.failOpen === true && Number.isFinite(w.untilMs) && Date.now() < w.untilMs) {
+        config.failOpenActive = true;
+        config.failOpenUntilMs = w.untilMs;
+      }
+    } catch { /* unreadable → closed */ }
     try {
       const local = await api.storage.local.get([SETTINGS_KEY, DISABLED_WEB_HOSTS_KEY, DATA_CONSENT_KEY]);
       Object.assign(config, pick(local?.[SETTINGS_KEY]));

@@ -140,24 +140,16 @@ const SCREENING_LABEL = {
   [SCREENING.UNCONFIRMED]: 'Not yet confirmed'
 };
 
-// What actually governs interception: `content_scripts.matches`, generated
-// from `shared/ai-surfaces.json` → `web_hosts` (content/shim.js `isAiHost`).
-// That catalog is not just chat apps — it deliberately also names search
-// engines whose results page can carry an AI-generated answer (the `search`
-// provider entry, e.g. `www.google.com`, "Search queries routinely contain
-// PII; the extension treats them like chat surfaces"). Calling the whole set
-// "AI sites" invites exactly the report this phrase used to draw — "since
-// when is Google an AI site?" — a real question, because a plain search does
-// not read as one. Naming it as a coverage LIST ("the AI apps and search
-// engines Locke screens") rather than a claimed CATEGORY ("AI sites") is the
-// accurate version: it says what actually decides scope (catalog
-// membership) instead of asserting a property of the site that a user can
-// correctly dispute.
+// What actually governs interception: every http(s) page since the discovery
+// gate (super PR #15) — the desktop app's classifier, not a catalog, decides
+// which requests are AI traffic. This used to name a coverage LIST ("the AI
+// apps and search engines Locke covers") because the catalog decided scope;
+// with no list left to name, it names the sites without claiming a category.
 //
 // Self-contained on purpose — it is dropped into sentences whose subject is a
-// request, so a pronoun here ("the AI apps and search engines it covers")
-// would attach to the wrong noun.
-const COVERED_SITES = 'the AI apps and search engines Locke covers';
+// request, so a pronoun here ("the websites it covers") would attach to the
+// wrong noun.
+const COVERED_SITES = 'the websites Locke covers';
 
 // What is actually being held back during an outage, and it is NOT "everything
 // you send to those sites".
@@ -179,7 +171,7 @@ const COVERED_SITES = 'the AI apps and search engines Locke covers';
 // Written out rather than composed from COVERED_SITES: the leading "Locke" is
 // what lets the trailing "it" be read correctly, and composing the two would
 // either repeat the name twice in one clause or strand the pronoun.
-const SCREENED_REQUESTS = 'the requests Locke screens on the AI apps and search engines it covers';
+const SCREENED_REQUESTS = 'the requests Locke screens on the websites it covers';
 const SCREENED_REQUESTS_CAP =
   SCREENED_REQUESTS.charAt(0).toUpperCase() + SCREENED_REQUESTS.slice(1);
 

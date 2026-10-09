@@ -33,6 +33,7 @@ function makeWorld(onCapture, extraGlobals = {}, { settleConfig = true, document
   const netCalls = [];   // arguments the original (held) fetch was released with
   const listeners = [];  // the shim's window message listeners
   const logs = [];       // every diagnostic line the shim emitted
+  const unchecked = [];  // SONOMOS_UNCHECKED tallies the shim posted
   let innerWindow = null; // the context's OWN view of `window` (vm global proxy)
 
   // The diagnostics are a contract, so the harness captures them the way a
@@ -88,6 +89,7 @@ function makeWorld(onCapture, extraGlobals = {}, { settleConfig = true, document
     addEventListener: (type, fn) => { if (type === 'message') listeners.push(fn); },
     postMessage: (data, targetOrigin) => {
       if (!deliverable(targetOrigin)) return;
+      if (data && data.type === 'SONOMOS_UNCHECKED') { unchecked.push(data.cause); return; }
       if (!data || data.type !== 'SONOMOS_CAPTURE') return;
       Promise.resolve(onCapture(data)).then((verdict) => {
         // event.source must be what the shim sees as `window` — inside the
@@ -113,7 +115,7 @@ function makeWorld(onCapture, extraGlobals = {}, { settleConfig = true, document
   // An empty config is a real answer: the channel spoke and named nothing
   // disabled, so every catalog surface stays screened.
   if (settleConfig) deliver({ type: 'SONOMOS_CONFIG', config: {} });
-  return { sandbox, netCalls, logs, deliver };
+  return { sandbox, netCalls, logs, deliver, unchecked };
 }
 
 // A world with the debug lines on, so the healthy-path reasons are assertable.
@@ -656,7 +658,10 @@ test('config: the default enforce ceiling is pinned, and both copies agree', () 
 
 test('out-of-scope host and bodyless requests pass through untouched', async () => {
   let meshAsked = false;
-  const { sandbox, netCalls, logs } = makeDebugWorld(() => { meshAsked = true; return allowVerdict; });
+  const { sandbox, netCalls, logs, deliver } = makeDebugWorld(() => { meshAsked = true; return allowVerdict; });
+  // Out of scope now means a host the user switched off: every other host is
+  // held for the classifier.
+  deliver({ type: 'SONOMOS_CONFIG', config: { disabledWebHosts: ['example.com'] } });
 
   await sandbox.fetch('https://example.com/api', { method: 'POST', body: '{"q":1}' });
   await sandbox.fetch(AI_URL); // no body → nothing to scan
@@ -963,7 +968,7 @@ test('XHR: a reused object does not inherit the cancellation of the send before 
 });
 
 test('XHR: out-of-scope and bodyless sends report at debug and pass through', async () => {
-  const { sandbox, logs } = makeWorld(() => allowVerdict, {
+  const { sandbox, logs, deliver } = makeWorld(() => allowVerdict, {
     SONOMOS_DEBUG: true,
     XMLHttpRequest: class {
       constructor() { this.sent = []; this.setHeaders = []; this.aborted = false; }
@@ -973,6 +978,7 @@ test('XHR: out-of-scope and bodyless sends report at debug and pass through', as
       abort() { this.aborted = true; }
     }
   });
+  deliver({ type: 'SONOMOS_CONFIG', config: { disabledWebHosts: ['example.com'] } });
 
   const off = new sandbox.XMLHttpRequest();
   off.open('POST', 'https://example.com/api', true);
@@ -2188,8 +2194,12 @@ test('upload: ordinary third-party POSTs are NOT held — the false-positive flo
   // holding: error reports, analytics, feature flags, auth, payments. Every
   // one of them is a POST with no object-write declaration, and every one of
   // them must pass through exactly as it did before the upload scope existed.
-  let meshAsked = false;
-  const { sandbox, netCalls, logs } = makeDebugWorld(() => { meshAsked = true; return allowVerdict; });
+  //
+  // Since the discovery gate every bodied one IS held — for the classifier,
+  // as open_web — so the floor is now "never claimed as an attachment", which
+  // is what would screen them regardless of what the classifier says.
+  const captured = [];
+  const { sandbox, netCalls, logs } = makeDebugWorld((msg) => { captured.push(msg); return allowVerdict; });
 
   const passers = [
     ['https://o123.ingest.sentry.io/api/1/envelope/', { method: 'POST', body: '{"event":1}', headers: { 'content-type': 'application/x-sentry-envelope' } }],
@@ -2204,8 +2214,10 @@ test('upload: ordinary third-party POSTs are NOT held — the false-positive flo
   ];
   for (const [url, init] of passers) await sandbox.fetch(url, init);
 
-  assert.equal(meshAsked, false, 'not one of these may reach the desktop app');
-  assert.equal(netCalls.length, passers.length, 'every one passed through untouched');
+  assert.equal(captured.length, passers.length - 1, 'every bodied one goes to the classifier');
+  assert.ok(captured.every((m) => m.coverage === 'open_web'), 'not one may be claimed as an upload');
+  assert.ok(!logs.some((l) => /\bscope=upload\b/.test(l.line)), 'nor logged as one');
+  assert.equal(netCalls.length, passers.length, 'every one went out on the allow');
   assert.equal(logs.filter((l) => l.level === 'warn').length, 0, 'and none of them warned');
 });
 
@@ -2214,10 +2226,11 @@ test('upload: the scope is bounded by the PAGE, not by the destination', async (
   // runs on a page the catalog names, and the upload scope refuses to act
   // unless that is true. This is what stops the fix from becoming "hold every
   // cross-origin PUT in the browser".
-  let meshAsked = false;
-  const { sandbox, netCalls } = makeWorld(() => { meshAsked = true; return allowVerdict; }, OFF_SURFACE_PAGE);
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => { captured.push(msg); return allowVerdict; }, OFF_SURFACE_PAGE);
   await sandbox.fetch(STORAGE_PUT, { method: 'PUT', body: 'file bytes' });
-  assert.equal(meshAsked, false, 'an off-catalog page may not widen what we hold');
+  assert.equal(captured[0].coverage, 'open_web',
+    'an off-catalog page may not claim the screen-regardless coverage');
   assert.equal(netCalls.length, 1);
 });
 
@@ -2386,12 +2399,15 @@ test('upload: an XHR whose attachment could not be examined aborts rather than u
   assertBlocked(logs, 'upload-withheld', 'unsupported');
 });
 
-test('upload: an XHR to an ordinary third-party host is untouched', async () => {
-  const { sandbox, logs } = makeXhrWorld(() => allowVerdict);
+test('upload: an XHR to an ordinary third-party host is classified, not an upload', async () => {
+  const captured = [];
+  const { sandbox, logs } = makeXhrWorld((msg) => { captured.push(msg); return allowVerdict; });
   const xhr = new sandbox.XMLHttpRequest();
   xhr.open('POST', 'https://o123.ingest.sentry.io/api/1/envelope/', true);
   xhr.send('{"event":1}');
+  await waitFor(() => xhr.sent.length === 1);
   assert.deepEqual(xhr.sent, ['{"event":1}']);
+  assert.equal(captured[0].coverage, 'open_web');
   assert.equal(xhr.aborted, false);
   assert.equal(logs.filter((l) => l.level === 'warn').length, 0);
 });
@@ -2594,9 +2610,12 @@ test('upload: a beacon carrying a file is refused; telemetry beacons are not', (
   assert.match(assertBlocked(logs, 'uncapturable-beacon'), /\bscope=upload\b/);
 });
 
-test('upload: the body test keeps the false-positive floor — telemetry shapes still pass', async () => {
-  let meshAsked = false;
-  const { sandbox, netCalls, logs } = makeDebugWorld(() => { meshAsked = true; return allowVerdict; });
+test('upload: the body test keeps the false-positive floor — telemetry shapes are never claimed as uploads', async () => {
+  // Every bodied request is classified since super PR #15, so these reach the
+  // desktop app — as ordinary open-web capture, never as an upload (which the
+  // guard screens regardless).
+  const captured = [];
+  const { sandbox, netCalls, logs } = makeDebugWorld((msg) => { captured.push(msg); return allowVerdict; });
   const strings = new FormData();
   strings.append('event', 'page_view');
   const passers = [
@@ -2609,14 +2628,14 @@ test('upload: the body test keeps the false-positive floor — telemetry shapes 
     ['https://api.example.net/item/1', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{"title":"x"}' }]
   ];
   for (const [url, init] of passers) await sandbox.fetch(url, init);
-  assert.equal(meshAsked, false, 'not one of these may reach the desktop app');
+  assert.ok(captured.every((m) => m.coverage === 'open_web'), 'not one of these may be claimed as an upload');
   assert.equal(netCalls.length, passers.length);
   assert.equal(logs.filter((l) => l.level === 'warn').length, 0);
 });
 
-test('upload: on a search page that screens nothing, a file POST is left alone as before', async () => {
-  let meshAsked = false;
-  const { sandbox, netCalls } = makeWorld(() => { meshAsked = true; return allowVerdict; }, {
+test('upload: on a search page that screens nothing, a file POST is classified, never claimed as an upload', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => { captured.push(msg); return allowVerdict; }, {
     location: { href: 'https://www.google.com/', origin: 'https://www.google.com', hostname: 'www.google.com' },
     SONOMOS_WEB_HOSTS: ['chatgpt.com', 'www.google.com'],
     SONOMOS_CAPTURE_PATHS: { 'www.google.com': [] }
@@ -2624,7 +2643,8 @@ test('upload: on a search page that screens nothing, a file POST is left alone a
   const form = new FormData();
   form.append('encoded_image', new Blob(['x'], { type: 'image/jpeg' }), 'photo.jpg');
   await sandbox.fetch('https://lens.google.com/v3/upload', { method: 'POST', body: form });
-  assert.equal(meshAsked, false, 'the catalog says this surface has no screened submission path');
+  assert.ok(captured.every((m) => m.coverage === 'open_web'),
+    'the catalog says this surface has no screened submission path');
   assert.equal(netCalls.length, 1);
 });
 
@@ -2891,9 +2911,11 @@ test('frame: a data: frame gets the host scope and no upload scope', async () =>
   // and `about:srcdoc` do — `document.baseURI` is the data: URL itself — so
   // PAGE_HOST is '' and the initiator-scoped upload path cannot fire there.
   // The AI-host scope still does, because it reads the REQUEST's host.
+  // Since the discovery gate it is still HELD — as open_web, for the
+  // classifier — just never claimed as a catalog attachment.
   const captured = [];
-  const { sandbox, netCalls, logs } = makeFrameWorld((msg) => {
-    captured.push(msg.requestB64);
+  const { sandbox, netCalls } = makeFrameWorld((msg) => {
+    captured.push(msg);
     return allowVerdict;
   }, 'data:text/html,<p>x', 'data:text/html,<p>x', {
     origin: 'null', documentOrigin: 'null', SONOMOS_DEBUG: true
@@ -2904,17 +2926,17 @@ test('frame: a data: frame gets the host scope and no upload scope', async () =>
     body: 'curriculum vitae'
   });
 
-  assert.equal(captured.length, 0, 'no initiator to scope an upload on');
-  assert.equal(netCalls.length, 1, 'so it goes out untouched');
-  assertReason(logs, 'not-in-scope', 'debug');
+  assert.equal(captured.length, 1, 'held for the classifier');
+  assert.equal(captured[0].coverage, 'open_web', 'no initiator to scope an upload on');
+  assert.equal(netCalls.length, 1, 'released on the allow');
 });
 
 test('frame: a frame created by a NON-catalog page gets no upload scope', async () => {
   // The direction that would be worse: inheriting a base must not turn every
   // opaque frame into an AI surface.
   const captured = [];
-  const { sandbox, netCalls, logs } = makeDebugWorld((msg) => {
-    captured.push(msg.requestB64);
+  const { sandbox, netCalls } = makeDebugWorld((msg) => {
+    captured.push(msg);
     return allowVerdict;
   }, {
     location: { href: 'about:blank', origin: 'null' },
@@ -2926,9 +2948,9 @@ test('frame: a frame created by a NON-catalog page gets no upload scope', async 
     body: 'somebody else’s file'
   });
 
-  assert.equal(captured.length, 0, 'nothing was held');
-  assert.equal(netCalls.length, 1, 'and it went out untouched');
-  assertReason(logs, 'not-in-scope', 'debug');
+  assert.equal(captured.length, 1, 'held for the classifier, like any request');
+  assert.equal(captured[0].coverage, 'open_web', 'but never as a catalog attachment');
+  assert.equal(netCalls.length, 1);
 });
 
 test('frame: a <base> tag cannot move an ordinary page out of scope', async () => {
@@ -2955,6 +2977,16 @@ test('frame: a <base> tag cannot move an ordinary page out of scope', async () =
 // same rule as a function, and tests/constants.test.js pins that; this is the
 // half that proves the shim's copy has not drifted from it.
 
+async function coverageOf(host) {
+  let coverage = null;
+  const { sandbox } = makeWorld((msg) => { coverage = msg.coverage; return allowVerdict; });
+  await sandbox.fetch(`https://${host}/backend-api/conversation`, {
+    method: 'POST',
+    body: '{"prompt":"x"}'
+  });
+  return coverage;
+}
+
 async function heldSpelling(host) {
   let held = false;
   const { sandbox } = makeWorld(() => { held = true; return allowVerdict; });
@@ -2980,15 +3012,41 @@ test('scope: every catalog spelling of a surface is held', async () => {
   }
 });
 
-test('scope: a host the catalog does not name is never held', async () => {
+// Every host is held now (the discovery gate); what the catalog still decides
+// is the coverage hint. A stranger that could pass for a catalog surface must
+// not borrow its `capture_path`, and a catalog spelling must not lose it.
+test('scope: a host the catalog does not name is held as open_web', async () => {
   for (const stranger of [
     'notchatgpt.com',                 // the prefix trick the dot boundary stops
     'chatgpt.com.evil.example',       // a suffix, not a parent
     'openai.com',                     // a parent of an entry is not an entry
     'example.com'
   ]) {
-    assert.equal(await heldSpelling(stranger), false, `${stranger} must NOT be held`);
+    assert.equal(await heldSpelling(stranger), true, `${stranger} must be held for the classifier`);
+    assert.equal(await coverageOf(stranger), 'open_web', `${stranger} is not a catalog surface`);
   }
+  for (const spelling of ['chat.openai.com', 'CHAT.OpenAI.COM', 'www.chatgpt.com']) {
+    assert.equal(await coverageOf(spelling), 'capture_path', `${spelling} is a catalog surface`);
+  }
+});
+
+test('scope: an open-web capture claims no provider, even from a catalog page', async () => {
+  // The harness page is chat.openai.com. Its analytics POST to a third party
+  // is not OpenAI traffic; only SCOPE.UPLOAD may borrow the page's provider.
+  const captured = [];
+  const { sandbox } = makeWorld((msg) => { captured.push(msg); return allowVerdict; });
+  await sandbox.fetch('https://analytics.example/collect', { method: 'POST', body: '{"e":1}' });
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].provider, null);
+  assert.equal(captured[0].coverage, 'open_web');
+});
+
+test('scope: a non-http(s) target is not held', async () => {
+  let held = false;
+  const { sandbox, netCalls } = makeWorld(() => { held = true; return allowVerdict; });
+  await sandbox.fetch('ftp://files.example/x', { method: 'POST', body: 'x' });
+  assert.equal(held, false);
+  assert.equal(netCalls.length, 1);
 });
 
 // ── fetchLater(): the sendBeacon hole, one API later ───────────────
@@ -3293,30 +3351,30 @@ test('XHR: a send made before the config lands is released when the admin allowl
   assert.equal(xhr.aborted, false);
 });
 
-test('an out-of-scope host never waits for the config', async () => {
+test('a bodyless request never waits for the config', async () => {
   let meshAsked = false;
   const { sandbox, netCalls } = makeWorld(() => { meshAsked = true; return allowVerdict; }, {}, { settleConfig: false });
 
-  // The disable set is subtractive, so it can never say anything about a host
-  // the catalog does not name. Waiting on it here would put a page-start pause
-  // on every third-party request an AI page makes.
+  // Every host is in scope now, so the page-start wait is paid by any BODIED
+  // request in a page's opening quarter-second. A bodyless one has nothing to
+  // hold and must not pay it.
   const before = Date.now();
-  await sandbox.fetch('https://example.com/api', { method: 'POST', body: '{"q":1}' });
-  const outOfScopeMs = Date.now() - before;
+  await sandbox.fetch('https://example.com/api');
+  const bodylessMs = Date.now() - before;
 
   assert.equal(netCalls.length, 1, 'released immediately, untouched');
   assert.equal(meshAsked, false);
-  assert.ok(outOfScopeMs < 100, `out-of-scope request must not wait on config (took ${outOfScopeMs}ms)`);
+  assert.ok(bodylessMs < 100, `a bodyless request must not wait on config (took ${bodylessMs}ms)`);
 
-  // The same world, same missing config: a catalog host DOES wait, which is
+  // The same world, same missing config: a bodied one DOES wait, which is
   // what makes the line above an assertion about scope rather than about a
   // wait that never happens.
   const inScopeAt = Date.now();
-  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
+  await sandbox.fetch('https://example.com/api', { method: 'POST', body: '{"q":1}' });
   const inScopeMs = Date.now() - inScopeAt;
 
   assert.equal(meshAsked, true);
-  assert.ok(inScopeMs > outOfScopeMs, `an in-scope request waits for the first config (took ${inScopeMs}ms)`);
+  assert.ok(inScopeMs > bodylessMs, `an in-scope request waits for the first config (took ${inScopeMs}ms)`);
 });
 
 // ── which surface a capture is attributed to ────────────────────────────
@@ -3392,6 +3450,9 @@ test('provider: a cross-origin upload is attributed to the page it came from', a
 
   assert.equal(captured.length, 1, 'the attachment reached the desktop app');
   assert.equal(captured[0].provider, 'openai');
+  // Attachment bytes do not look like an AI request; left to the classifier
+  // they would go unscreened. A catalog page's upload is screened regardless.
+  assert.equal(captured[0].coverage, 'capture_path');
 });
 
 // A build whose generated globals predate the map must still capture — it just
@@ -3410,16 +3471,20 @@ test('provider: none is claimed when the generated map is missing', async () => 
   assert.equal(captured[0].provider, null);
 });
 
-// ── path scoping ──────────────────────────────────────────────────────────
+// ── path scoping → coverage ───────────────────────────────────────────────
 //
-// The outage these pin: with chatgpt.com injected but unscoped, the shim held
-// EVERY request on the host. `/unauth-mweb/sentinel/chat-requirements/finalize`
-// carries an opaque proof-of-work payload that cannot be examined, so it
-// failed closed, ChatGPT never got its chat-requirements token, and the site
-// reported itself unreachable — while the popup still read "Connected".
+// The outage these used to pin: with chatgpt.com injected but unscoped, the
+// shim held EVERY request on the host and sent it to a screener that could not
+// examine sentinel's opaque proof-of-work, so it failed closed and ChatGPT
+// reported itself unreachable.
 //
-// Both directions matter. A change that stops holding the conversation POST is
-// a silent PII leak; a change that starts holding sentinel is an outage.
+// Since the discovery gate (super PR #15) every request is held and the
+// guard's classifier decides; the path allow-list now says how much the
+// classifier is trusted, via `coverage`. A prompt path is `capture_path`
+// (screened regardless); sentinel and sign-in are `catalog_host` (classified
+// first, so they come back a plain allow without a screen). Both directions
+// still matter: a prompt path demoted to `catalog_host` would let the
+// classifier skip a screen it must not skip.
 
 const CHATGPT_PATHS = {
   SONOMOS_CAPTURE_PATHS: {
@@ -3433,7 +3498,7 @@ const CHATGPT_PATHS = {
   SONOMOS_SKIP_PATH_SEGMENTS: [['event_logging'], ['telemetry'], ['v1', 'models']]
 };
 
-test('paths: the prompt POST on a narrowed host is still held', async () => {
+test('paths: the prompt POST on a narrowed host is a capture path', async () => {
   const captured = [];
   const { sandbox } = makeWorld((msg) => { captured.push(msg); return allowVerdict; }, CHATGPT_PATHS);
 
@@ -3442,13 +3507,14 @@ test('paths: the prompt POST on a narrowed host is still held', async () => {
     await sandbox.fetch(`https://chatgpt.com${path}`, { method: 'POST', body: '{"prompt":"hi"}' });
   }
   assert.equal(captured.length, 4, 'every prompt-bearing path must still be screened');
+  assert.deepEqual(captured.map((m) => m.coverage), Array(4).fill('capture_path'));
 });
 
-test('paths: sentinel, sign-in and settings on a narrowed host are NOT held', async () => {
-  let meshAsked = false;
-  const { sandbox, netCalls } = makeWorld(() => { meshAsked = true; return allowVerdict; }, CHATGPT_PATHS);
+test('paths: sentinel, sign-in and settings go to the classifier as catalog_host', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => { captured.push(msg); return allowVerdict; }, CHATGPT_PATHS);
 
-  const untouched = [
+  const offPath = [
     '/unauth-mweb/sentinel/chat-requirements/finalize',
     '/unauth-mweb/sentinel/chat-requirements/prepare',
     '/api/auth/session',
@@ -3456,53 +3522,56 @@ test('paths: sentinel, sign-in and settings on a narrowed host are NOT held', as
     '/backend-api/settings/user',
     '/unauth-mweb/events/performance'
   ];
-  for (const path of untouched) {
+  for (const path of offPath) {
     await sandbox.fetch(`https://chatgpt.com${path}`, { method: 'POST', body: '{}' });
   }
-  assert.equal(meshAsked, false, 'holding any of these is what broke the site');
-  assert.equal(netCalls.length, untouched.length, 'each must reach the network untouched');
+  assert.deepEqual(captured.map((m) => m.coverage), Array(offPath.length).fill('catalog_host'),
+    'held for the classifier, never claimed as a prompt path');
+  assert.equal(netCalls.length, offPath.length, 'a plain allow releases each one');
 });
 
 test('paths: a pattern never acts as a prefix', async () => {
-  let meshAsked = false;
-  const { sandbox } = makeWorld(() => { meshAsked = true; return allowVerdict; }, CHATGPT_PATHS);
+  const captured = [];
+  const { sandbox } = makeWorld((msg) => { captured.push(msg); return allowVerdict; }, CHATGPT_PATHS);
   // 3-segment reads and side-ops sit beside the 2-segment prompt POST. Equal
-  // segment counts are the only thing keeping them out.
+  // segment counts are the only thing keeping them off the capture path.
   for (const path of ['/backend-api/conversation/abc123',
                       '/backend-api/conversation/gen_title/abc123',
                       '/backend-api/conversation/message_feedback']) {
     await sandbox.fetch(`https://chatgpt.com${path}`, { method: 'POST', body: '{}' });
   }
-  assert.equal(meshAsked, false, 'a longer path must not be admitted by a shorter pattern');
+  assert.deepEqual(captured.map((m) => m.coverage), Array(3).fill('catalog_host'),
+    'a longer path must not be admitted by a shorter pattern');
 });
 
 test('paths: a host with no allow-list keeps capture-everything', async () => {
   const captured = [];
   const { sandbox } = makeWorld((msg) => { captured.push(msg); return allowVerdict; }, CHATGPT_PATHS);
   // chat.openai.com is in the harness host list and is NOT narrowed. Absence of
-  // an allow-list must never quietly stop screening a surface nobody narrowed.
+  // an allow-list must never quietly demote a surface nobody narrowed.
   await sandbox.fetch('https://chat.openai.com/anything/at/all', { method: 'POST', body: '{"a":1}' });
   assert.equal(captured.length, 1);
+  assert.equal(captured[0].coverage, 'capture_path');
 });
 
 test('paths: the deny-list still wins inside an allow-list', async () => {
-  let meshAsked = false;
-  const { sandbox } = makeWorld(() => { meshAsked = true; return allowVerdict; }, {
+  const captured = [];
+  const { sandbox } = makeWorld((msg) => { captured.push(msg); return allowVerdict; }, {
     SONOMOS_CAPTURE_PATHS: { 'chatgpt.com': ['/telemetry/conversation'] },
     SONOMOS_SKIP_PATH_SEGMENTS: [['telemetry']]
   });
   // A provider must not be able to re-admit telemetry by naming it.
   await sandbox.fetch('https://chatgpt.com/telemetry/conversation', { method: 'POST', body: '{}' });
-  assert.equal(meshAsked, false, 'skip_path_segments is a floor no per-provider data can lift');
+  assert.equal(captured[0].coverage, 'catalog_host',
+    'skip_path_segments is a floor no per-provider data can lift');
 });
 
 test('paths: a subdomain inherits the narrowing of its apex', async () => {
-  let meshAsked = false;
-  const { sandbox } = makeWorld(() => { meshAsked = true; return allowVerdict; }, CHATGPT_PATHS);
-  // Or the narrowing is dodged by spelling, which is how a captured surface
-  // turns into an uncaptured one.
+  const captured = [];
+  const { sandbox } = makeWorld((msg) => { captured.push(msg); return allowVerdict; }, CHATGPT_PATHS);
+  // Or the narrowing is dodged by spelling.
   await sandbox.fetch('https://ab.chatgpt.com/api/auth/session', { method: 'POST', body: '{}' });
-  assert.equal(meshAsked, false);
+  assert.equal(captured[0].coverage, 'catalog_host');
 });
 
 // ── unscreened surfaces: a host narrowed to NOTHING ───────────────────────
@@ -3543,13 +3612,16 @@ const pageAt = (host, path = '/') => ({
   location: { href: `https://${host}${path}`, origin: `https://${host}`, hostname: host }
 });
 
-test('unscreened: a POST on a search host’s own page is not held, even with no desktop app', async () => {
-  // onCapture answers null — the "no bridge" state that BLOCKS a held request.
-  // That is the user-visible bug: Google Maps and Flights broke whenever the
-  // desktop app was not running. The request must never be held at all.
-  let meshAsked = false;
-  const { sandbox, netCalls, logs } = makeDebugWorld(
-    () => { meshAsked = true; return null; },
+test('unscreened: a POST on a search host’s own page goes to the classifier as catalog_host', async () => {
+  // The discovery gate (super PR #15) reverses the passthrough these hosts got:
+  // every request goes to the guard's classifier now, and the empty list only
+  // demotes them to `catalog_host` — classified, screened only if it looks
+  // like AI. With no desktop app the request is refused like any other
+  // (fail-closed unless the user opened a fail-open window); that is the
+  // trade the gate makes, and why the coverage hint exists at all.
+  const captured = [];
+  const { sandbox, netCalls } = makeDebugWorld(
+    (msg) => { captured.push(msg); return allowVerdict; },
     { ...UNSCREENED, ...pageAt('www.google.com', '/maps') }
   );
 
@@ -3557,20 +3629,16 @@ test('unscreened: a POST on a search host’s own page is not held, even with no
     method: 'POST', body: 'ei=abc&s=web'
   });
 
-  assert.equal(meshAsked, false, 'nothing on an unscreened surface reaches the desktop app');
-  assert.equal(netCalls.length, 1, 'the request goes out exactly as the page issued it');
+  assert.equal(captured.length, 1, 'held for the classifier');
+  assert.equal(captured[0].coverage, 'catalog_host', 'never claimed as a prompt path');
+  assert.equal(netCalls.length, 1, 'a plain allow releases it');
   assert.ok(res && res.__net, 'the page gets the network’s own response');
-  const line = assertReason(logs, 'path-not-screened', 'debug');
-  assert.match(line, /\bby=unscreened\b/, 'the diagnostic names which rule declined it');
-  assert.match(line, /\bhost=www\.google\.com\b/);
-  assert.doesNotMatch(line, /atyp|ei=abc/, 'path only — the query string never reaches the console');
-  assert.equal(logs.filter((l) => l.level === 'warn').length, 0, 'passthrough is the healthy path');
 });
 
-test('unscreened: a bodied fetch and XHR on www.bing.com pass through untouched', async () => {
-  let meshAsked = false;
+test('unscreened: a bodied fetch and XHR on www.bing.com are classified, not screened outright', async () => {
+  const captured = [];
   const { sandbox, netCalls } = makeXhrWorld(
-    () => { meshAsked = true; return allowVerdict; },
+    (msg) => { captured.push(msg); return allowVerdict; },
     { extraGlobals: { ...UNSCREENED, ...pageAt('www.bing.com', '/search?q=x') } }
   );
 
@@ -3580,8 +3648,9 @@ test('unscreened: a bodied fetch and XHR on www.bing.com pass through untouched'
   const xhr = new sandbox.XMLHttpRequest();
   xhr.open('POST', 'https://www.bing.com/rewardsapp/reportActivity', true);
   xhr.send('{"activity":"x"}');
+  await waitFor(() => xhr.sent.length === 1);
 
-  assert.equal(meshAsked, false);
+  assert.deepEqual(captured.map((m) => m.coverage), ['catalog_host', 'catalog_host']);
   assert.equal(netCalls.length, 1, 'the fetch reached the network');
   assert.deepEqual(xhr.sent, ['{"activity":"x"}'], 'the XHR was forwarded, not aborted');
   assert.equal(xhr.aborted, false);
@@ -3620,8 +3689,14 @@ test('unscreened: the prompt POST on a screened host is still held (regression g
 });
 
 test('unscreened: a declined path on a screened host still reports by=paths', async () => {
-  const { sandbox, logs } = makeDebugWorld(() => allowVerdict, UNSCREENED);
-  await sandbox.fetch('https://chatgpt.com/api/auth/session', { method: 'POST', body: '{}' });
+  // The narrowing diagnostic now speaks only where the path still decides
+  // something on its own: an unholdable beacon, which off a capture path is
+  // sent rather than refused.
+  const { sandbox, logs } = makeDebugWorld(() => allowVerdict, {
+    ...UNSCREENED,
+    navigator: { sendBeacon() { return true; } }
+  });
+  assert.equal(sandbox.navigator.sendBeacon('https://chatgpt.com/api/auth/session', '{}'), true);
   const line = assertReason(logs, 'path-not-screened', 'debug');
   assert.match(line, /\bby=paths\b/, 'a short list and an empty list are different narrowings');
 });
@@ -3665,21 +3740,21 @@ test('unscreened: a subdomain of an unscreened host inherits the empty list on i
   // Same rule as every other narrowing — most specific entry wins, and a
   // subdomain with no entry of its own takes its apex's. `maps.google.com` is
   // not in the catalog; `www.google.com`'s own subdomains are the case.
-  let meshAsked = false;
+  const captured = [];
   const { sandbox, netCalls } = makeWorld(
-    () => { meshAsked = true; return allowVerdict; },
+    (msg) => { captured.push(msg); return allowVerdict; },
     { ...UNSCREENED, ...pageAt('accounts.www.google.com') }
   );
   await sandbox.fetch('https://accounts.www.google.com/signin', { method: 'POST', body: 'email=a@b.c' });
-  assert.equal(meshAsked, false);
+  assert.equal(captured[0].coverage, 'catalog_host');
   assert.equal(netCalls.length, 1);
 });
 
 test('unscreened: a frame with no host of its own takes its creator’s answer', async () => {
   // An about:blank child of duck.ai has no host on `location`; PAGE_HOST falls
   // back to the inherited base, which is the surface that made the frame. A
-  // chat POST from inside it to duckduckgo.com must be held exactly as it is
-  // from the top-level page …
+  // chat POST from inside it to duckduckgo.com must be a capture path exactly
+  // as it is from the top-level page …
   const captured = [];
   const held = makeFrameWorld(
     (msg) => { captured.push(msg); return allowVerdict; },
@@ -3687,31 +3762,34 @@ test('unscreened: a frame with no host of its own takes its creator’s answer',
     { documentOrigin: 'https://duck.ai', ...UNSCREENED }
   );
   await held.sandbox.fetch('https://duckduckgo.com/duckchat/v1/chat', { method: 'POST', body: '{"q":1}' });
-  assert.equal(captured.length, 1, 'a child frame of a screened page is still screened');
+  assert.equal(captured[0].coverage, 'capture_path', 'a child frame of a screened page is still screened');
 
-  // … and a child of www.google.com inherits the passthrough its creator gets.
-  let meshAsked = false;
+  // … and a child of www.google.com inherits the demotion its creator gets.
+  const passedCaptured = [];
   const passed = makeFrameWorld(
-    () => { meshAsked = true; return allowVerdict; },
+    (msg) => { passedCaptured.push(msg); return allowVerdict; },
     'about:blank', 'https://www.google.com/maps',
     { documentOrigin: 'https://www.google.com', ...UNSCREENED }
   );
   await passed.sandbox.fetch('https://www.google.com/maps/preview/place', { method: 'POST', body: 'x=1' });
-  assert.equal(meshAsked, false);
+  assert.equal(passedCaptured[0].coverage, 'catalog_host');
   assert.equal(passed.netCalls.length, 1);
 });
 
 test('unscreened: the deny-list still wins, and the diagnostic says it was the deny-list', async () => {
   // skip_path_segments is a global floor. From a duck.ai page the empty list
-  // on duckduckgo.com would have HELD this request; the deny-list is what let
-  // it through, and the diagnostic must say so rather than blame a narrowing
-  // that never got consulted.
+  // on duckduckgo.com would have made this a capture path; the deny-list
+  // demotes it to catalog_host, and the beacon diagnostic must say so rather
+  // than blame a narrowing that never got consulted.
+  const captured = [];
   const { sandbox, logs, netCalls } = makeDebugWorld(
-    () => allowVerdict,
-    { ...UNSCREENED, ...pageAt('duck.ai') }
+    (msg) => { captured.push(msg); return allowVerdict; },
+    { ...UNSCREENED, ...pageAt('duck.ai'), navigator: { sendBeacon() { return true; } } }
   );
   await sandbox.fetch('https://duckduckgo.com/telemetry/event', { method: 'POST', body: '{}' });
   assert.equal(netCalls.length, 1);
+  assert.equal(captured[0].coverage, 'catalog_host');
+  assert.equal(sandbox.navigator.sendBeacon('https://duckduckgo.com/telemetry/event', '{}'), true);
   const line = assertReason(logs, 'path-not-screened', 'debug');
   assert.match(line, /\bhost=duckduckgo\.com\b/);
   assert.match(line, /\bby=deny-list\b/);
@@ -3840,24 +3918,27 @@ test('policy: ids are matched case-insensitively and trimmed', async () => {
   assert.equal(meshAsked, true);
 });
 
-test('policy: the allowlist is subtractive — it cannot put a non-catalog host in scope', async () => {
-  let meshAsked = false;
+test('policy: the allowlist only subtracts catalog providers — open web still goes to the classifier', async () => {
+  const captured = [];
   const { sandbox, netCalls, deliver } = makeWorld(
-    () => { meshAsked = true; return allowVerdict; }, TWO_PROVIDERS
+    (msg) => { captured.push(msg); return allowVerdict; }, TWO_PROVIDERS
   );
 
-  // Whatever an admin — or a page forging this message — puts here, scope is
-  // still AI_HOSTS minus the excluded providers, never plus anything.
+  // Whatever an admin — or a page forging this message — puts here, it can
+  // only take catalog providers out of scope. It cannot promote a host to a
+  // capture path, and an unattributable host is never excluded by it.
   deliver({
     type: 'SONOMOS_CONFIG',
     config: { allowedProviders: ['openai', 'example-corp', 'not-a-provider', 42] }
   });
   await sandbox.fetch('https://example.com/api', { method: 'POST', body: '{"q":1}' });
-  assert.equal(meshAsked, false);
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].coverage, 'open_web', 'naming it in the list does not promote it');
+  assert.equal(captured[0].provider, null);
   assert.equal(netCalls.length, 1);
 
   await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' });
-  assert.equal(meshAsked, true, 'the catalog provider named in the list stays screened');
+  assert.equal(captured.length, 2, 'the catalog provider named in the list stays screened');
 });
 
 test('policy: an allowlist naming nothing the catalog knows screens nothing, and says so', async () => {
@@ -4389,4 +4470,145 @@ test('images: the extension adds no pass of its own, a desktop app that cannot a
   const { sandbox, netCalls } = makeWorld(() => ({ ok: false, code: 'no-bridge', message: 'not found' }), CHATGPT_PATHS);
   await assert.rejects(sandbox.fetch(DICTATION_URL, { method: 'POST', body: imageForm() }));
   assert.equal(netCalls.length, 0);
+});
+
+// ── the discovery gate without consent, and for unholdable sends ───
+//
+// Every request goes to the classifier now — but only when it CAN. Without the
+// user's data-sharing consent, and for a synchronous XHR that cannot be held,
+// nothing can reach the classifier, so only the old scope (a capture path) is
+// refused; everything the gate added passes untouched rather than breaking
+// every site the browser opens.
+
+test('discovery gate: without consent, open-web and catalog_host sends pass; capture paths are refused', async () => {
+  let captures = 0;
+  const { sandbox, netCalls, deliver } = makeWorld(() => { captures++; return allowVerdict; },
+    { navigator: { userAgent: 'Firefox/140.0' } });
+  deliver({ type: 'SONOMOS_CONFIG', config: { dataSharingAllowed: false } });
+
+  await sandbox.fetch('https://example.com/api', { method: 'POST', body: '{"q":1}' });
+  assert.equal(netCalls.length, 1, 'open web: released untouched');
+
+  await assert.rejects(sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":1}' }), /Data sharing/);
+  assert.equal(netCalls.length, 1, 'the capture path never left');
+  assert.equal(captures, 0, 'nothing reached the desktop app without consent');
+});
+
+test('discovery gate: a synchronous XHR off a capture path is released, on one it is refused', async () => {
+  let captures = 0;
+  const { sandbox } = makeXhrWorld(() => { captures++; return allowVerdict; });
+
+  const off = new sandbox.XMLHttpRequest();
+  off.open('POST', 'https://example.com/api', false);
+  off.send('{"q":1}');
+  assert.deepEqual(off.sent, ['{"q":1}'], 'cannot be held, so cannot be classified — released');
+
+  const on = new sandbox.XMLHttpRequest();
+  on.open('POST', AI_URL, false);
+  on.send('{"q":1}');
+  assert.equal(on.sent.length, 0, 'a capture path keeps the old refusal');
+  assert.equal(on.sonomosBlockReason, 'uncapturable-sync-xhr');
+  assert.equal(captures, 0);
+});
+
+// ── the desktop app's fail-open window (reqs 221-223) ──────────────
+//
+// One window, governing every "screening could not complete" block. Learned
+// only from the config push; closed by default, when absent, and once expired.
+
+const openWindow = (ms = 60_000) => ({ failOpenActive: true, failOpenUntilMs: Date.now() + ms });
+const expiredWindow = () => ({ failOpenActive: true, failOpenUntilMs: Date.now() - 1 });
+const BIG = 'x'.repeat(8 * 1024 * 1024 + 1);
+
+async function timeoutWorld(window) {
+  const w = makeWorld(() => new Promise(() => {}));
+  w.deliver({ type: 'SONOMOS_CONFIG', config: { enforceTimeoutMs: 1000, ...(window || {}) } });
+  return w;
+}
+
+test('fail-open: verdict timeout sends the original and tallies it when the window is active', async () => {
+  const { sandbox, netCalls, unchecked } = await timeoutWorld(openWindow());
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":"hi"}' });
+  assert.equal(netCalls.length, 1);
+  assert.deepEqual(unchecked, ['verdict-timeout']);
+});
+
+test('fail-open: verdict timeout still blocks when closed, absent, or expired', async () => {
+  for (const window of [{ failOpenActive: false, failOpenUntilMs: Date.now() + 60_000 }, null, expiredWindow()]) {
+    const { sandbox, netCalls, logs, unchecked } = await timeoutWorld(window);
+    await assert.rejects(sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
+    assert.equal(netCalls.length, 0);
+    assert.equal(unchecked.length, 0);
+    assertBlocked(logs, 'verdict-timeout');
+  }
+});
+
+test('fail-open: a window that lapses after the push closes by itself', async () => {
+  const { sandbox, netCalls, deliver } = makeWorld(() => null);
+  deliver({ type: 'SONOMOS_CONFIG', config: { failOpenActive: true, failOpenUntilMs: Date.now() + 50 } });
+  await sandbox.fetch(AI_URL, { method: 'POST', body: 'x' });
+  assert.equal(netCalls.length, 1);
+  await new Promise((r) => setTimeout(r, 80));
+  await assert.rejects(sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
+  assert.equal(netCalls.length, 1);
+});
+
+test('fail-open: dead channel and unavailability relay codes follow the window', async () => {
+  const dead = makeWorld(() => allowVerdict, { postMessage: () => { throw new Error('channel gone'); } });
+  dead.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  await dead.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' });
+  assert.equal(dead.netCalls.length, 1);
+
+  for (const code of ['bridge-unreachable', 'no-bridge', 'screening-timeout', 'extension-reloaded', 'native-timeout']) {
+    const open = makeWorld(() => ({ ok: false, code }));
+    open.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+    await open.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' });
+    assert.equal(open.netCalls.length, 1, code);
+    assert.deepEqual(open.unchecked, [`relay-${code}`]);
+    const closed = makeWorld(() => ({ ok: false, code }));
+    await assert.rejects(closed.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
+    assert.equal(closed.netCalls.length, 0, code);
+  }
+  const closedDead = makeWorld(() => allowVerdict, { postMessage: () => { throw new Error('channel gone'); } });
+  await assert.rejects(closedDead.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
+});
+
+test('fail-open: NOT governed - consent, malformed verdicts and guard decisions still block in an open window', async () => {
+  const verdicts = [
+    { ok: false, code: 'data-consent-required' },
+    { ok: false, code: 'bad-request' },
+    { ok: true },                                      // malformed: no receipt
+    { ok: true, receipt: { decision: 'redact' } },     // redact missing request
+    { ok: true, receipt: {} },                         // decision missing
+    { ok: true, receipt: { decision: 'block', reason: 'found a key' } }
+  ];
+  for (const verdict of verdicts) {
+    const w = makeWorld(() => verdict);
+    w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+    await assert.rejects(w.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
+    assert.equal(w.netCalls.length, 0);
+    assert.equal(w.unchecked.length, 0);
+  }
+});
+
+test('fail-open: oversize, stream and unreadable bodies send unscreened in an open window, block otherwise', async () => {
+  const bodies = [
+    BIG,
+    new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1])); c.close(); } }),
+    { toString() { throw new Error('nope'); } }
+  ];
+  for (const body of bodies) {
+    const open = makeWorld(() => allowVerdict);
+    open.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+    await open.sandbox.fetch(AI_URL, { method: 'POST', body, duplex: 'half' });
+    assert.equal(open.netCalls.length, 1);
+    assert.equal(open.unchecked.length, 1);
+    assert.match(open.unchecked[0], /^uncapturable-/);
+
+    const expired = makeWorld(() => allowVerdict);
+    expired.deliver({ type: 'SONOMOS_CONFIG', config: expiredWindow() });
+    await assert.rejects(expired.sandbox.fetch(AI_URL, { method: 'POST', body, duplex: 'half' }), blockedError);
+    assert.equal(expired.netCalls.length, 0);
+    assert.equal(expired.unchecked.length, 0);
+  }
 });

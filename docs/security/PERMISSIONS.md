@@ -141,51 +141,34 @@ behavior or store-console declarations.
 
 ## Content script matches
 
-### MAIN-world `shim.js` — 24 catalog hosts, 48 patterns
-**Why:** wraps `fetch` / `XMLHttpRequest` on the specific AI
-surfaces the Sonomos product line knows about (chat UIs +
-search hosts), holding in-scope bodied requests until
-the desktop app returns a verdict. The host list is generated from the
-vendored surface catalog (`shared/ai-surfaces.json` → `web_hosts`)
-by `scripts/generate-surfaces.mjs`, which also rewrites the
-manifest `matches` — there is no hand-maintained copy to drift.
-`content/web-surfaces.generated.js` loads first to provide the host
-list as a global.
+### MAIN-world `shim.js` — every http(s) page: `http://*/*`, `https://*/*`
+**Why:** wraps `fetch` / `XMLHttpRequest` on every web page, holding bodied
+requests until the desktop app returns a verdict. Since the discovery gate
+(super PR #15) the extension does not decide which sites are AI sites: the
+desktop app's on-device classifier does, the same one the Proxy defers to.
+A host list always lags the AI features people actually use — new chat
+sites, assistants embedded in ordinary sites — and the traffic it misses is
+precisely the traffic nobody knew to list. So every bodied request is held
+and classified; a request classified not-AI is released unchanged and
+unscreened.
 
-**Why two patterns per host?** The catalog's own host rule treats an
-entry and every subdomain of it as the same host, and `shim.js` has
-always enforced that rule. The
-generator therefore emits `https://<h>/*` **and** `https://*.<h>/*` per
-entry — 48 patterns for 24 catalog hosts — so the set of pages we are
-injected on matches the set of destinations we already screen. Listing
-the exact spellings only meant a surface served from a subdomain
-(`www.perplexity.ai`) got no hooks at all. The catalog bounds the
-wildcard: it names `www.google.com`, not `google.com`.
-`tests/manifest.test.js` checks both directions against the real catalog
-file — every catalog spelling injected, and `notclaude.ai` /
-`accounts.google.com` not. It also fails if the manifest names a host the
-catalog no longer lists, so a host removed upstream cannot keep its injection
-because someone forgot `npm run generate`.
+The surface catalog (`shared/ai-surfaces.json` → `web_hosts`) still ships,
+generated into `content/web-surfaces.generated.js` by
+`scripts/generate-surfaces.mjs`, but it no longer decides where we inject. It
+decides the `coverage` hint each capture carries (`content/shim.js`
+`coverageFor`): `capture_path` (a catalog host's prompt path, or an upload a
+catalog page started — screened regardless of the classifier), `catalog_host`
+(a catalog host off its prompt paths) or `open_web` (anything else) — the
+last two classified first. The generator writes the two match patterns;
+`tests/manifest.test.js` pins them, and `scripts/store-build.mjs` refuses any
+match that reaches past http(s) (`<all_urls>`, `*://`, `file://`).
 
-**Why inject on search hosts we screen nothing on?** Fair question, and the
-answer is not "for coverage". The catalog marks `www.google.com`,
-`www.bing.com`, `search.brave.com`, `duckduckgo.com`, `kagi.com` and
-`you.com` as `web_screening: "none"`: what a user types into those search
-boxes leaves as a top-level **navigation**, which no hook in this extension
-observes — the manifest holds no `webRequest`, `webNavigation` or
-`declarativeNetRequest` permission, and a query typed into the address bar
-never reaches the page at all. They stay in `web_hosts` for a different
-reason: that list is also the shim's request-**target** scope set, and
-`duck.ai`'s chat XHRs target `duckduckgo.com` while Kagi Assistant is reached
-through `kagi.com`. Removing them would delete real screening on a different
-page. Injection is not capture, though: on those hosts' **own pages** the shim
-holds nothing — the generator narrows every `web_screening: "none"` host to
-an empty path list (`SONOMOS_CAPTURE_PATHS`), so a Maps XHR or a search
-telemetry beacon is neither relayed nor blocked. A bodied request from a
-screened page *to* one of these hosts (`duck.ai` → `duckduckgo.com`) is still
-held, and `kagi.com` is left un-narrowed while `assistant.kagi.com` sits under
-it with no list of its own. See `HONEST.md` for the full statement and for
-why screening navigation-borne prompts is deferred to 1.x.
+**What still bounds it.** No new host permission (loopback only, below); the
+user's disabled-site list and an admin's `allowedProviders` policy still take
+catalog sites out; where the browser requires data-sharing consent, nothing
+off a catalog prompt path is relayed until it is given; and the unholdable
+transports (`sendBeacon`, `fetchLater`, synchronous XHR) are refused only on
+catalog prompt paths — elsewhere they cannot be classified, so they pass.
 
 **Which frames?** `all_frames` injects into every frame whose *own* url
 matches — not every frame of a matching tab. `match_about_blank` and
@@ -195,11 +178,10 @@ origin created but which have no matchable url of their own
 any origin that is not already in the list above: they widen *frames*,
 never *hosts*, and add no `host_permissions`.
 
-**Why no `<all_urls>`?** Screening is limited to supported AI surfaces;
-access to every website is not needed. Named hosts bound where scripts run.
-Path rules and user/admin configuration further narrow which requests are
-relayed. See [DATA-FLOW.md](../architecture/DATA-FLOW.md) for the distinction
-between injection, local input snapshots and native-app transfers.
+**Why not `<all_urls>`?** It adds `file://` and `ftp://` pages, which no web
+prompt travels over. Every http(s) page is the ceiling. See
+[DATA-FLOW.md](../architecture/DATA-FLOW.md) for the distinction between
+injection, local input snapshots and native-app transfers.
 
 **What about the cross-origin uploads it screens?** A `matches` entry
 governs *where the script runs*, not which destinations the page it runs
@@ -209,9 +191,10 @@ regardless of destination — no host permission is involved, because the
 extension is not the one making the request. That is what lets the shim
 hold a pre-signed `PUT` to object storage **without** adding a storage
 host to `matches`, to `host_permissions`, or to the surface catalog. The
-capture is bounded by the initiating page (`PAGE_IS_AI_SURFACE` in
-`content/shim.js`), which is this same catalog list, so the reviewable
-blast radius is exactly what is written above and nothing wider.
+upload scope (screened regardless of the classifier) is bounded by the
+initiating page (`pageIsAiSurface` in `content/shim.js`), which is the
+catalog list; every other cross-origin request is ordinary capture, held and
+classified like any other.
 
 ### Isolated-world `content-script.js` — the same patterns
 **Why:** receives the held request from `shim.js` via
