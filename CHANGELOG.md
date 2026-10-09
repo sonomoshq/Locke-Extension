@@ -36,6 +36,9 @@ strict SemVer.
   risk register R-07 and popup copy updated to match. Chrome/Edge will ask
   users to re-approve the broader access on update.
 
+**Changed**
+- Images are V1.X (2026-10-06): the extension holds and relays an image upload like any file and obeys the desktop app, which sends it unscreened by default and blocks it when the file-type setting says Block. A blocked image is refused with "this image was blocked by your file-type setting, so it was not sent" (it was D-30's "too large to screen"). NSFW filtering is not in V1; we plan to add this in a future release.
+
 **Documentation**
 - Correct privacy disclosures to describe local native-app transfer of
   request content, files and metadata, plus actual browser retention and
@@ -44,7 +47,34 @@ strict SemVer.
   Firefox's `none` declaration and missing consent experience remain an
   explicit release-review blocker. No manifest or runtime behavior changed.
 
+**Changed**
+- Audio and voice uploads (dictation, a voice clip) are no longer blocked by
+  default. Locke cannot screen audio until V2, so the desktop app allows them
+  unscreened unless the device setting or a Teams policy says Block; the
+  extension holds and relays them as before and follows that answer. Video and
+  other unreadable formats stay blocked. Decided 2026-10-06 ("Allow audio,
+  disclose"); listed in the known limitations.
+
 **Fixed**
+- Uploads that declared nothing in a header left unscreened: Perplexity's
+  attachments (an S3 POST-policy form to `ppl-ai-file-upload.s3.amazonaws.com`,
+  images the same way to Cloudinary), a tus `PATCH`, and a file POSTed to an
+  AI host's own path that its capture-path allow-list does not name. A `POST`
+  or `PATCH` from a screened AI page is now held when its body is a file, a
+  form with a file in it, a file-typed Blob, an unreadable stream, or a
+  declared multipart/file media type; only types are read to decide, so the
+  same test blocks such an upload before data-sharing consent. A beacon
+  carrying a file is refused. Telemetry shapes (strings, JSON/text Blobs,
+  form-encoded data) still pass untouched. A signed form's credential and
+  signature fields (S3 POST policy, Cloudinary, GCS) are left out of what is
+  screened, as a pre-signed URL's query string already was, so a clean
+  upload is not masked into one the storage provider refuses; a `redact` on
+  a signed form is refused (`upload-signed-form`) rather than re-sent.
+- On the raw-upload path a withheld image is refused with decision D-30's
+  notice ("this image was too large to screen, so it was not sent"), the
+  desktop app's wording, instead of the generic "could not be examined".
+- Re-vendored the surface catalog: `chatgpt.com` admits `/backend-api/files`
+  (the attachment create call, which carries the file name).
 - A tab that was already open when the extension was reloaded, updated or
   re-enabled blocked every in-scope request with a generic reason, so a
   healthy install looked broken. The block itself was correct and stays

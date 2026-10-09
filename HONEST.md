@@ -170,7 +170,7 @@ verdict means no send. The residuals we accept and document:
 
   | Host | Paths screened — and nothing else on that host |
   | --- | --- |
-  | `chatgpt.com` | `/backend-api/conversation`, `/backend-api/f/conversation`, `/backend-anon/conversation`, `/backend-anon/f/conversation`, `/unauth-mweb/conversation/updates`, `/backend-api/codex/responses` |
+  | `chatgpt.com` | `/backend-api/conversation`, `/backend-api/f/conversation`, `/backend-anon/conversation`, `/backend-anon/f/conversation`, `/unauth-mweb/conversation/updates`, `/backend-api/codex/responses`, `/backend-api/files` |
   | `claude.ai` | `/api/organizations/*/chat_conversations/*/completion`, `/api/organizations/*/chat_conversations/*/retry_completion`, `/api/*/upload`, `/api/organizations/*/convert_document` |
   | `www.perplexity.ai` | `/rest/sse/perplexity_ask` |
 
@@ -202,10 +202,18 @@ verdict means no send. The residuals we accept and document:
   `POST /api/organizations/<org>/convert_document` were not in the list,
   so an attachment a user dragged into Claude's web app on `claude.ai`
   left this machine unscreened. The 2026-09-08 catalog revision adds
-  both, so they are now held like a completion; `chatgpt.com` and
-  `www.perplexity.ai` attachment paths are still NOT listed (their
-  uploads go to blob storage on unlisted hosts, which the initiator-
-  scoped upload rule below may or may not catch — see the residuals).
+  both, so they are now held like a completion. `chatgpt.com`'s
+  attachment create call, `/backend-api/files` (it carries the file
+  name), was added on 2026-10-06; its bytes go to
+  `files.oaiusercontent.com` as a `PUT`, which the upload rule below
+  holds. `www.perplexity.ai`'s create call is still NOT listed (it
+  carries no file), and its bytes go to S3 or Cloudinary as a form
+  POST, which the upload rule below holds since 2026-10-06. **And since
+  2026-10-06 an unlisted same-origin request that carries a FILE is not
+  passed any more:** the upload rule holds a `POST` or `PATCH` whose
+  body is a file (or a form with a file in it) wherever it is aimed,
+  the AI host's own unlisted paths included, so an upload endpoint the
+  catalog has not named fails closed instead of leaving unscreened.
   Earlier revisions of this document
   said flatly that same-origin `multipart/form-data` uploads back to
   the AI host "are captured as they always were", and `README.md` said
@@ -326,6 +334,24 @@ verdict means no send. The residuals we accept and document:
   than by omission. `<a ping>`, `<form method="POST">`, top-level
   navigations and CSP/reporting endpoints are not script calls and are
   out of reach of any hook in this file.
+  **Microsoft Copilot is not screened.** Copilot (copilot.microsoft.com)
+  sends your messages over a WebSocket, which this extension does not hook.
+  Prompts you type into Copilot in the browser are sent to Microsoft
+  unscreened, and Locke records nothing for them. Files and images you attach
+  are uploaded separately and are not screened either. The Copilot app for
+  Windows is not screened by Locke either (its chat is also a WebSocket).
+  GitHub Copilot in VS Code and Visual Studio is a different product and is
+  screened. We plan to add this in a future release.
+  **Images are not screened.** Images and screenshots you send to an AI
+  service aren't screened, and NSFW filtering isn't in this release. An
+  image is sent as it is unless you or your Teams admin set images to
+  Block. We plan to add this in a future release.
+  **Photo metadata is not removed.** Photo metadata, such as location,
+  isn't removed from pictures you send. We plan to add this in a future
+  release.
+  **Perplexity desktop app uploads are not screened.** File uploads from the
+  Perplexity desktop app aren't screened (this extension covers the
+  Perplexity website only). We plan to add this in a future release.
   Within the hooked transports, bodies are captured as exact bytes
   (strings, Blob, ArrayBuffer, TypedArray, URLSearchParams, FormData —
   including the multipart boundary as serialized); what can't be
@@ -438,9 +464,50 @@ verdict means no send. The residuals we accept and document:
   same catalog, so the blast radius is exactly the surfaces we already
   covered. What the extension holds is bounded by the page, never by
   the destination; a `PUT` from any other page is untouched.
-  **What is still not covered:** a POST-shaped upload that declares
-  nothing we recognise (an S3 POST-policy form upload, a bespoke
-  endpoint) still leaves unscreened. Each chunk of a **chunked or
+  **POST-shaped uploads (added 2026-10-06).** A `POST` or `PATCH` from
+  a screened AI page is also held when its BODY says "file": a `File`,
+  a `FormData` with a `File`/`Blob` entry (the S3 POST-policy form
+  Perplexity's documents go to `ppl-ai-file-upload.s3.amazonaws.com`
+  with, and its images to Cloudinary), a `Blob` whose type is a file
+  media type, a stream we cannot look inside (held, then refused as
+  uncapturable), or a declared multipart / file media type such as the
+  tus `PATCH`'s `application/offset+octet-stream`. Only types are read
+  to decide this — no value, no byte — so the same test runs before
+  data-sharing consent and blocks such an upload there. A beacon whose
+  data is a file is refused. Search pages the catalog marks
+  `web_screening: "none"` keep their old behaviour (only a `PUT` or a
+  declared object write is held there). A storage provider's SIGNED
+  form (an S3 POST policy, a Cloudinary or GCS signed upload) carries its
+  credential and signature as form fields; those fields are left out of
+  what is screened, by name, exactly as a pre-signed URL's query string
+  is, because they are minted for that one upload and the screener masks
+  them as keys and identifiers, after which the provider refuses every
+  upload. Everything else in the form — the file, its filename, the
+  object `key` — is screened; a clean `allow` ships the page's own form;
+  and a `redact` on a signed form is a block (`upload-signed-form`),
+  because a rebuilt body would no longer carry the signature.
+  **Audio and voice are the exception (decided 2026-10-06, "Allow audio,
+  disclose").** Locke cannot screen audio until V2. The extension still
+  holds and relays an audio upload (dictation, a voice clip) like any
+  other file, and obeys the desktop app's answer: by default the app
+  allows it, so a voice upload leaves **unscreened**; if the device
+  setting (Controls, File types) or a Teams policy says Block, the app
+  blocks it and the extension refuses it. Video and every other format
+  Locke cannot read are blocked as before. The extension never decides
+  this itself, and when the desktop app cannot answer, audio is blocked
+  like everything else.
+  **Images are the same (decided 2026-10-06, images and NSFW are V1.X).**
+  Locke cannot screen images in this release (no text reading, no NSFW
+  filtering). The extension relays an image upload like any file and obeys
+  the desktop app's answer: by default the app allows it, so an image leaves
+  **unscreened**; if the device setting or a Teams policy says Block, the
+  app blocks it and the extension refuses it. A file whose content is
+  another format (a document or archive with an image extension, or an image
+  with a document appended) is judged by what it really is, by the app.
+  **What is still not covered:** a raw `POST` of file bytes that
+  declares no type at all — an untyped `ArrayBuffer` or a plain string
+  — is indistinguishable from telemetry by anything the page hands us,
+  and still leaves unscreened. Each chunk of a **chunked or
   multipart** upload is screened independently, so a value split across
   a chunk boundary can be missed. Files over the shim's 8 MiB cap are
   **blocked**, not sent unscreened — an availability change on a path
@@ -464,7 +531,11 @@ verdict means no send. The residuals we accept and document:
   upload of the user's file, and the model would be shown a blank
   square with nobody told. So a withhold on this path is a **block**
   (`upload-withheld`) — nothing left the machine either way, and this
-  way we can say so. Likewise, if the request commits to its exact
+  way we can say so. Only an image is ever withheld, and since images
+  are V1.X (2026-10-06) the only reason is the file-type setting: the
+  sentence the user reads is "this image was blocked by your file-type
+  setting, so it was not sent" (it used to be decision D-30's "too large
+  to screen", which is dormant until image screening returns). Likewise, if the request commits to its exact
   bytes (`Content-MD5`, a real `x-amz-content-sha256`, `x-goog-hash`)
   we cannot recompute the checksum for a redacted body, so a `redact`
   becomes a block (`upload-integrity-locked`) rather than an upload the

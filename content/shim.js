@@ -705,6 +705,21 @@
   //          path uses, which is a POST), `x-ms-blob-*`, the S3 object-write
   //          headers, Backblaze's `x-bz-file-name`. These are the page saying
   //          "these bytes are an object" in its own words.
+  //        • or (POST or PATCH, on a page that is a SCREENED surface) the
+  //          request's own BODY says "file": the body is a `File`, a
+  //          `FormData` with a `File`/`Blob` entry, a `Blob` whose type is a
+  //          file media type, or a stream we cannot look inside; or the
+  //          request declares a multipart or file media type in its
+  //          Content-Type. This is the S3 POST-policy form (Perplexity's
+  //          documents go to `ppl-ai-file-upload.s3.amazonaws.com`, its images
+  //          to Cloudinary, both as a multipart POST of signing fields plus
+  //          the file), the tus `PATCH` of `application/offset+octet-stream`,
+  //          and an upload to the AI host ITSELF on a path its capture-path
+  //          allow-list does not name. None of them declares anything in a
+  //          header, which is why they used to leave unscreened. Telemetry
+  //          does not put a user's file in its body, so the false-positive
+  //          floor below still holds: a JSON, text or form-encoded POST is
+  //          left alone. (Added 2026-10-06.)
   //
   // Header NAMES only, and only ones that mean "object write". `x-amz-date`,
   // `x-amz-content-sha256` and `authorization` are deliberately NOT in that
@@ -725,7 +740,14 @@
   // upload we did not recognise is a classifier call rather than a guaranteed
   // screen, while a mis-recognised payment or telemetry POST would be screened
   // as an attachment regardless — the worse direction. The predicate is biased
-  // accordingly, and the residuals are in HONEST.md.
+  // accordingly, and still keys on what only an upload carries. But a request
+  // that DOES carry a file and that we cannot see into (a stream body, a
+  // FormData we cannot enumerate) is in upload scope, not left to the
+  // classifier: on an AI surface an upload we cannot tell apart is a "couldn't
+  // check", and every couldn't-check here fails closed. The residuals are in
+  // HONEST.md, among them a raw POST of file bytes that declares no type at
+  // all (an untyped ArrayBuffer or a plain string), which is indistinguishable
+  // from telemetry by anything the page hands us.
   const SCOPE = Object.freeze({ AI: 'ai', UPLOAD: 'upload' });
 
   // Header-name prefixes by which a page declares "these bytes are an object
@@ -811,10 +833,94 @@
     }
   }
 
-  // Is this a cross-origin object write initiated by an AI surface? Total by
-  // construction — every failure answers `false`, which leaves the request as
-  // ordinary capture, so a bug here can never take a request OUT of scope.
-  function isUploadScope(url, method, headersOf, hasBody) {
+  // ── a body that says "file" ─────────────────────────────────────────────
+  //
+  // Media types that describe a user's file and never a telemetry payload.
+  // Deliberately NOT here: text/plain, application/json, form-encoded and every
+  // `+json`/`+xml` dialect — those are what analytics and error reporting
+  // send, and holding them is the failure the predicate is biased against.
+  // A text file a page uploads still gets caught, by its FILE object (below),
+  // not by its type.
+  const FILE_MEDIA_TYPES = new Set([
+    'multipart/form-data', 'multipart/mixed', 'multipart/related',
+    'application/octet-stream', 'application/offset+octet-stream', // raw bytes; tus PATCH
+    'application/pdf', 'application/rtf', 'text/rtf', 'text/csv',
+    'application/zip', 'application/x-zip-compressed', 'application/gzip', 'application/x-gzip',
+    'application/x-tar', 'application/x-7z-compressed', 'application/vnd.rar', 'application/x-rar-compressed',
+    'application/msword', 'application/vnd.ms-excel', 'application/vnd.ms-powerpoint',
+    'application/vnd.ms-outlook', 'application/vnd.sqlite3', 'application/x-sqlite3'
+  ]);
+  const FILE_MEDIA_PREFIXES = ['image/', 'audio/', 'video/', 'font/', 'model/',
+    'application/vnd.openxmlformats-officedocument.', 'application/vnd.oasis.opendocument.',
+    'application/vnd.apple.', 'application/vnd.ms-word.', 'application/vnd.ms-excel.',
+    'application/vnd.ms-powerpoint.'];
+
+  function isFileMediaType(ct) {
+    const mt = mediaType(ct);
+    if (!mt) return false;
+    return FILE_MEDIA_TYPES.has(mt) || FILE_MEDIA_PREFIXES.some((p) => mt.startsWith(p));
+  }
+
+  // Brand by tag as well as by `instanceof`: a File or FormData made in
+  // another frame of the same page is not an instance of THIS realm's class,
+  // and missing it would pass a user's file through untouched.
+  function tagOf(v) {
+    try { return Object.prototype.toString.call(v); } catch { return ''; }
+  }
+  function isFileObject(v) {
+    return (typeof File !== 'undefined' && v instanceof File) || tagOf(v) === '[object File]';
+  }
+  function isBlobObject(v) {
+    if (isFileObject(v)) return true;
+    return (typeof Blob !== 'undefined' && v instanceof Blob) || tagOf(v) === '[object Blob]';
+  }
+
+  // The realm's own FormData iterator, taken before any page script runs
+  // (this file runs at document_start). Calling it rather than `body.forEach`
+  // means a page-defined FormData subclass's overrides never run on our
+  // behalf: the entry list is walked by the platform, and only each entry's
+  // TYPE is looked at.
+  const FORMDATA_FOREACH = (typeof FormData !== 'undefined' && FormData.prototype &&
+    typeof FormData.prototype.forEach === 'function') ? FormData.prototype.forEach : null;
+
+  // Does this body carry a user's file? Reads TYPES only — never a string
+  // value, never a byte, never a field name — and serializes nothing, so it is
+  // safe to ask before consent, like the header NAMES readUploadHeaderMarkers
+  // reads. Unsure answers `true`: a body we cannot see into on an AI surface
+  // is a couldn't-check, never a pass.
+  function bodyCarriesFile(body) {
+    if (body == null || typeof body === 'string') return false;
+    if (isFileObject(body)) return true;
+    const tag = tagOf(body);
+    if ((typeof FormData !== 'undefined' && body instanceof FormData) || tag === '[object FormData]') {
+      try {
+        if (!FORMDATA_FOREACH) return true;
+        let found = false;
+        FORMDATA_FOREACH.call(body, (value) => { if (!found && isBlobObject(value)) found = true; });
+        return found;
+      } catch {
+        return true;
+      }
+    }
+    if (isBlobObject(body)) {
+      try { return isFileMediaType(body.type); } catch { return true; }
+    }
+    // A stream can only be read by consuming it, so nobody can say what is in
+    // it. A streamed upload is held and then refused as uncapturable.
+    if ((typeof ReadableStream !== 'undefined' && body instanceof ReadableStream) ||
+        tag === '[object ReadableStream]') {
+      return true;
+    }
+    return false;
+  }
+
+  // Is this a cross-origin object write initiated by an AI surface — or, since
+  // 2026-10-06, any POST/PATCH from one whose body or Content-Type says
+  // "file"? Total by construction — every failure answers `false`, which
+  // leaves the request as ordinary capture, so a bug here can never take a
+  // request OUT of scope. `bodyOf` returns the body the page handed us
+  // (undefined for a Request object, whose own Content-Type stands in for it).
+  function isUploadScope(url, method, headersOf, hasBody, bodyOf) {
     try {
       if (!pageIsAiSurface()) return false;
       if (!url || url.protocol !== 'https:') return false;
@@ -822,8 +928,18 @@
       if (!hasBody()) return false;
       const verb = String(method || 'GET').toUpperCase();
       if (verb === 'PUT') return true;
-      if (verb !== 'POST') return false;
-      return anyHeaderStartsWith(headersOf() || {}, OBJECT_WRITE_HEADERS);
+      if (verb !== 'POST' && verb !== 'PATCH') return false;
+      const headers = headersOf() || {};
+      if (verb === 'POST' && anyHeaderStartsWith(headers, OBJECT_WRITE_HEADERS)) return true;
+      // The body test is for the surfaces that screen something. A search
+      // page the catalog marks `web_screening: "none"` holds nothing of its
+      // own (its prompts leave by navigation); its PUTs and declared object
+      // writes are still held above, as before.
+      if (isUnscreenedSurface(PAGE_HOST)) return false;
+      if (typeof headers['content-type'] === 'string' && isFileMediaType(headers['content-type'])) {
+        return true;
+      }
+      return typeof bodyOf === 'function' && bodyCarriesFile(bodyOf());
     } catch {
       return false;
     }
@@ -1607,10 +1723,67 @@
   // original unscreened bytes were never sendable here, and now the rebuilt
   // ones are not either. Returns the block reason, or null to leave the
   // verdict alone.
-  function uploadRedactVeto(reason, headers) {
+  //
+  //   • SIGNED FORM. A storage provider's signed POST form (an S3 POST
+  //     policy, a Cloudinary or GCS signed upload) carries its credential and
+  //     signature as FORM FIELDS, and the provider checks the form's fields
+  //     against them. Those fields are screened out of the request we send
+  //     (see unsignedFormCopy), so a rebuilt body would lack them, and the
+  //     page's original fields beside a rewritten file is a body nobody
+  //     screened as a whole. So a `redact` here is a block too
+  //     (`upload-signed-form`); a clean `allow` ships the page's own form.
+  function uploadRedactVeto(reason, headers, signedForm = false) {
     if (reason === 'redact-withheld') return 'upload-withheld';
+    if (signedForm) return 'upload-signed-form';
     if (declaresBodyIntegrity(headers)) return 'upload-integrity-locked';
     return null;
+  }
+
+  // ── signed upload forms: the credential does not cross the seam ─────────
+  //
+  // The form-field twin of the pre-signed URL's query string (synthesizeRequest
+  // `dropQuery`). An S3 POST policy hands the page `x-amz-credential`,
+  // `x-amz-security-token`, `policy` and `x-amz-signature` (or the SigV2
+  // `AWSAccessKeyId`/`signature`); Cloudinary hands it `api_key`, `timestamp`
+  // and `signature`. They are minted by the AI site's server for this one
+  // upload, they carry nothing the user wrote, and they are exactly the
+  // shapes the screener masks: an access key id reads as a key, a bare
+  // 10- or 15-digit number as an identifier. Screened as they are, every
+  // clean upload came back `redact` with its credential masked, and the
+  // storage provider refused it — Perplexity's attachments, every time.
+  //
+  // So the copy we SCREEN leaves these fields out, by NAME (field names are
+  // protocol, like header names; no value is read to decide). Everything
+  // else in the form — the file, its filename, the object `key` (which very
+  // often contains the filename), any metadata field — is screened. Only
+  // ever applied on the upload path, never to an AI host's own request.
+  const SIGNED_FORM_FIELDS = new Set([
+    'policy', 'signature', 'signature_algorithm', 'api_key', 'timestamp',
+    'awsaccesskeyid', 'x-amz-signature', 'x-amz-credential', 'x-amz-security-token',
+    'x-amz-algorithm', 'x-amz-date',
+    'googleaccessid', 'x-goog-signature', 'x-goog-credential', 'x-goog-algorithm', 'x-goog-date'
+  ]);
+
+  // What makes a form SIGNED: a signature field. Without one, no field is
+  // left out, whatever it is called — a form that merely has a `timestamp`
+  // is screened whole, as before.
+  const FORM_SIGNATURE_FIELDS = new Set(['signature', 'x-amz-signature', 'x-goog-signature']);
+
+  // A copy of `form` without its signing fields, or null when the body is not
+  // a FormData or is not a signed form (the caller then screens it as it is).
+  function unsignedFormCopy(form) {
+    if (!FORMDATA_FOREACH || form == null || typeof form !== 'object') return null;
+    if (!((typeof FormData !== 'undefined' && form instanceof FormData) || tagOf(form) === '[object FormData]')) {
+      return null;
+    }
+    let signed = false;
+    const copy = new FormData();
+    FORMDATA_FOREACH.call(form, (value, name) => {
+      const lower = String(name).toLowerCase();
+      if (FORM_SIGNATURE_FIELDS.has(lower)) signed = true;
+      if (!SIGNED_FORM_FIELDS.has(lower)) copy.append(name, value);
+    });
+    return signed ? copy : null;
   }
 
   // ── the message a human sees ────────────────────────────────────────────
@@ -1804,10 +1977,21 @@
     // appears to succeed and is silently wrong — a 1×1 placeholder sitting in
     // the bucket the chat will now show them, or a checksum mismatch surfacing
     // as the storage provider's own opaque error.
+    //
+    // A withhold only ever happens to an image (png/jpeg/gif/webp) — every
+    // other unexaminable item is a refusal — so this is the image notice, in
+    // the desktop app's words (Desktop-Frontend src/hooks/use-detection-toasts.ts).
+    // Images are V1.X (2026-10-06): image screening is dormant, so an image is
+    // only ever withheld because the file-type setting says Block (it used to
+    // be D-30's "too large to screen"). The app's second
+    // sentence ("the rest of your message was screened and sent") is not
+    // true here: on a raw upload the image IS the whole request.
     'upload-withheld': ['unsupported',
-      'this file could not be examined, so it was not uploaded. Nothing left your machine — attach it in a format Locke can read, or send the details as text.'],
+      'this image was blocked by your file-type setting, so it was not sent. Nothing left your machine — change the setting in Locke, or send the details as text.'],
     'upload-integrity-locked': ['unsupported',
       'Locke found something in this file that needed removing, but the upload commits to the original bytes with a checksum, so the screened version could not be sent in its place. Nothing left your machine.'],
+    'upload-signed-form': ['unsupported',
+      'Locke found something in this upload that needed removing, but the upload is a signed form, so a screened version could not be sent in its place. Nothing left your machine — remove the sensitive details from the file (or its name) and attach it again, or send them as text.'],
 
     'uncapturable-stream': ['unsupported',
       'this request streams its body, which cannot be read for screening before it is sent.'],
@@ -2504,7 +2688,8 @@
         const url = resolveUrl(input);
         const method = init?.method || input?.method || 'GET';
         if (hasFetchBody(input, init) && (!url ? pageIsAiSurface() : (isCapturePathUrl(url) ||
-            isUploadScope(url, method, () => readUploadHeaderMarkers(init, input), () => true)))) {
+            isUploadScope(url, method, () => readUploadHeaderMarkers(init, input), () => true,
+              () => (init != null && 'body' in Object(init) ? init.body : undefined))))) {
           throw new TypeError(blockMessage('data-consent-required'));
         }
         return origFetch.apply(this, arguments);
@@ -2538,7 +2723,8 @@
         // answers for a host the catalog does NOT contain. Everything it
         // declines falls to ordinary capture, never out of scope.
         let scope = null;
-        if (url && isUploadScope(url, method, headersOf, () => hasFetchBody(frozen.input, frozen.init))) {
+        if (url && isUploadScope(url, method, headersOf, () => hasFetchBody(frozen.input, frozen.init),
+          () => (frozen.hasInitBody ? frozen.body : (frozen.uncapturableBody || undefined)))) {
           scope = SCOPE.UPLOAD;
         } else if (isScreenedUrl(url)) scope = SCOPE.AI;
         // Decided before the disable set could arrive: give the config its
@@ -2623,7 +2809,13 @@
                 body: cap.bytes,
                 contentType: headers['content-type'] ? null : cap.effectiveCt
               };
-              const raw = synthesizeRequest(method, url, headers, cap.effectiveCt, cap.bytes,
+              // A signed upload form is screened without its signing fields
+              // (see unsignedFormCopy); an allow still releases the page's own
+              // form above, byte for byte.
+              const unsigned = scope === SCOPE.UPLOAD ? unsignedFormCopy(initBody) : null;
+              const screen = unsigned ? await captureBodyBytes(unsigned) : cap;
+              if (screen.bytes == null) throw new Error('signed form copy was not capturable');
+              const raw = synthesizeRequest(method, url, headers, screen.effectiveCt, screen.bytes,
                 scope === SCOPE.UPLOAD);
               const res = await enforce(b64FromBytes(raw), providerFor(url, scope), consentGeneration,
                 coverageFor(url, scope));
@@ -2633,7 +2825,7 @@
               let reason = d.reason;
               let extra = d.fields;
               if (action === 'redact' && scope === SCOPE.UPLOAD) {
-                const veto = uploadRedactVeto(reason, headers);
+                const veto = uploadRedactVeto(reason, headers, unsigned != null);
                 if (veto) { action = 'block'; reason = veto; }
               }
               if (action === 'redact') {
@@ -2844,7 +3036,8 @@
       let scope = null;
       try {
         if (s && s.url) {
-          scope = isUploadScope(s.url, s.method, () => s.headers, () => body != null && body !== '')
+          scope = isUploadScope(s.url, s.method, () => s.headers, () => body != null && body !== '',
+            () => body)
             ? SCOPE.UPLOAD
             : isScreenedUrl(s.url) ? SCOPE.AI : null;
         }
@@ -3002,14 +3195,20 @@
         }
         shape.bytes = cap.bytes.byteLength;
         if (!shape.ct) shape.ct = mediaType(cap.effectiveCt);
-        const raw = synthesizeRequest(s.method, s.url, s.headers, cap.effectiveCt, cap.bytes,
+        // A signed upload form is screened without its signing fields; an
+        // allow still sends the page's own (frozen) form.
+        const unsigned = scope === SCOPE.UPLOAD ? unsignedFormCopy(frozen) : null;
+        const screen = unsigned ? await captureBodyBytes(unsigned) : cap;
+        if (abandoned()) return;
+        if (screen.bytes == null) throw new Error('signed form copy was not capturable');
+        const raw = synthesizeRequest(s.method, s.url, s.headers, screen.effectiveCt, screen.bytes,
           scope === SCOPE.UPLOAD);
         const res = await enforce(b64FromBytes(raw), providerFor(s.url, scope), s.consentGeneration,
           coverageFor(s.url, scope));
         if (abandoned()) return;
         const d = decide(res);
         const veto = (d.action === 'redact' && scope === SCOPE.UPLOAD)
-          ? uploadRedactVeto(d.reason, s.headers) : null;
+          ? uploadRedactVeto(d.reason, s.headers, unsigned != null) : null;
         if (veto) {
           say('warn', veto, { action: 'block', ...d.fields });
           blockXhr(xhr, veto, { bytes: shape.bytes, ...d.fields });
@@ -3063,10 +3262,13 @@
   // every site would break analytics and unload-saves across the whole web.
   // So beacons off the catalog's capture paths are a residual (HONEST.md), as
   // they always were. Bodyless beacons (a bare ping) are delegated untouched —
-  // the hard rule about out-of-scope traffic applies here as everywhere. That includes the cross-origin upload scope, deliberately: a
-  // beacon is always a POST and cannot carry a request header, so it can never
-  // be a delegated object write, and widening it here would refuse the ordinary
-  // third-party telemetry every AI page sends. Uploads do not ride beacons.
+  // the hard rule about out-of-scope traffic applies here as everywhere. A beacon is always a POST
+  // and cannot carry a request header, so it can never be a DECLARED object
+  // write, and refusing every beacon would refuse the ordinary third-party
+  // telemetry every AI page sends. The one upload shape a beacon CAN carry is a
+  // file in its data (a File, or a FormData holding one); since 2026-10-06 that
+  // is refused on an AI surface, wherever it is aimed, by the same body test
+  // the fetch and XHR hooks use.
   const beaconOwner =
     (typeof Navigator !== 'undefined' && Navigator.prototype &&
       typeof Navigator.prototype.sendBeacon === 'function') ? Navigator.prototype
@@ -3114,6 +3316,18 @@
             return origSendBeacon.apply(this, arguments);
           }
           if (inScope) {
+            say('warn', 'uncapturable-beacon', { action: 'block' });
+            return false;
+          }
+          // A beacon whose data is a user's FILE (a File, or a FormData
+          // carrying one) is an upload on the one transport that cannot be
+          // held, wherever it is aimed: a screened catalog host off its
+          // capture paths, or cross-origin from an AI surface (isUploadScope).
+          // Telemetry beacons carry strings and JSON/text Blobs, which
+          // bodyCarriesFile leaves alone.
+          if (target && ((isScreenedUrl(target) && bodyCarriesFile(data)) ||
+              isUploadScope(target, 'POST', () => ({}), () => true, () => data))) {
+            markUpload(shape);
             say('warn', 'uncapturable-beacon', { action: 'block' });
             return false;
           }
@@ -3188,7 +3402,8 @@
             if (isCapturePathUrl(url)) {
               shape.scope = SCOPE.AI;
               refuse = 'uncapturable-deferred-fetch';
-            } else if (url && isUploadScope(url, method, headersOf, hasBody)) {
+            } else if (url && isUploadScope(url, method, headersOf, hasBody,
+              () => (init != null && 'body' in Object(init) ? init.body : undefined))) {
               markUpload(shape);
               refuse = 'uncapturable-deferred-fetch';
             } else if (!url && pageIsAiSurface()) {

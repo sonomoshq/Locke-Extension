@@ -156,3 +156,15 @@ test('HONEST.md and README.md both name the mechanism by its catalog key', async
     'the unqualified same-origin-upload claim is back in HONEST.md'
   );
 });
+
+test('HONEST.md names Microsoft Copilot as unscreened and says it is planned', async () => {
+  // D-20: Copilot chats over a WebSocket this extension does not hook. A
+  // reviewer reading the WebSocket bullet must find the named product, the
+  // plain consequence and the planned sentence, with no date.
+  const honest = await readFile(url('../HONEST.md'), 'utf8');
+  assert.match(honest, /\*\*Microsoft Copilot is not screened\.\*\*/);
+  // Matched as a whole parenthesised name in the prose (a doc check, not URL handling).
+  assert.match(honest, /^.*\(copilot\.microsoft\.com\).*$/m);
+  assert.match(honest, /Windows is not screened by Locke either/);
+  assert.match(honest, /We plan to add this in a future release\./);
+});
