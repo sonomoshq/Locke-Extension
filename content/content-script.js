@@ -77,13 +77,28 @@
   // the namespace pick is inlined. Firefox exposes BOTH `browser` (promises)
   // and a Chrome-compat `chrome` (callbacks only — `sendMessage` there returns
   // undefined, not a promise), so preferring `browser` is what keeps Firefox
-  // from failing closed on every in-scope request.
-  const isGecko = typeof globalThis.browser !== 'undefined' && !!globalThis.browser?.runtime;
-  const api = isGecko ? globalThis.browser : globalThis.chrome;
+  // from failing closed on every in-scope request. Chrome 153+ ALSO exposes a
+  // promise-based `browser`, so "has `browser`" picks the namespace and
+  // nothing else: it is not "is Firefox".
+  const hasBrowserNs = typeof globalThis.browser !== 'undefined' && !!globalThis.browser?.runtime;
+  const api = hasBrowserNs ? globalThis.browser : globalThis.chrome;
   // Keep these version/key literals pinned to shared/data-consent.js by test.
   const DATA_CONSENT_KEY = 'dataSharingConsent';
   const DATA_CONSENT_VERSION = 1;
-  const requiresConsent = isGecko || /Edg\//.test(globalThis.navigator?.userAgent || '');
+  // Which browser decides the consent requirement — the same answer
+  // shared/data-consent.js's requiresDataConsent() gives. That one asks
+  // `runtime.getBrowserInfo`, which content scripts don't get, so this asks
+  // the extension's own URL scheme instead: `moz-extension:` is Firefox and
+  // nothing else, and a page cannot reach this isolated world to fake it. The
+  // user-agent is only the fallback for a runtime with no getURL. Treating
+  // Chrome as Firefox here left Chrome 153 stuck in "consent required", every
+  // in-scope prompt blocked (super PR #15 review).
+  const ownUrl = (() => {
+    try { return String(api?.runtime?.getURL?.('') || ''); } catch { return ''; }
+  })();
+  const userAgent = globalThis.navigator?.userAgent || '';
+  const isFirefox = ownUrl ? ownUrl.startsWith('moz-extension:') : /Firefox\//.test(userAgent);
+  const requiresConsent = isFirefox || /Edg\//.test(userAgent);
   let dataSharingAllowed = !requiresConsent;
   let configGeneration = 0;
 
@@ -146,7 +161,7 @@
   // once per dialect would relay the same held request twice.
   // So branch on the namespace and use each one's native contract.
   function askWorker(message) {
-    if (isGecko) return api.runtime.sendMessage(message);
+    if (hasBrowserNs) return api.runtime.sendMessage(message);
     return new Promise((resolve, reject) => {
       try {
         api.runtime.sendMessage(message, (response) => {

@@ -86,7 +86,8 @@ insurance status is undisclosed.
 See [`SECURITY.md`](SECURITY.md) for the fuller threat model with
 mitigations. The most important thing to understand about this
 extension is what it is *for*: it is a **hold-and-enforce capture
-surface** for AI web apps. The shim holds an in-scope request until
+surface** for every website (the desktop app classifies each request and
+screens the AI-shaped ones). The shim holds an in-scope request until
 the desktop app returns a verdict and then sends it, sends the app's
 rebuilt (redacted) request, or blocks it — **fail-closed**: no
 verdict means no send. The residuals we accept and document:

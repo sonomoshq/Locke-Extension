@@ -52,7 +52,7 @@ const plain = (v) => JSON.parse(JSON.stringify(v));
 
 // `relay(message)` stands in for the service worker: return a promise, return
 // something that is not thenable, or throw synchronously.
-function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
+function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null, userAgent = '',
                     consentRecord = { version: 1, granted: true, technical: false },
                     location = { origin: 'https://chat.openai.com', href: 'https://chat.openai.com/' },
                     documentOrigin = null } = {}) {
@@ -80,6 +80,7 @@ function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
   const chromeNs = {
     runtime: {
       lastError: null,
+      getURL: (path) => `chrome-extension://abcdefghijklmnop/${path}`,
       sendMessage(message, callback) {
         relayed.push(message);
         const out = answer(message);   // may throw, as an invalidated context does
@@ -102,6 +103,7 @@ function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
   const browserNs = {
     runtime: {
       lastError: null,
+      getURL: (path) => `moz-extension://0e2b6c1a-uuid/${path}`,
       sendMessage(message, options) {
         if (options !== undefined) throw new TypeError('Incorrect argument types for runtime.sendMessage');
         relayed.push(message);
@@ -122,9 +124,16 @@ function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
     }
   };
 
+  // Chrome 153+: a promise-based `browser` alongside `chrome`, both Chromium.
+  // `browser` is picked for messaging, exactly as on Firefox, so the relay is
+  // the promise path — but the extension URL is chrome-extension:.
+  const chromeBrowserNs = { ...browserNs, runtime: { ...browserNs.runtime, getURL: chromeNs.runtime.getURL } };
+
   const namespace = dialect === 'firefox'
     ? { browser: browserNs, chrome: geckoCompatChrome }
-    : { chrome: chromeNs };
+    : dialect === 'chrome-with-browser'
+      ? { browser: chromeBrowserNs, chrome: chromeNs }
+      : { chrome: chromeNs };
 
   // What the browser does with postMessage's second argument, which this
   // harness used to record and ignore. A targetOrigin that does not parse
@@ -150,6 +159,7 @@ function makeWorld({ dialect = 'chromium', relay, local = {}, managed = null,
 
   const sandbox = {
     location,
+    navigator: { userAgent },
     console: { log: record('log'), warn: record('warn'), debug: record('debug'), error: record('error') },
     addEventListener: (type, fn) => { if (type === 'message') listeners.push(fn); },
     postMessage: (data, targetOrigin) => {
@@ -685,6 +695,27 @@ test('content consent gate starts closed, rejects forged captures, resumes and r
   world.fromPage(capture(3)); // before the asynchronous config reread
   await settle();
   assert.equal(world.relayed.length, 1);
+  assert.equal(world.verdicts().at(-1).data.verdict.code, 'data-consent-required');
+});
+
+// Chrome 153 exposes `browser.runtime` too. Reading that as "Firefox" left
+// Chrome stuck in consent-required with every in-scope prompt blocked.
+test('content consent: Chrome with a `browser` namespace needs no consent', async () => {
+  const world = makeWorld({ dialect: 'chrome-with-browser', consentRecord: null,
+    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36' });
+  await settle();
+  world.fromPage(capture());
+  await settle();
+  assert.equal(world.relayed.length, 1);
+  assert.notEqual(world.configs().at(-1)?.data.config.dataSharingAllowed, false);
+});
+
+test('content consent: Edge still needs consent, whatever namespace it exposes', async () => {
+  const world = makeWorld({ dialect: 'chrome-with-browser', consentRecord: null,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0' });
+  world.fromPage(capture());
+  await settle();
+  assert.equal(world.relayed.length, 0);
   assert.equal(world.verdicts().at(-1).data.verdict.code, 'data-consent-required');
 });
 

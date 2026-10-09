@@ -38,14 +38,14 @@ requests then continue to the website the user is using.
 > ([`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 This is a deliberately simple hold-and-enforce capture surface. It contains no
-detection or redaction logic of its own: when the page sends a bodied request to
-an AI web surface, the extension holds it, ships the raw request to the Locke
-desktop app, and applies the verdict — send it unchanged (`allow`), send the
+detection or redaction logic of its own: when a page on any website sends a bodied
+request, the extension holds it, ships the raw request to the Locke
+desktop app — which classifies it and screens only AI-shaped traffic — and applies the verdict — send it unchanged (`allow`), send the
 app's rebuilt request (`redact`), or block it. All scanning and redaction happen
 **in the desktop app**. The failure posture is **fail-closed**: no verdict, no
 send.
 
-It covers browser-based AI web apps. Locke screens desktop / native AI apps by a
+It covers every website in the browser; the desktop app decides which requests are AI traffic. Locke screens desktop / native AI apps by a
 separate path that this extension does not feed; the two are independent, and
 this repository is only the browser half.
 

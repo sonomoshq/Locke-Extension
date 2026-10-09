@@ -33,3 +33,18 @@ regexes = [
   '''edge-api-key-0123456789abcdef''',
   '''amo-secret-value-0123456789abcdef''',
 ]
+
+[[allowlists]]
+description = """
+Synthetic AWS S3 POST-policy fixture in tests/shim.test.js, commit 2abbc2e.
+
+That commit (a closed teams-v1 PR, still reachable from other branches, and
+gitleaks scans all history) added an S3 signed-form test whose access key is
+an ASIA…EXAMPLE placeholder and whose x-amz-security-token is a 48-char
+truncated sample. Neither was ever a live credential. Scoped to that ONE
+commit AND that one file: the same strings anywhere else, or any other
+secret in that file at any other commit, still fails the build.
+"""
+condition = "AND"
+commits = ["2abbc2e8d09a5c7b59c1ba054abc5b0b7b79106a"]
+paths = ['''^tests/shim\.test\.js$''']
