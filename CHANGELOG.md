@@ -23,15 +23,18 @@ strict SemVer.
   `catalog_host`. The `web_screening: "none"` search hosts' own pages are
   classified too, instead of passed through.
 - Fail-closed applies on every site, with one narrow exception: when Locke is
-  provably unreachable (`no-bridge`, `bridge-unreachable`) a request to an
-  ordinary site the catalog does not name (`open_web`) is sent as it was
-  (reason `locke-unreachable-unclassified`). Without it, Locke being off
-  blocked every login and form on the web, including Locke's own sign-in. AI
-  hosts still fail closed, as in the proxy shim: `catalog_host` and
-  `capture_path` requests and cross-origin uploads from a catalog page all
-  block, as does every outcome where Locke was reached or unreachable is
-  unproven (`screening-timeout`, plain timeouts, guard blocks). The user's
-  fail-open window is unchanged.
+  provably unreachable (`no-bridge`, `bridge-unreachable`) a request is sent
+  as it was (reason `locke-unreachable-unclassified`) only if ALL hold: it is
+  `open_web`; the destination is not a catalog AI web or API host
+  (api.openai.com, api.anthropic.com, openrouter.ai, generativelanguage,
+  bedrock-runtime...); the page is not itself an AI surface (chatgpt.com,
+  claude.ai, aistudio can hand a prompt to Sentry, Segment, S3 or Google's
+  clients6 RPC); the target is not loopback or private (self-hosted models,
+  e.g. Ollama :11434); and the scope is not an upload. Without it, Locke being
+  off blocked every login and form on the web, including Locke's own sign-in.
+  Everything else blocks, as does every outcome where Locke was reached or
+  unreachable is unproven (`screening-timeout`, plain timeouts, guard blocks).
+  The user's fail-open window is unchanged.
 - `sendBeacon`, `fetchLater()` and synchronous XHR are refused only on
   catalog prompt paths and sent elsewhere (they cannot be held, so cannot be
   classified). Without data-sharing consent, only catalog prompt paths are

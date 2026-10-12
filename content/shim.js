@@ -35,9 +35,14 @@
 //
 // THE ONE NARROW EXCEPTION, and it is not a fail-open window: when Locke is
 // PROVABLY UNREACHABLE (`no-bridge`, `bridge-unreachable` — see
-// UNREACHABLE_RELAY_CODES) and the capture is `open_web` (a host the catalog
-// does not name), the original request goes out, as
-// `locke-unreachable-unclassified`. Since
+// UNREACHABLE_RELAY_CODES), the original request goes out, as
+// `locke-unreachable-unclassified`, only when ALL of these hold: the capture
+// is `open_web` (not a catalog web host), the destination is not a catalog
+// API host (api.openai.com, openrouter.ai, ...), the PAGE is not an AI
+// surface (it could hand a prompt to any host: Sentry, Segment, S3, AI
+// Studio's clients6 RPC), the target is not loopback or private (a
+// self-hosted model such as Ollama :11434), and the scope is not an upload.
+// See unreachableMayPass(). Since
 // super PR #15 every bodied request on every site is held, so with Locke off
 // the unconditional block above took down every login, form and POST on the
 // web — including Clerk's sign-in call, which is how the user would turn
@@ -1522,7 +1527,9 @@
   // a blocked request with an honest reason.
   const UNREACHABLE_RELAY_CODES = new Set(['no-bridge', 'bridge-unreachable']);
 
-  // Locke being down is only allowed to let a request through when its host is
+  // Locke being down lets a request through only under the whole rule in
+  // unreachableMayPass() below (open_web, not an AI API host, not from an AI
+  // page, not loopback/private, not an upload). The first condition: its host is
   // not in the catalog at all (`open_web`). This mirrors the proxy shim, which
   // on "capture DOWN" fails open for non-AI hosts and CLOSED for every AI
   // host. A catalog host is an AI host even off its prompt paths (sign-in,
@@ -1533,11 +1540,68 @@
   // explicitly although coverageFor already makes every upload a
   // capture_path, so a change to one cannot quietly loosen the other. An
   // absent `coverage` (a caller that did not say) is not open: it blocks.
-  function unreachableMayPass(coverage, scope) {
-    return scope !== SCOPE.UPLOAD && coverage === COVERAGE.OPEN_WEB;
+  // Catalog `api_hosts` (api.openai.com, openrouter.ai, *-aiplatform...):
+  // AI hosts the proxy fails CLOSED on, though they are not web surfaces and
+  // so read `open_web` here. Same label-wise `*` rule as shared/constants.js.
+  const API_HOSTS = (globalThis.SONOMOS_API_HOSTS || [])
+    .map((h) => String(h).replace(/\.+$/, '').toLowerCase()).filter(Boolean);
+  function apiLabelMatches(p, l) {
+    const star = p.indexOf('*');
+    if (star === -1) return p === l;
+    const pre = p.slice(0, star); const suf = p.slice(star + 1);
+    if (suf.includes('*')) return false;
+    return l.length > pre.length + suf.length && l.startsWith(pre) && l.endsWith(suf);
+  }
+  function isCatalogApiHost(host) {
+    const h = String(host || '').replace(/\.+$/, '').toLowerCase();
+    if (h === '') return false;
+    const hl = h.split('.');
+    return API_HOSTS.some((e) => {
+      if (!e.includes('*')) return h === e || h.endsWith(`.${e}`);
+      const el = e.split('.');
+      if (hl.length < el.length) return false;
+      const tail = hl.slice(hl.length - el.length);
+      return el.every((p, i) => apiLabelMatches(p, tail[i]));
+    });
   }
 
-  function decide(res, coverage, scope) {
+  // Loopback, private and link-local targets: a self-hosted model (Ollama on
+  // :11434, llama.cpp, vLLM, LM Studio) is an AI host no catalog can name, so
+  // these stay closed. The URL parser has already normalised the host to
+  // dotted-decimal IPv4 or a bracketed, compressed IPv6.
+  function isLoopbackOrPrivateHost(host) {
+    let h = String(host || '').replace(/\.+$/, '').toLowerCase();
+    if (h === 'localhost' || h.endsWith('.localhost')) return true;
+    const v4 = (a, b) => a === 0 || a === 127 || a === 10 || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+    const m4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+    if (m4) return v4(Number(m4[1]), Number(m4[2]));
+    if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
+    if (!h.includes(':')) return false;
+    if (h === '::' || h === '::1') return true;
+    const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+    if (mapped) {
+      const hi = parseInt(mapped[1], 16);
+      return v4(hi >> 8, hi & 0xff);
+    }
+    const first = parseInt(h.split(':')[0] || '0', 16);
+    if (Number.isNaN(first)) return true; // not an address we can read: do not pass it
+    return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80;
+  }
+
+  function unreachableMayPass(coverage, scope, url) {
+    if (scope === SCOPE.UPLOAD || coverage !== COVERAGE.OPEN_WEB) return false;
+    let host = '';
+    try { host = url ? url.hostname : ''; } catch { return false; }
+    if (host === '' || isCatalogApiHost(host) || isLoopbackOrPrivateHost(host)) return false;
+    // Initiator, not just target: a catalog surface that screens something
+    // (chatgpt.com, claude.ai, aistudio.google.com) can hand the prompt to a
+    // host the catalog does not name. Its own traffic is blocked anyway.
+    if (pageIsAiSurface() && !isUnscreenedSurface(PAGE_HOST)) return false;
+    return true;
+  }
+
+  function decide(res, coverage, scope, url) {
     const waitedMs = res.elapsedMs;
     if (res.outcome === 'timeout' && failOpenActive()) return failOpenSend('verdict-timeout', waitedMs);
     if (res.outcome === 'channel-failed' && failOpenActive()) return failOpenSend('verdict-channel-failed', waitedMs);
@@ -1659,11 +1723,13 @@
       // thing that is not answering.
       //
       // THE EXCEPTION (the bug this fixes): Locke provably unreachable on a
-      // request to a host the catalog does not name (`open_web`). The page's own request goes out
+      // request to a host the catalog names nowhere (`open_web`, and not a catalog
+      // API host), from a page that is not an AI surface, to a target that is not
+      // loopback or private (see unreachableMayPass). The page's own request goes out
       // untouched. It is distinguishable from a screened `allow` and from the
       // user's fail-open window (`unchecked-fail-open`) by its reason, and it
       // is not tallied as an unchecked send: it is not an AI host.
-      if (UNREACHABLE_RELAY_CODES.has(v.code) && unreachableMayPass(coverage, scope)) {
+      if (UNREACHABLE_RELAY_CODES.has(v.code) && unreachableMayPass(coverage, scope, url)) {
         return {
           action: 'send',
           reason: 'locke-unreachable-unclassified',
@@ -2883,7 +2949,7 @@
                 coverageFor(url, scope));
               const d = decide(!dataSharingAllowed || consentGeneration !== dataConsentGeneration
                 ? { outcome: 'verdict', verdict: { ok: false, code: 'data-consent-required' } } : res,
-              coverageFor(url, scope), scope);
+              coverageFor(url, scope), scope, url);
               action = d.action;
               let reason = d.reason;
               let extra = d.fields;
@@ -3269,7 +3335,7 @@
         const res = await enforce(b64FromBytes(raw), providerFor(s.url, scope), s.consentGeneration,
           coverageFor(s.url, scope));
         if (abandoned()) return;
-        const d = decide(res, coverageFor(s.url, scope), scope);
+        const d = decide(res, coverageFor(s.url, scope), scope, s.url);
         const veto = (d.action === 'redact' && scope === SCOPE.UPLOAD)
           ? uploadRedactVeto(d.reason, s.headers, unsigned != null) : null;
         if (veto) {

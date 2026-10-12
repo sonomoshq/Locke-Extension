@@ -60,6 +60,10 @@ for (const p of surfaces.providers) {
   }
 }
 const hosts = [...hostSet].sort();
+// The catalog's API hosts (the proxy's side). Not injected into and not a
+// coverage tier; read only by the shim's Locke-unreachable rule, so a browser
+// request straight to an AI API never takes that pass.
+const apiHosts = [...new Set(surfaces.providers.flatMap((p) => (p.api_hosts || []).map((h) => h.toLowerCase())))].sort();
 // Key order follows `hosts` so the generated file is stable across runs.
 const providers = Object.fromEntries(hosts.map((h) => [h, providerByHost[h]]));
 
@@ -138,7 +142,8 @@ writeIfChanged(
     `globalThis.SONOMOS_WEB_HOSTS = ${JSON.stringify(hosts)};\n` +
     `globalThis.SONOMOS_WEB_PROVIDERS = ${JSON.stringify(providers)};\n` +
     `globalThis.SONOMOS_CAPTURE_PATHS = ${JSON.stringify(capturePaths)};\n` +
-    `globalThis.SONOMOS_SKIP_PATH_SEGMENTS = ${JSON.stringify(skipSegments)};\n`
+    `globalThis.SONOMOS_SKIP_PATH_SEGMENTS = ${JSON.stringify(skipSegments)};\n` +
+    `globalThis.SONOMOS_API_HOSTS = ${JSON.stringify(apiHosts)};\n`
 );
 
 // Module form, for the service worker. It needs the same list to answer one
