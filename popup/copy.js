@@ -209,6 +209,17 @@ function detailFor(view, screening, recentFailure) {
     // problem, one fix, on both surfaces.
     return `Locke’s browser connector didn’t start, so ${SCREENED_REQUESTS} are being held back. Open the Locke desktop app and click Allow when it asks to connect this extension — or add this extension’s ID under Settings → Locke Extension — then retry.`;
   }
+  if (recentFailure?.code === 'locke-signed-out') {
+    // The native host reached the browser, could not connect to Locke, and the
+    // desktop app's own record says the user signed out. Say that, not "isn't
+    // answering" / "held back": the fix is to sign in, and the app being closed
+    // or wedged is the wrong thing to chase. Ordinary websites are NOT held in
+    // this state (that is the one pass the extension allows), so this makes no
+    // claim about them either way. It outranks `offline` because a signed-out
+    // Locke has no screening service to answer, so the status check reads
+    // disconnected beside it.
+    return 'Locke is signed out. Sign in to the Locke desktop app to resume screening.';
+  }
   if (view === 'offline') {
     // "isn't answering", not "isn't running". This branch is reached from a
     // host that replied `connected: false` AND from a bridge timeout, and a

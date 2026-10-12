@@ -80,6 +80,10 @@ function makeWorld(onCapture, extraGlobals = {}, { settleConfig = true, document
     SONOMOS_WEB_HOSTS: ['chat.openai.com', 'chatgpt.com'],
     // The host -> catalog id map the generator emits beside the host list.
     SONOMOS_WEB_PROVIDERS: { 'chat.openai.com': 'openai', 'chatgpt.com': 'openai' },
+    // A top-level window is its own `top`. The shim reads this to tell a frame
+    // from a page where `location.ancestorOrigins` is absent (Firefox); a test
+    // that wants a frame overrides it through `extraGlobals`.
+    get top() { return innerWindow; },
     // Realm intrinsics the shim touches.
     URL, TextEncoder, TextDecoder, btoa, atob,
     Response, Request, Headers, FormData, Blob, URLSearchParams, ReadableStream,
@@ -456,12 +460,13 @@ test('fail-closed: a bridge-unreachable relay failure is told apart from a missi
   await assert.rejects(
     sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }),
     (e) => {
-      // Must NOT claim the desktop app itself could not be reached — the
-      // native host DID answer, which is exactly what the popup's Status row
-      // reflects too. Saying so would have the two surfaces disagree.
+      // Must NOT claim the desktop app itself could not be reached, and since
+      // the host could not connect to Locke's screening service it must NOT
+      // claim the desktop app ANSWERED either (that is `bridge-dropped`).
       assert.ok(!/desktop app could not be reached/.test(e.message), e.message);
-      assert.match(e.message, /answered/);
-      assert.match(e.message, /screening service/);
+      assert.doesNotMatch(e.message, /answered/);
+      assert.match(e.message, /connector could not connect to Locke’s screening service/);
+      assert.match(e.message, /nothing was sent/);
       assert.match(e.message, /NOT a sensitive-data block/);
       assert.match(e.message, /\bkind=unavailable\b/);
       return true;
@@ -4651,7 +4656,7 @@ const GENERATED = (() => {
   vm.runInContext(readFileSync(new URL('../content/web-surfaces.generated.js', import.meta.url), 'utf8'), ctx);
   return ctx;
 })();
-function realCatalogGlobals(pageHref, { ancestors, base, noApi = false, emptyApi = false } = {}) {
+function realCatalogGlobals(pageHref, { ancestors, base, noApi = false, emptyApi = false, framed = false, referrer } = {}) {
   let loc;
   try {
     const u = new URL(pageHref);
@@ -4668,7 +4673,11 @@ function realCatalogGlobals(pageHref, { ancestors, base, noApi = false, emptyApi
     SONOMOS_SKIP_PATH_SEGMENTS: JSON.parse(JSON.stringify(GENERATED.SONOMOS_SKIP_PATH_SEGMENTS))
   };
   if (!noApi) g.SONOMOS_API_HOSTS = emptyApi ? [] : [...GENERATED.SONOMOS_API_HOSTS];
-  if (base !== undefined) g.document = { baseURI: base };
+  if (base !== undefined || referrer !== undefined) {
+    g.document = { ...(base !== undefined ? { baseURI: base } : {}), ...(referrer !== undefined ? { referrer } : {}) };
+  }
+  // The harness's `window.top` is the window itself unless a test says otherwise.
+  if (framed) g.top = {};
   return g;
 }
 const REVIEW_PROMPT = JSON.stringify({ model: 'gpt-4o', messages: [{ role: 'user', content: 'Patient Jane Roe SSN 078-05-1120' }] });
@@ -4928,6 +4937,75 @@ test('an artifact or sandbox frame inside an AI page blocks via ancestorOrigins 
   const ok = await fetchOutcome(SIGNED_OUT, realCatalogGlobals('https://js.stripe.com/v3/m-outer.html',
     { ancestors: ['https://shop.example.com'] }), 'https://m.stripe.com/6', { method: 'POST', body: 'a=b' });
   assert.equal(ok.outcome, 'SENT');
+});
+
+// Firefox has no `location.ancestorOrigins`. A frame there is told from a page by
+// `window.top !== window`, and its parent by `document.referrer`.
+test('Firefox: with no ancestorOrigins, a frame is judged by its referrer (F1, F3, F5, F8)', async () => {
+  const frames = [
+    ['F1 Claude artifact frame', 'https://www.claudeusercontent.com/?domain=claude.ai', 'https://claude.ai/', 'https://api.example-anything.com/collect'],
+    ['F3 ChatGPT sandbox frame', 'https://abc.web-sandbox.oaiusercontent.com/', 'https://chatgpt.com/c/1', 'https://api.example-anything.com/collect'],
+    ['F5 Stripe frame in ChatGPT', 'https://js.stripe.com/v3/m-outer.html', 'https://chatgpt.com/', 'https://m.stripe.com/6'],
+    ['F8 third-party frame in Gemini', 'https://x.scf.usercontent.goog/', 'https://gemini.google.com/app', 'https://y.example.com/c'],
+    ['frame in an API-host page', 'https://third-party.example/embed', 'https://openrouter.ai/chat', 'https://y.example.com/c'],
+    // No referrer at all (a no-referrer policy, a sandbox): cannot be ruled out.
+    ['framed, empty referrer', 'https://third-party.example/embed', '', 'https://y.example.com/c'],
+    ['framed, no document', 'https://third-party.example/embed', undefined, 'https://y.example.com/c']
+  ];
+  for (const [name, page, referrer, url] of frames) {
+    const { outcome, w } = await fetchOutcome(SIGNED_OUT, realCatalogGlobals(page, { framed: true, referrer }), url);
+    assert.equal(outcome, 'BLOCKED', name);
+    assert.equal(w.netCalls.length, 0, name);
+    assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'), name);
+  }
+  // A throwing `window.top` counts as framed.
+  // (The shim reads it per request, so it can start throwing after load.)
+  const tw = makeDebugWorld(down(SIGNED_OUT), realCatalogGlobals('https://third-party.example/embed', { referrer: '' }));
+  Object.defineProperty(tw.sandbox, 'top', { get() { throw new Error('SecurityError'); }, configurable: true });
+  await assert.rejects(tw.sandbox.fetch('https://y.example.com/c', { method: 'POST', body: REVIEW_PROMPT }), blockedError, 'window.top throws');
+  assert.equal(tw.netCalls.length, 0);
+  // An ordinary embed whose referrer is an ordinary page is an ordinary page.
+  const ok = await fetchOutcome(SIGNED_OUT, realCatalogGlobals('https://js.stripe.com/v3/m-outer.html', { framed: true, referrer: 'https://shop.example.com/cart' }),
+    'https://m.stripe.com/6', { method: 'POST', body: 'a=b' });
+  assert.equal(ok.outcome, 'SENT');
+  // A TOP-LEVEL page in Firefox can still pass whatever its referrer (sonomos.ai -> Clerk),
+  // including a referrer that is an AI surface (the user followed a link from chatgpt.com).
+  for (const referrer of [undefined, '', 'https://chatgpt.com/c/1']) {
+    const top = await fetchOutcome(SIGNED_OUT, realCatalogGlobals(NON_AI_PAGE, { referrer }), CLERK_URL, { method: 'POST', body: 'a=b' });
+    assert.equal(top.outcome, 'SENT', `top-level, referrer ${referrer}`);
+  }
+  // Where the browser does give ancestorOrigins it wins: no referrer is needed.
+  const chrome = await fetchOutcome(SIGNED_OUT, realCatalogGlobals('https://js.stripe.com/v3/m-outer.html', { framed: true, referrer: '', ancestors: ['https://shop.example.com'] }),
+    'https://m.stripe.com/6', { method: 'POST', body: 'a=b' });
+  assert.equal(chrome.outcome, 'SENT');
+});
+
+test('IPv6 and local-name rows N1-N5 block (RFC 8215, SIIT, site-local, .corp, .home) and public neighbours do not', async () => {
+  const blocked = [
+    'http://[64:ff9b:1::a00:5]:11434/api/generate',   // N1 NAT64 local-use /48
+    'http://[64:ff9b:1:ffff::1]/x',                    // anywhere in that /48
+    'http://[::ffff:0:127.0.0.1]:11434/api/generate', // N2 SIIT
+    'http://[::ffff:0:10.0.0.5]/x',
+    'http://[fec0::1]:11434/api/generate',            // N3 site-local
+    'http://[feff::1]/x',                              // top of fec0::/10
+    'http://gpu.corp:11434/api/generate',             // N4
+    'http://llm.home:11434/api/generate',             // N5
+    'http://nas.private/x'
+  ];
+  for (const url of blocked) {
+    for (const code of [SIGNED_OUT, 'no-bridge']) {
+      const { outcome, w } = await fetchOutcome(code, realCatalogGlobals(BYOK), url);
+      assert.equal(outcome, 'BLOCKED', `${code} ${url}`);
+      assert.equal(w.netCalls.length, 0, `${code} ${url}`);
+    }
+  }
+  // SIIT and mapped forms are judged by the address they embed; the rest of
+  // the neighbourhood is ordinary.
+  for (const url of ['http://[::ffff:0:8.8.8.8]/x', 'http://[64:ff9b::808:808]/x', 'http://[fe00::1]/x',
+    'http://[64:ff9c::1]/x', 'http://corp.example.com/x', 'http://home.example.com/x', 'http://private.example.com/x']) {
+    const { outcome } = await fetchOutcome(SIGNED_OUT, realCatalogGlobals(NON_AI_PAGE), url, { method: 'POST', body: 'a=b' });
+    assert.equal(outcome, 'SENT', url);
+  }
 });
 
 test('loopback, private and local-network targets block (self-hosted models, round 2 e)', async () => {

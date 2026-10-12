@@ -37,19 +37,36 @@ strict SemVer.
   the page has a readable host (an opaque `data:` frame refuses), is not itself
   an AI surface or API host (chatgpt.com, claude.ai, aistudio, openrouter.ai/chat
   can hand a prompt to Sentry, Segment, S3 or Google's clients6 RPC) and has no
-  AI-surface ancestor frame (`location.ancestorOrigins`, where the browser has
-  it: an artifact or sandbox frame inside claude.ai or chatgpt.com); the target
-  is not loopback, private or a local-network name (self-hosted models, e.g.
-  Ollama :11434: 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, CGNAT
-  100.64/10, IPv6 loopback/ULA/link-local and embedded-IPv4 forms, single-label
-  hosts, `.local` `.lan` `.internal` `.intranet` `.localdomain` `.home.arpa`
-  `.ts.net`); and the scope is not an upload. Without it, Locke being signed
+  AI-surface ancestor frame (`location.ancestorOrigins` where the browser has
+  it: an artifact or sandbox frame inside claude.ai or chatgpt.com; where it
+  does not, i.e. Firefox, a framed page (`window.top !== window`, or reading it
+  throws) is judged by `document.referrer`, and an empty referrer or one naming
+  a catalog API host or an AI surface blocks; a top-level page is unaffected);
+  the target is not loopback, private or a local-network name (self-hosted
+  models, e.g. Ollama :11434). Covered exactly: IPv4 127/8, 10/8, 172.16/12,
+  192.168/16, 169.254/16, 0/8 and CGNAT 100.64/10; IPv6 `::`, `::1`, ULA
+  fc00::/7, link-local fe80::/10, site-local fec0::/10, NAT64 64:ff9b::/96 and
+  RFC 8215 64:ff9b:1::/48 (wholly private), and the forms that embed an IPv4
+  address, judged by that address: `::a.b.c.d`, `::ffff:a.b.c.d` (mapped),
+  `::ffff:0:a.b.c.d` (SIIT) and 6to4 2002::/16; single-label hosts; and the
+  suffixes `.localhost` `.local` `.lan` `.internal` `.intranet` `.localdomain`
+  `.home.arpa` `.ts.net` `.corp` `.home` `.private`. A public name that merely
+  resolves to a private address (`127.0.0.1.nip.io`) cannot be seen from here.
+  The scope must also not be an upload. Without it, Locke being signed
   out blocked every login and form on the web, including Locke's own sign-in.
   Everything else blocks, as does every outcome where Locke was reached or
   signed-out is unproven (`screening-timeout`, plain timeouts, guard blocks, an
   unknown code). `locke-signed-out` that does not pass shows "Locke is signed
   out. Sign in to the Locke desktop app, then try again." The user's fail-open
-  window is unchanged.
+  window is unchanged. The native host reports `locke-signed-out` only for a
+  deliberate sign-out: a signed-out lease that names a vault still on disk with
+  no `.signed-out` tombstone is a signed-in user whose keyring is unavailable,
+  and reads `bridge-unreachable` (blocks).
+- Copy: `bridge-unreachable` now says the browser connector could not connect to
+  Locke's screening service (it used to say the desktop app answered, which is
+  `bridge-dropped`). The popup shows "Locke is signed out. Sign in to the Locke
+  desktop app to resume screening." when the last capture failure is
+  `locke-signed-out`, instead of the offline / held-back text.
 - Native host relay codes: the failure after Locke was reached (`bridge-error`
   in the previous build) is now `bridge-dropped`, because `bridge-error` is the
   service worker's own catch-all. It shows the "answered, but could not reach

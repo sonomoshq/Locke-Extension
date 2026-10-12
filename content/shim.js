@@ -1592,10 +1592,16 @@
   // Besides the private ranges this covers CGNAT 100.64/10 (Tailscale), a
   // single-label name (a LAN box such as `gpu-box`) and the names a LAN, a VPN
   // or mDNS gives its machines: .local .lan .internal .intranet .localdomain
-  // .home.arpa .ts.net. A public name that merely resolves to a private address
-  // (127.0.0.1.nip.io) cannot be seen from here.
+  // .home.arpa .ts.net .corp .home .private. A public name that merely resolves
+  // to a private address (127.0.0.1.nip.io) cannot be seen from here.
+  //
+  // IPv6, exactly: loopback/unspecified (::1, ::), ULA fc00::/7, link-local
+  // fe80::/10, site-local fec0::/10, NAT64 64:ff9b::/96 and the RFC 8215
+  // local-use 64:ff9b:1::/48 (both wholly private), and the forms that embed an
+  // IPv4 address, judged by that address: ::a.b.c.d (compatible), ::ffff:a.b.c.d
+  // (mapped), ::ffff:0:a.b.c.d (SIIT) and 2002::/16 (6to4).
   const LOCAL_NAME_SUFFIXES = ['.localhost', '.local', '.lan', '.internal', '.intranet',
-    '.localdomain', '.home.arpa', '.ts.net'];
+    '.localdomain', '.home.arpa', '.ts.net', '.corp', '.home', '.private'];
   function isPrivateV4(a, b) {
     return a === 0 || a === 127 || a === 10 || (a === 169 && b === 254)
       || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
@@ -1632,30 +1638,57 @@
     if (!g) return true; // not an address we can read: do not pass it
     const first = g[0];
     if ((first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80) return true;
+    if ((first & 0xffc0) === 0xfec0) return true;                  // fec0::/10 (site-local)
     const embedded = () => isPrivateV4(g[6] >> 8, g[6] & 0xff);
     const zeros = (n) => g.slice(0, n).every((x) => x === 0);
     if (zeros(5) && g[5] === 0xffff) return embedded();            // ::ffff:a.b.c.d (mapped)
+    if (zeros(4) && g[4] === 0xffff && g[5] === 0) return embedded(); // ::ffff:0:a.b.c.d (SIIT)
     if (zeros(6)) return g[6] === 0 && g[7] <= 1 ? true : embedded(); // ::, ::1, ::a.b.c.d (compatible)
     if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return embedded(); // NAT64
+    if (g[0] === 0x64 && g[1] === 0xff9b && g[2] === 1) return true; // 64:ff9b:1::/48 (RFC 8215, local-use)
     if (g[0] === 0x2002) return isPrivateV4(g[1] >> 8, g[1] & 0xff); // 6to4
     return false;
   }
 
-  // Does any ancestor frame belong to an AI surface or API host? `ancestorOrigins`
-  // is Chrome/Edge/Safari only; where the browser has no list there is nothing to
-  // ask. An ancestor whose origin cannot be read (a sandboxed frame reads
-  // "null") is treated as one: we cannot rule it out.
-  function ancestorIsAiSurface() {
-    let origins;
-    try { origins = location.ancestorOrigins; } catch { return false; }
-    if (!origins || typeof origins.length !== 'number') return false;
-    for (let i = 0; i < origins.length; i++) {
-      const host = hostOfHref(String(origins[i]));
-      if (host === '') return true;
-      if (isCatalogApiHost(host)) return true;
-      if (isCatalogSurface(host) && !isUnscreenedSurface(host)) return true;
+  // Does any ancestor frame belong to an AI surface or API host? Two sources.
+  //
+  // Where the browser has `location.ancestorOrigins` (Chrome, Edge, Safari) it is
+  // the whole chain. An ancestor whose origin cannot be read (a sandboxed frame
+  // reads "null") is treated as one: we cannot rule it out.
+  //
+  // Firefox has no such list. There, a frame is told from a top-level page by
+  // `window.top !== window` (an access that throws counts as framed), and the
+  // only thing it can say about its parent is `document.referrer`, whose host is
+  // the embedding page's (even when the referrer policy trims it to an origin).
+  // A framed page with no readable referrer cannot be ruled out, so it is
+  // treated as an AI ancestor too. A top-level page needs none of this and is
+  // judged by its own host alone.
+  function ancestorHostIsAi(host) {
+    if (host === '') return true;
+    if (isCatalogApiHost(host)) return true;
+    return isCatalogSurface(host) && !isUnscreenedSurface(host);
+  }
+  function isFramed() {
+    try { return typeof window !== 'undefined' && window.top !== window; } catch { return true; }
+  }
+  function documentReferrer() {
+    try {
+      return (typeof document !== 'undefined' && document && typeof document.referrer === 'string')
+        ? document.referrer : '';
+    } catch {
+      return '';
     }
-    return false;
+  }
+  function ancestorIsAiSurface() {
+    let origins = null;
+    try { origins = location.ancestorOrigins; } catch { /* fall through to the referrer */ }
+    if (origins && typeof origins.length === 'number') {
+      for (let i = 0; i < origins.length; i++) {
+        if (ancestorHostIsAi(hostOfHref(String(origins[i])))) return true;
+      }
+      return false;
+    }
+    return isFramed() && ancestorHostIsAi(hostOfHref(documentReferrer()));
   }
 
   function unreachableMayPass(coverage, scope, url) {
@@ -2140,8 +2173,13 @@
     // "start" an app that just replied to them is wrong, and it is exactly
     // the sentence that used to sit next to a popup reading Online at the
     // same moment. See the branch in `decide()` above for the reasoning.
+    // The host started but could NOT connect to Locke's screening service, and
+    // the desktop app's lease does not say Locke is signed out. That is a Locke
+    // that is not running, still starting, or signed in but unable to open its
+    // sign-in, so the text must not claim the desktop app answered (that is
+    // `bridge-dropped`, where Locke WAS reached).
     'bridge-unreachable': ['unavailable',
-      'the Locke desktop app answered, but it could not reach its screening service — this is NOT a sensitive-data block. Try again shortly; if it keeps happening, restart Locke.'],
+      'the Locke browser connector could not connect to Locke’s screening service, so this request could not be screened — this is NOT a sensitive-data block, and nothing was sent. Make sure the Locke desktop app is running and signed in, then try again; if it keeps happening, restart Locke.'],
     // The host reached Locke and the exchange failed after that (dropped
     // mid-screen, unreadable reply): the same words `bridge-unreachable` used
     // to carry for it (470d493), since the request may have been mid-screen.
