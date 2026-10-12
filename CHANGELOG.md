@@ -23,18 +23,37 @@ strict SemVer.
   `catalog_host`. The `web_screening: "none"` search hosts' own pages are
   classified too, instead of passed through.
 - Fail-closed applies on every site, with one narrow exception: when Locke is
-  provably unreachable (`no-bridge`, `bridge-unreachable`) a request is sent
-  as it was (reason `locke-unreachable-unclassified`) only if ALL hold: it is
-  `open_web`; the destination is not a catalog AI web or API host
-  (api.openai.com, api.anthropic.com, openrouter.ai, generativelanguage,
-  bedrock-runtime...); the page is not itself an AI surface (chatgpt.com,
-  claude.ai, aistudio can hand a prompt to Sentry, Segment, S3 or Google's
-  clients6 RPC); the target is not loopback or private (self-hosted models,
-  e.g. Ollama :11434); and the scope is not an upload. Without it, Locke being
-  off blocked every login and form on the web, including Locke's own sign-in.
+  DELIBERATELY SIGNED OUT, a request is sent as it was (reason
+  `locke-unreachable-unclassified`). The signal is the new relay code
+  `locke-signed-out`, which the native host sends only when it could not
+  connect to Locke AND the desktop app's capture lease
+  (`~/.sonomos/capture-lease.json`) says `signed-out` AND the machine has no
+  team lock. `no-bridge` and `bridge-unreachable` BLOCK again: "unreachable"
+  cannot be told from "Locke crashed mid-screen", and a pass keyed on it
+  leaked uncataloged AI. Even on `locke-signed-out` the request is sent only if
+  ALL hold: it is `open_web`; the generated API-host list loaded and the
+  destination is not a catalog AI web or API host (api.openai.com,
+  api.anthropic.com, openrouter.ai, generativelanguage, bedrock-runtime...);
+  the page has a readable host (an opaque `data:` frame refuses), is not itself
+  an AI surface or API host (chatgpt.com, claude.ai, aistudio, openrouter.ai/chat
+  can hand a prompt to Sentry, Segment, S3 or Google's clients6 RPC) and has no
+  AI-surface ancestor frame (`location.ancestorOrigins`, where the browser has
+  it: an artifact or sandbox frame inside claude.ai or chatgpt.com); the target
+  is not loopback, private or a local-network name (self-hosted models, e.g.
+  Ollama :11434: 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, CGNAT
+  100.64/10, IPv6 loopback/ULA/link-local and embedded-IPv4 forms, single-label
+  hosts, `.local` `.lan` `.internal` `.intranet` `.localdomain` `.home.arpa`
+  `.ts.net`); and the scope is not an upload. Without it, Locke being signed
+  out blocked every login and form on the web, including Locke's own sign-in.
   Everything else blocks, as does every outcome where Locke was reached or
-  unreachable is unproven (`screening-timeout`, plain timeouts, guard blocks).
-  The user's fail-open window is unchanged.
+  signed-out is unproven (`screening-timeout`, plain timeouts, guard blocks, an
+  unknown code). `locke-signed-out` that does not pass shows "Locke is signed
+  out. Sign in to the Locke desktop app, then try again." The user's fail-open
+  window is unchanged.
+- Native host relay codes: the failure after Locke was reached (`bridge-error`
+  in the previous build) is now `bridge-dropped`, because `bridge-error` is the
+  service worker's own catch-all. It shows the "answered, but could not reach
+  its screening service, try again shortly" message `bridge-unreachable` used to.
 - `sendBeacon`, `fetchLater()` and synchronous XHR are refused only on
   catalog prompt paths and sent elsewhere (they cannot be held, so cannot be
   classified). Without data-sharing consent, only catalog prompt paths are

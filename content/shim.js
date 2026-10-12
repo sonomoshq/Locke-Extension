@@ -34,23 +34,29 @@
 // so (`unchecked`) and we say so too.
 //
 // THE ONE NARROW EXCEPTION, and it is not a fail-open window: when Locke is
-// PROVABLY UNREACHABLE (`no-bridge`, `bridge-unreachable` — see
-// UNREACHABLE_RELAY_CODES), the original request goes out, as
-// `locke-unreachable-unclassified`, only when ALL of these hold: the capture
-// is `open_web` (not a catalog web host), the destination is not a catalog
-// API host (api.openai.com, openrouter.ai, ...), the PAGE is not an AI
-// surface (it could hand a prompt to any host: Sentry, Segment, S3, AI
-// Studio's clients6 RPC), the target is not loopback or private (a
-// self-hosted model such as Ollama :11434), and the scope is not an upload.
-// See unreachableMayPass(). Since
-// super PR #15 every bodied request on every site is held, so with Locke off
-// the unconditional block above took down every login, form and POST on the
-// web — including Clerk's sign-in call, which is how the user would turn
-// Locke back on. This mirrors the proxy shim, which with capture down fails
-// open for non-AI hosts and CLOSED for every AI host: a catalog host is an AI
-// host, so `catalog_host` and `capture_path` (and SCOPE.UPLOAD) still block,
-// even off the prompt paths — chatgpt.com's audio and image uploads, for one,
-// must never leave unscreened. See decide().
+// DELIBERATELY SIGNED OUT the original request goes out, as
+// `locke-unreachable-unclassified`. The relay code for that is `locke-signed-out`
+// (UNREACHABLE_RELAY_CODES) and nothing else: the native host emits it only
+// when it could not connect to Locke AND the desktop app's capture lease says
+// the user signed out AND the machine has no team lock. `no-bridge` and
+// `bridge-unreachable` are NOT it: "unreachable" cannot be told from "Locke
+// crashed mid-screen", and passing on it leaks uncataloged AI. They block.
+// Even on `locke-signed-out` the request goes out only when ALL of these hold
+// (see unreachableMayPass()): the capture is `open_web` (not a catalog web
+// host), the generated API-host list loaded and the destination is not on it
+// (api.openai.com, openrouter.ai, ...), the PAGE has a readable host and is
+// not an AI surface or an API host and has no AI-surface ancestor frame (an
+// AI page, or its artifact/sandbox frame, could hand a prompt to any host:
+// Sentry, Segment, S3, AI Studio's clients6 RPC), the target is not loopback,
+// private or a local-network name (a self-hosted model such as Ollama :11434),
+// and the scope is not an upload. Since super PR #15 every bodied request on
+// every site is held, so with Locke signed out the unconditional block above
+// took down every login, form and POST on the web — including Clerk's sign-in
+// call, which is how the user signs back in. This mirrors the proxy shim,
+// which with capture down fails open for non-AI hosts and CLOSED for every AI
+// host: a catalog host is an AI host, so `catalog_host` and `capture_path`
+// (and SCOPE.UPLOAD) still block, even off the prompt paths — chatgpt.com's
+// audio and image uploads, for one, must never leave unscreened. See decide().
 //
 // Hard rule: out-of-scope requests (a host the user switched off, or no body
 // to scan) must pass through untouched — every hook wraps its scoping work in
@@ -1457,6 +1463,12 @@
     'data-consent-required': 'data-consent-required',
     'screening-timeout': 'screening-timeout',
     'bridge-unreachable': 'bridge-unreachable',
+    // Locke WAS reached and the exchange failed mid-way (the host's own
+    // `bridge-dropped`, which used to ride `bridge-unreachable`): same copy.
+    'bridge-dropped': 'bridge-dropped',
+    // Deliberately signed out. Blocks wherever the open-web pass (see
+    // `decide()`) does not apply — AI hosts, uploads, local targets.
+    'locke-signed-out': 'locke-signed-out',
     'receipt-too-large': 'receipt-too-large',
     'no-bridge': 'connector-not-started',
     'bridge-empty': 'bridge-unreadable-reply',
@@ -1507,29 +1519,33 @@
     };
   }
 
-  // Relay codes that PROVE Locke could not be reached, so no classifier ever
-  // saw the request. Deliberately the two that say so and nothing wider:
+  // The ONE relay code that lets a request through: `locke-signed-out`. The
+  // native host sends it only when its connection to Locke failed AND the
+  // desktop app's capture lease (`~/.sonomos/capture-lease.json`) says the user
+  // signed out AND there is no team-lock record on the machine. The user did
+  // that on purpose, and without this pass they could not reach Clerk to sign
+  // back in.
   //
-  //   `no-bridge`          — the browser could not START our native-messaging
-  //     host (not registered, or it exited at once): Locke is not installed,
-  //     not running, or the user is signed out.
-  //   `bridge-unreachable` — the host launched and answered, but could not
-  //     reach the screening service beneath it.
-  //
-  // NOT here, on purpose: `screening-timeout` (the host answered and was
-  // MID-screen when it ran out of time — the request may be AI), `native-timeout`
-  // and a plain verdict timeout (a hang proves nothing about reachability),
-  // `bridge-error` (the unclassified fallback; could be anything),
-  // `receipt-too-large`, `host-panic`, `bridge-protocol-mismatch`,
-  // `extension-reloaded`, malformed or unknown replies, consent, and any real
-  // receipt including a guard block. When in doubt a code stays out: the cost
-  // of a wrong entry is an unscreened AI prompt, the cost of a missing one is
-  // a blocked request with an honest reason.
-  const UNREACHABLE_RELAY_CODES = new Set(['no-bridge', 'bridge-unreachable']);
+  // NOT here, on purpose, and each of these blocks:
+  //   `no-bridge`          — the browser could not START the native host. Locke
+  //     may be uninstalled, crashed or signed out; the extension cannot tell.
+  //   `bridge-unreachable` — the host could not connect to Locke and no lease
+  //     says signed out. Indistinguishable from a Locke that crashed
+  //     mid-screen, and a passthrough keyed on it leaks uncataloged AI.
+  //   `bridge-dropped`     — Locke WAS reached and failed mid-exchange.
+  //   `screening-timeout`, `native-timeout`, a plain verdict timeout,
+  //   `bridge-error` (the worker's own catch-all), `receipt-too-large`,
+  //   `host-panic`, `bridge-protocol-mismatch`, `extension-reloaded`,
+  //   malformed or unknown replies, consent, and any real receipt including a
+  //   guard block. An unknown code blocks. The cost of a wrong entry is an
+  //   unscreened AI prompt; the cost of a missing one is a blocked request
+  //   with an honest reason.
+  const UNREACHABLE_RELAY_CODES = new Set(['locke-signed-out']);
 
-  // Locke being down lets a request through only under the whole rule in
-  // unreachableMayPass() below (open_web, not an AI API host, not from an AI
-  // page, not loopback/private, not an upload). The first condition: its host is
+  // Locke being signed out lets a request through only under the whole rule in
+  // unreachableMayPass() below (open_web, API list loaded and not an AI API
+  // host, a readable page that is not an AI surface/API host and has no AI
+  // ancestor frame, not loopback/private/local, not an upload). The first condition: its host is
   // not in the catalog at all (`open_web`). This mirrors the proxy shim, which
   // on "capture DOWN" fails open for non-AI hosts and CLOSED for every AI
   // host. A catalog host is an AI host even off its prompt paths (sign-in,
@@ -1543,7 +1559,11 @@
   // Catalog `api_hosts` (api.openai.com, openrouter.ai, *-aiplatform...):
   // AI hosts the proxy fails CLOSED on, though they are not web surfaces and
   // so read `open_web` here. Same label-wise `*` rule as shared/constants.js.
-  const API_HOSTS = (globalThis.SONOMOS_API_HOSTS || [])
+  // If the generated list did not load (or is empty) the filter cannot be
+  // trusted, and unreachableMayPass() refuses: no list, no pass.
+  const API_HOSTS_LOADED = Array.isArray(globalThis.SONOMOS_API_HOSTS)
+    && globalThis.SONOMOS_API_HOSTS.length > 0;
+  const API_HOSTS = (API_HOSTS_LOADED ? globalThis.SONOMOS_API_HOSTS : [])
     .map((h) => String(h).replace(/\.+$/, '').toLowerCase()).filter(Boolean);
   function apiLabelMatches(p, l) {
     const star = p.indexOf('*');
@@ -1565,39 +1585,95 @@
     });
   }
 
-  // Loopback, private and link-local targets: a self-hosted model (Ollama on
-  // :11434, llama.cpp, vLLM, LM Studio) is an AI host no catalog can name, so
-  // these stay closed. The URL parser has already normalised the host to
-  // dotted-decimal IPv4 or a bracketed, compressed IPv6.
+  // Loopback, private, link-local and local-network targets: a self-hosted
+  // model (Ollama on :11434, llama.cpp, vLLM, LM Studio) is an AI host no
+  // catalog can name, so these stay closed. The URL parser has already
+  // normalised the host to dotted-decimal IPv4 or a bracketed, compressed IPv6.
+  // Besides the private ranges this covers CGNAT 100.64/10 (Tailscale), a
+  // single-label name (a LAN box such as `gpu-box`) and the names a LAN, a VPN
+  // or mDNS gives its machines: .local .lan .internal .intranet .localdomain
+  // .home.arpa .ts.net. A public name that merely resolves to a private address
+  // (127.0.0.1.nip.io) cannot be seen from here.
+  const LOCAL_NAME_SUFFIXES = ['.localhost', '.local', '.lan', '.internal', '.intranet',
+    '.localdomain', '.home.arpa', '.ts.net'];
+  function isPrivateV4(a, b) {
+    return a === 0 || a === 127 || a === 10 || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+      || (a === 100 && b >= 64 && b <= 127);
+  }
+  // An IPv6 literal (no brackets) as eight 16-bit groups, or null if unreadable.
+  function v6Groups(h) {
+    let text = h;
+    const tail = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+    if (tail) {
+      const [x, y, z, w] = tail.slice(1).map(Number);
+      text = `${text.slice(0, tail.index)}${((x << 8) | y).toString(16)}:${((z << 8) | w).toString(16)}`;
+    }
+    const halves = text.split('::');
+    if (halves.length > 2) return null;
+    const head = halves[0] === '' ? [] : halves[0].split(':');
+    const rest = halves.length === 2 ? (halves[1] === '' ? [] : halves[1].split(':')) : [];
+    if (halves.length === 1 && head.length !== 8) return null;
+    const fill = 8 - head.length - rest.length;
+    if (fill < (halves.length === 2 ? 1 : 0)) return null;
+    const groups = [...head, ...new Array(halves.length === 2 ? fill : 0).fill('0'), ...rest]
+      .map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : NaN));
+    return groups.length === 8 && groups.every((g) => !Number.isNaN(g)) ? groups : null;
+  }
   function isLoopbackOrPrivateHost(host) {
     let h = String(host || '').replace(/\.+$/, '').toLowerCase();
-    if (h === 'localhost' || h.endsWith('.localhost')) return true;
-    const v4 = (a, b) => a === 0 || a === 127 || a === 10 || (a === 169 && b === 254)
-      || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+    if (h === '' ) return true; // nothing to judge: do not pass it
+    if (h === 'localhost' || LOCAL_NAME_SUFFIXES.some((x) => h.endsWith(x))) return true;
     const m4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
-    if (m4) return v4(Number(m4[1]), Number(m4[2]));
+    if (m4) return isPrivateV4(Number(m4[1]), Number(m4[2]));
     if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
-    if (!h.includes(':')) return false;
-    if (h === '::' || h === '::1') return true;
-    const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
-    if (mapped) {
-      const hi = parseInt(mapped[1], 16);
-      return v4(hi >> 8, hi & 0xff);
+    if (!h.includes(':')) return !h.includes('.'); // a single-label name is a LAN box
+    const g = v6Groups(h);
+    if (!g) return true; // not an address we can read: do not pass it
+    const first = g[0];
+    if ((first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80) return true;
+    const embedded = () => isPrivateV4(g[6] >> 8, g[6] & 0xff);
+    const zeros = (n) => g.slice(0, n).every((x) => x === 0);
+    if (zeros(5) && g[5] === 0xffff) return embedded();            // ::ffff:a.b.c.d (mapped)
+    if (zeros(6)) return g[6] === 0 && g[7] <= 1 ? true : embedded(); // ::, ::1, ::a.b.c.d (compatible)
+    if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return embedded(); // NAT64
+    if (g[0] === 0x2002) return isPrivateV4(g[1] >> 8, g[1] & 0xff); // 6to4
+    return false;
+  }
+
+  // Does any ancestor frame belong to an AI surface or API host? `ancestorOrigins`
+  // is Chrome/Edge/Safari only; where the browser has no list there is nothing to
+  // ask. An ancestor whose origin cannot be read (a sandboxed frame reads
+  // "null") is treated as one: we cannot rule it out.
+  function ancestorIsAiSurface() {
+    let origins;
+    try { origins = location.ancestorOrigins; } catch { return false; }
+    if (!origins || typeof origins.length !== 'number') return false;
+    for (let i = 0; i < origins.length; i++) {
+      const host = hostOfHref(String(origins[i]));
+      if (host === '') return true;
+      if (isCatalogApiHost(host)) return true;
+      if (isCatalogSurface(host) && !isUnscreenedSurface(host)) return true;
     }
-    const first = parseInt(h.split(':')[0] || '0', 16);
-    if (Number.isNaN(first)) return true; // not an address we can read: do not pass it
-    return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80;
+    return false;
   }
 
   function unreachableMayPass(coverage, scope, url) {
     if (scope === SCOPE.UPLOAD || coverage !== COVERAGE.OPEN_WEB) return false;
+    // No API-host list, no pass: the filter below cannot be trusted.
+    if (!API_HOSTS_LOADED) return false;
     let host = '';
     try { host = url ? url.hostname : ''; } catch { return false; }
     if (host === '' || isCatalogApiHost(host) || isLoopbackOrPrivateHost(host)) return false;
-    // Initiator, not just target: a catalog surface that screens something
-    // (chatgpt.com, claude.ai, aistudio.google.com) can hand the prompt to a
-    // host the catalog does not name. Its own traffic is blocked anyway.
+    // Initiator, not just target. A page whose host we cannot read (an opaque
+    // `data:` frame) is unknown; a page that is itself an API host
+    // (openrouter.ai/chat) is an AI page; a catalog surface (chatgpt.com,
+    // claude.ai, aistudio.google.com) can hand a prompt to a host the catalog
+    // does not name; and so can the artifact or sandbox frame one of them
+    // embeds. All refuse.
+    if (PAGE_HOST === '' || isCatalogApiHost(PAGE_HOST)) return false;
     if (pageIsAiSurface() && !isUnscreenedSurface(PAGE_HOST)) return false;
+    if (ancestorIsAiSurface()) return false;
     return true;
   }
 
@@ -1722,18 +1798,18 @@
       // host exited) keeps `native-call-failed`: there the app really is the
       // thing that is not answering.
       //
-      // THE EXCEPTION (the bug this fixes): Locke provably unreachable on a
-      // request to a host the catalog names nowhere (`open_web`, and not a catalog
-      // API host), from a page that is not an AI surface, to a target that is not
-      // loopback or private (see unreachableMayPass). The page's own request goes out
-      // untouched. It is distinguishable from a screened `allow` and from the
+      // THE EXCEPTION (the bug this fixes): Locke deliberately SIGNED OUT
+      // (`locke-signed-out`, and only that) on a request to a host the catalog
+      // names nowhere (`open_web`, not a catalog API host), from a page that is
+      // not an AI surface, to a target that is not loopback, private or local
+      // (see unreachableMayPass). The page's own request goes out untouched. It is distinguishable from a screened `allow` and from the
       // user's fail-open window (`unchecked-fail-open`) by its reason, and it
       // is not tallied as an unchecked send: it is not an AI host.
       if (UNREACHABLE_RELAY_CODES.has(v.code) && unreachableMayPass(coverage, scope, url)) {
         return {
           action: 'send',
           reason: 'locke-unreachable-unclassified',
-          fields: { waitedMs, code: clip(v.code), coverage, because: 'locke-unreachable-not-catalog-host' }
+          fields: { waitedMs, code: clip(v.code), coverage, because: 'locke-signed-out-not-ai' }
         };
       }
       const reason = RELAY_BLOCK_REASON[v.code] ?? 'native-call-failed';
@@ -2066,6 +2142,16 @@
     // same moment. See the branch in `decide()` above for the reasoning.
     'bridge-unreachable': ['unavailable',
       'the Locke desktop app answered, but it could not reach its screening service — this is NOT a sensitive-data block. Try again shortly; if it keeps happening, restart Locke.'],
+    // The host reached Locke and the exchange failed after that (dropped
+    // mid-screen, unreadable reply): the same words `bridge-unreachable` used
+    // to carry for it (470d493), since the request may have been mid-screen.
+    'bridge-dropped': ['unavailable',
+      'the Locke desktop app answered, but it could not reach its screening service — this is NOT a sensitive-data block. Try again shortly; if it keeps happening, restart Locke.'],
+    // The user signed out of Locke on purpose. Only reached for a request the
+    // open-web pass does not cover (an AI host or page, an upload, a local
+    // model): those stay closed, and the one fix is to sign in.
+    'locke-signed-out': ['unavailable',
+      'Locke is signed out, so this request could not be screened — this is NOT a sensitive-data block. Sign in to the Locke desktop app, then try again.'],
     // The host and the screener both answered — a redaction was even found —
     // but the rebuilt body was too big for the native-messaging reply cap
     // (1 MB) and the host

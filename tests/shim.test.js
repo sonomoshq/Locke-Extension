@@ -4614,104 +4614,36 @@ test('fail-open: oversize, stream and unreadable bodies send unscreened in an op
   }
 });
 
-// ── Locke unreachable: only a request nobody called AI may pass ────────────
+// ── Locke signed out: only a request nobody called AI may pass ─────────────
 //
 // The bug (manual test 2026-10-12): since super PR #15 every bodied request on
 // every site is held, and with Locke off `decide()` blocked all of them — every
 // login, form and POST, including Clerk's sign-in call, so the user could not
-// even sign in to Locke. The rule mirrors the proxy shim's "capture DOWN":
-// PROVABLY unreachable (`no-bridge`, `bridge-unreachable`) on `open_web` (a
-// host the catalog does not name) sends the original, as
-// `locke-unreachable-unclassified`. Every AI host fails CLOSED, as in the proxy
-// shim: `catalog_host`, `capture_path` and SCOPE.UPLOAD keep blocking, and so
-// does every outcome where Locke WAS reached or where unreachable cannot be
-// proven.
+// even sign back in to Locke.
+//
+// The rule, after two adversarial reviews: the pass happens ONLY when Locke is
+// DELIBERATELY signed out. The native host says so with the relay code
+// `locke-signed-out` (its connect failed AND the desktop app's capture lease
+// says signed-out AND no team lock). `no-bridge` and `bridge-unreachable` do
+// NOT pass: "unreachable" cannot be told from "crashed mid-screen". Even on
+// `locke-signed-out` only `open_web` passes, from a readable page that is not
+// an AI surface or API host and has no AI ancestor frame, to a destination
+// that is not a catalog API host and not loopback/private/local, with the
+// generated API-host list loaded, and never an upload.
 
 const OPEN_WEB_URL = 'https://accounts.example.com/signin/v2/challenge';
 const CLERK_URL = 'https://clerk.sonomos.ai/v1/client/sign_ins';
+const GOOGLE_LOGIN_URL = 'https://accounts.google.com/v3/signin/_/AccountsSignInUi/data/batchexecute';
 const CATALOG_HOST_URL = 'https://chatgpt.com/backend-api/me'; // off CHATGPT_PATHS's capture paths
 const CAPTURE_PATH_URL = 'https://chatgpt.com/backend-api/conversation';
+const SIGNED_OUT = 'locke-signed-out';
+const NO_PASS_CODES = ['no-bridge', 'bridge-unreachable'];
+const SIGNED_OUT_COPY = /Locke is signed out.*Sign in to the Locke desktop app, then try again/;
 
-test('locke unreachable: open_web + no-bridge sends the original, under its own reason', async () => {
-  const captured = [];
-  const { sandbox, netCalls, logs, unchecked } = makeDebugWorld((msg) => {
-    captured.push(msg);
-    return { ok: false, code: 'no-bridge', message: 'Native host has exited.' };
-  }, { location: { href: 'https://www.sonomos.ai/', origin: 'https://www.sonomos.ai', hostname: 'www.sonomos.ai' } });
-  for (const url of [OPEN_WEB_URL, CLERK_URL]) {
-    await sandbox.fetch(url, { method: 'POST', body: 'user=a&pass=b' });
-  }
-  assert.deepEqual(captured.map((m) => m.coverage), ['open_web', 'open_web']);
-  assert.equal(netCalls.length, 2, 'both logins went out');
-  assert.equal(netCalls[0][0], OPEN_WEB_URL);
-  const line = assertReason(logs, 'locke-unreachable-unclassified', 'debug');
-  assert.match(line, /\bcode=no-bridge\b/);
-  assert.match(line, /\bcoverage=open_web\b/);
-  // Distinguishable from a screened allow and from the user's fail-open window.
-  assert.ok(!findLine(logs, 'allow'));
-  assert.ok(!findLine(logs, 'unchecked-fail-open'));
-  assert.equal(unchecked.length, 0, 'not tallied as an unchecked send: it was never judged AI');
-});
-
-test('locke unreachable: catalog_host (an AI host off its prompt paths) still blocks, uploads included', async () => {
-  for (const code of ['no-bridge', 'bridge-unreachable']) {
-    const captured = [];
-    const { sandbox, netCalls, logs } = makeDebugWorld((msg) => {
-      captured.push(msg);
-      return { ok: false, code, message: 'down' };
-    }, CHATGPT_PATHS);
-    await assert.rejects(sandbox.fetch(CATALOG_HOST_URL, { method: 'POST', body: '{}' }), blockedError, code);
-    await assert.rejects(sandbox.fetch(DICTATION_URL, { method: 'POST', body: dictationForm() }), blockedError, code);
-    assert.deepEqual(captured.map((m) => m.coverage), ['catalog_host', 'catalog_host'], code);
-    assert.equal(netCalls.length, 0, code);
-    assert.ok(!findLine(logs, 'locke-unreachable-unclassified'), code);
-  }
-});
-
-test('locke unreachable: capture_path + no-bridge or bridge-unreachable still blocks', async () => {
-  for (const code of ['no-bridge', 'bridge-unreachable']) {
-    const { sandbox, netCalls, logs } = makeWorld(() => ({ ok: false, code, message: 'down' }), CHATGPT_PATHS);
-    await assert.rejects(sandbox.fetch(CAPTURE_PATH_URL, { method: 'POST', body: '{"prompt":"x"}' }), blockedError, code);
-    assert.equal(netCalls.length, 0, code);
-    assert.ok(!findLine(logs, 'locke-unreachable-unclassified'), code);
-  }
-  // And the default-world prompt endpoint the rest of this file uses.
-  const w = makeWorld(() => ({ ok: false, code: 'no-bridge', message: 'down' }));
-  await assert.rejects(w.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
-  assert.equal(w.netCalls.length, 0);
-});
-
-test('locke unreachable: SCOPE.UPLOAD + no-bridge still blocks, fetch and XHR', async () => {
-  const down = () => ({ ok: false, code: 'no-bridge', message: 'down' });
-  const form = () => s3PolicyForm(new Blob(['Jane Roe, SSN 078-05-1120'], { type: 'text/plain' }));
-  const { sandbox, netCalls, logs } = makeWorld(down);
-  await assert.rejects(sandbox.fetch(S3_POST, { method: 'POST', body: form() }), blockedError);
-  assert.equal(netCalls.length, 0);
-  assert.ok(!findLine(logs, 'locke-unreachable-unclassified'));
-
-  const world = makeXhrWorld(down);
-  const xhr = new world.sandbox.XMLHttpRequest();
-  xhr.open('POST', S3_POST, true);
-  xhr.send(form());
-  await waitFor(() => xhr.aborted);
-  assert.deepEqual(xhr.sent, []);
-});
-
-test('locke unreachable: open_web XHR + no-bridge is released too', async () => {
-  const { sandbox, logs } = makeXhrWorld(() => ({ ok: false, code: 'no-bridge', message: 'down' }), { extraGlobals: { location: { href: 'https://www.sonomos.ai/', origin: 'https://www.sonomos.ai', hostname: 'www.sonomos.ai' } } });
-  const xhr = new sandbox.XMLHttpRequest();
-  xhr.open('POST', CLERK_URL, true);
-  xhr.send('a=b');
-  await waitFor(() => xhr.sent.length === 1);
-  assert.deepEqual(xhr.sent, ['a=b']);
-  assert.equal(xhr.aborted, false);
-  assert.ok(!logs.some((l) => l.level === 'warn'), 'a pass is not a warning');
-});
-
-// Adversarial review of the pass above: it must hold with the REAL generated
-// catalog (web hosts, providers, capture paths, API hosts), not the harness's
-// two-host stand-in. AI API hosts read `open_web` (they are not web surfaces),
-// and an AI page can hand a prompt to a host the catalog never names.
+// The REAL generated catalog (web hosts, providers, capture paths, API hosts),
+// not the harness's two-host stand-in: AI API hosts read `open_web` (they are
+// not web surfaces), and an AI page can hand a prompt to a host the catalog
+// never names.
 const GENERATED = (() => {
   const ctx = {};
   ctx.globalThis = ctx;
@@ -4719,36 +4651,169 @@ const GENERATED = (() => {
   vm.runInContext(readFileSync(new URL('../content/web-surfaces.generated.js', import.meta.url), 'utf8'), ctx);
   return ctx;
 })();
-function realCatalogGlobals(pageHref) {
-  const u = new URL(pageHref);
-  return {
-    location: { href: u.href, origin: u.origin, hostname: u.hostname },
+function realCatalogGlobals(pageHref, { ancestors, base, noApi = false, emptyApi = false } = {}) {
+  let loc;
+  try {
+    const u = new URL(pageHref);
+    loc = { href: u.href, origin: u.origin, hostname: u.hostname };
+  } catch {
+    loc = { href: pageHref, origin: 'null', hostname: '' };
+  }
+  if (ancestors) loc.ancestorOrigins = ancestors;
+  const g = {
+    location: loc,
     SONOMOS_WEB_HOSTS: [...GENERATED.SONOMOS_WEB_HOSTS],
     SONOMOS_WEB_PROVIDERS: { ...GENERATED.SONOMOS_WEB_PROVIDERS },
     SONOMOS_CAPTURE_PATHS: JSON.parse(JSON.stringify(GENERATED.SONOMOS_CAPTURE_PATHS)),
-    SONOMOS_SKIP_PATH_SEGMENTS: JSON.parse(JSON.stringify(GENERATED.SONOMOS_SKIP_PATH_SEGMENTS)),
-    SONOMOS_API_HOSTS: [...GENERATED.SONOMOS_API_HOSTS]
+    SONOMOS_SKIP_PATH_SEGMENTS: JSON.parse(JSON.stringify(GENERATED.SONOMOS_SKIP_PATH_SEGMENTS))
   };
+  if (!noApi) g.SONOMOS_API_HOSTS = emptyApi ? [] : [...GENERATED.SONOMOS_API_HOSTS];
+  if (base !== undefined) g.document = { baseURI: base };
+  return g;
 }
 const REVIEW_PROMPT = JSON.stringify({ model: 'gpt-4o', messages: [{ role: 'user', content: 'Patient Jane Roe SSN 078-05-1120' }] });
 const NON_AI_PAGE = 'https://www.sonomos.ai/';
+const BYOK = 'https://chat.example-byok.app/';
+const down = (code) => () => ({ ok: false, code, message: 'down' });
+// Run one POST through fetch; resolves 'SENT' | 'BLOCKED' and the world.
+async function fetchOutcome(code, globals, url, init = { method: 'POST', body: REVIEW_PROMPT }) {
+  const w = makeDebugWorld(down(code), globals);
+  let outcome;
+  try { await w.sandbox.fetch(url, init); outcome = w.netCalls.length ? 'SENT' : 'no-net'; }
+  catch (e) { outcome = blockedError(e) ? 'BLOCKED' : `ERR:${e.message}`; }
+  return { outcome, w };
+}
 
-test('locke unreachable: the generated catalog carries api_hosts', () => {
-  assert.ok(GENERATED.SONOMOS_API_HOSTS.includes('api.openai.com'));
-  assert.ok(GENERATED.SONOMOS_API_HOSTS.includes('bedrock-runtime.*.amazonaws.com'));
+test('locke-signed-out: open_web from a non-AI page sends the original (Clerk, Google login), under its own reason', async () => {
+  const captured = [];
+  const w = makeDebugWorld((msg) => {
+    captured.push(msg);
+    return { ok: false, code: SIGNED_OUT, message: 'signed out' };
+  }, realCatalogGlobals(NON_AI_PAGE));
+  for (const url of [OPEN_WEB_URL, CLERK_URL, GOOGLE_LOGIN_URL]) {
+    await w.sandbox.fetch(url, { method: 'POST', body: 'user=a&pass=b' });
+  }
+  assert.deepEqual(captured.map((m) => m.coverage), ['open_web', 'open_web', 'open_web']);
+  assert.equal(w.netCalls.length, 3, 'all three logins went out');
+  assert.equal(w.netCalls[0][0], OPEN_WEB_URL);
+  const line = assertReason(w.logs, 'locke-unreachable-unclassified', 'debug');
+  assert.match(line, /\bcode=locke-signed-out\b/);
+  assert.match(line, /\bcoverage=open_web\b/);
+  // Distinguishable from a screened allow and from the user's fail-open window.
+  assert.ok(!findLine(w.logs, 'allow'));
+  assert.ok(!findLine(w.logs, 'unchecked-fail-open'));
+  assert.equal(w.unchecked.length, 0, 'not tallied as an unchecked send: it was never judged AI');
 });
 
-test('locke unreachable: a Google login POST and Clerk sign-in pass from a non-AI page', async () => {
-  for (const code of ['no-bridge', 'bridge-unreachable']) {
-    const w = makeDebugWorld(() => ({ ok: false, code, message: 'down' }), realCatalogGlobals(NON_AI_PAGE));
-    for (const url of [OPEN_WEB_URL, CLERK_URL, 'https://accounts.google.com/v3/signin/_/AccountsSignInUi/data/batchexecute']) {
-      await w.sandbox.fetch(url, { method: 'POST', body: 'a=b' });
+test('locke-signed-out: an open_web XHR is released too', async () => {
+  const w = makeXhrWorld(down(SIGNED_OUT), { extraGlobals: realCatalogGlobals(NON_AI_PAGE) });
+  const xhr = new w.sandbox.XMLHttpRequest();
+  xhr.open('POST', CLERK_URL, true);
+  xhr.send('a=b');
+  await waitFor(() => xhr.sent.length === 1);
+  assert.deepEqual(xhr.sent, ['a=b']);
+  assert.equal(xhr.aborted, false);
+  assert.ok(!w.logs.some((l) => l.level === 'warn'), 'a pass is not a warning');
+});
+
+test('no-bridge and bridge-unreachable BLOCK open_web, fetch and XHR (reverses ea36703/56dffaa)', async () => {
+  for (const code of NO_PASS_CODES) {
+    const captured = [];
+    const w = makeDebugWorld((msg) => { captured.push(msg); return { ok: false, code, message: 'down' }; },
+      realCatalogGlobals(NON_AI_PAGE));
+    for (const url of [OPEN_WEB_URL, CLERK_URL, GOOGLE_LOGIN_URL]) {
+      await assert.rejects(w.sandbox.fetch(url, { method: 'POST', body: 'a=b' }), blockedError, `${code} ${url}`);
     }
-    assert.equal(w.netCalls.length, 3, code);
+    assert.deepEqual(captured.map((m) => m.coverage), ['open_web', 'open_web', 'open_web'], code);
+    assert.equal(w.netCalls.length, 0, code);
+    assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'), code);
+
+    const x = makeXhrWorld(down(code), { extraGlobals: realCatalogGlobals(NON_AI_PAGE) });
+    const xhr = new x.sandbox.XMLHttpRequest();
+    xhr.open('POST', CLERK_URL, true);
+    xhr.send('a=b');
+    await waitFor(() => xhr.aborted);
+    assert.deepEqual(xhr.sent, [], code);
+  }
+  // And the words: no-bridge still says the connector did not start;
+  // bridge-unreachable keeps the sentence it had at 470d493.
+  const nb = await blockedByRelayCode('no-bridge');
+  assert.equal(nb.sonomosBlockReason, 'connector-not-started');
+  const bu = await blockedByRelayCode('bridge-unreachable');
+  assert.equal(bu.sonomosBlockReason, 'bridge-unreachable');
+});
+
+test('bridge-dropped blocks with the "try again shortly" copy bridge-unreachable had at 470d493', async () => {
+  const xhr = await blockedByRelayCode('bridge-dropped', 'eof');
+  assert.equal(xhr.sonomosBlockReason, 'bridge-dropped');
+  assert.equal(xhr.sonomosBlockKind, 'unavailable');
+  assert.match(xhr.sonomosBlockMessage,
+    /the Locke desktop app answered, but it could not reach its screening service — this is NOT a sensitive-data block\. Try again shortly; if it keeps happening, restart Locke\./);
+  assert.doesNotMatch(xhr.sonomosBlockMessage, /Start it/);
+  assert.deepEqual(xhr.sent, []);
+  // Also on open_web from a non-AI page: Locke was reached, so nothing passes.
+  const { outcome, w } = await fetchOutcome('bridge-dropped', realCatalogGlobals(NON_AI_PAGE), OPEN_WEB_URL);
+  assert.equal(outcome, 'BLOCKED');
+  assert.equal(w.netCalls.length, 0);
+  assertBlocked(w.logs, 'bridge-dropped');
+});
+
+test('locke-signed-out: catalog_host, capture_path and upload block with the signed-out copy', async () => {
+  // catalog_host (an AI host off its prompt paths, uploads included)
+  {
+    const captured = [];
+    const w = makeDebugWorld((msg) => { captured.push(msg); return { ok: false, code: SIGNED_OUT, message: 'x' }; }, CHATGPT_PATHS);
+    await assert.rejects(w.sandbox.fetch(CATALOG_HOST_URL, { method: 'POST', body: '{}' }), blockedError);
+    await assert.rejects(w.sandbox.fetch(DICTATION_URL, { method: 'POST', body: dictationForm() }), blockedError);
+    assert.deepEqual(captured.map((m) => m.coverage), ['catalog_host', 'catalog_host']);
+    assert.equal(w.netCalls.length, 0);
+    assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'));
+    const line = assertBlocked(w.logs, 'locke-signed-out');
+    assert.match(line, /kind=unavailable/);
+  }
+  // capture_path
+  {
+    const w = makeWorld(down(SIGNED_OUT), CHATGPT_PATHS);
+    await assert.rejects(w.sandbox.fetch(CAPTURE_PATH_URL, { method: 'POST', body: '{"prompt":"x"}' }),
+      (e) => blockedError(e) && SIGNED_OUT_COPY.test(e.message));
+    assert.equal(w.netCalls.length, 0);
+    const d = makeWorld(down(SIGNED_OUT));
+    await assert.rejects(d.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
+    assert.equal(d.netCalls.length, 0);
+  }
+  // SCOPE.UPLOAD, fetch and XHR
+  {
+    const form = () => s3PolicyForm(new Blob(['Jane Roe, SSN 078-05-1120'], { type: 'text/plain' }));
+    const w = makeWorld(down(SIGNED_OUT));
+    await assert.rejects(w.sandbox.fetch(S3_POST, { method: 'POST', body: form() }),
+      (e) => blockedError(e) && SIGNED_OUT_COPY.test(e.message));
+    assert.equal(w.netCalls.length, 0);
+    assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'));
+    const world = makeXhrWorld(down(SIGNED_OUT));
+    const xhr = new world.sandbox.XMLHttpRequest();
+    xhr.open('POST', S3_POST, true);
+    xhr.send(form());
+    await waitFor(() => xhr.aborted);
+    assert.deepEqual(xhr.sent, []);
+    assert.equal(xhr.sonomosBlockReason, 'locke-signed-out');
+    assert.match(xhr.sonomosBlockMessage, SIGNED_OUT_COPY);
+  }
+  // The same on every no-pass code: catalog hosts never pass.
+  for (const code of NO_PASS_CODES) {
+    const w = makeDebugWorld(down(code), CHATGPT_PATHS);
+    await assert.rejects(w.sandbox.fetch(CATALOG_HOST_URL, { method: 'POST', body: '{}' }), blockedError, code);
+    assert.equal(w.netCalls.length, 0, code);
   }
 });
 
-test('locke unreachable: catalog API hosts block from a non-AI page (reviewer finding 1)', async () => {
+test('locke-signed-out: the copy is honest and the code is in the evidence lists', () => {
+  assert.match(SHIM_SRC, /'locke-signed-out': \['unavailable',\s*'Locke is signed out, so this request could not be screened/);
+  assert.ok(RELAY_FAILURES_PROVING_NO_SCREEN.includes('locke-signed-out'));
+  assert.ok(RELAY_FAILURES_PROVING_NO_VERDICT.includes('bridge-dropped'));
+  assert.deepEqual(/const UNREACHABLE_RELAY_CODES = new Set\(\[([^\]]*)\]\)/.exec(SHIM_SRC)[1].trim(), "'locke-signed-out'");
+});
+
+test('catalog API hosts block from a non-AI page, both codes (reviewer finding 1)', async () => {
   const targets = [
     'https://api.openai.com/v1/chat/completions',
     'https://api.anthropic.com/v1/messages',
@@ -4756,18 +4821,21 @@ test('locke unreachable: catalog API hosts block from a non-AI page (reviewer fi
     'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent',
     'https://bedrock-runtime.us-east-1.amazonaws.com/model/x/invoke',
     'https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com/model/x/invoke',
-    'https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/l:predict'
+    'https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/l:predict',
+    'https://api.openai.com%2e/v1/chat/completions',
+    'https://CHATGPT.COM/backend-api/me', 'https://chatgpt.com./backend-api/me',
+    'https://api.individual.githubcopilot.com/chat/completions'
   ];
-  for (const code of ['no-bridge', 'bridge-unreachable']) {
+  for (const code of [SIGNED_OUT, ...NO_PASS_CODES]) {
     for (const url of targets) {
-      const w = makeDebugWorld(() => ({ ok: false, code, message: 'down' }), realCatalogGlobals(NON_AI_PAGE));
-      await assert.rejects(w.sandbox.fetch(url, { method: 'POST', body: REVIEW_PROMPT }), blockedError, `${code} ${url}`);
+      const { outcome, w } = await fetchOutcome(code, realCatalogGlobals(NON_AI_PAGE), url);
+      assert.equal(outcome, 'BLOCKED', `${code} ${url}`);
       assert.equal(w.netCalls.length, 0, `${code} ${url}`);
       assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'), url);
     }
   }
   // Same rule on the XHR path.
-  const x = makeXhrWorld(() => ({ ok: false, code: 'no-bridge', message: 'down' }), { extraGlobals: realCatalogGlobals(NON_AI_PAGE) });
+  const x = makeXhrWorld(down(SIGNED_OUT), { extraGlobals: realCatalogGlobals(NON_AI_PAGE) });
   const xhr = new x.sandbox.XMLHttpRequest();
   xhr.open('POST', 'https://api.openai.com/v1/chat/completions', true);
   xhr.send(REVIEW_PROMPT);
@@ -4775,61 +4843,133 @@ test('locke unreachable: catalog API hosts block from a non-AI page (reviewer fi
   assert.deepEqual(xhr.sent, []);
 });
 
-test('locke unreachable: a wildcard api host does not over-match (the label rule)', async () => {
-  // `*` is one label: an unrelated amazonaws.com host is not bedrock.
-  const w = makeDebugWorld(() => ({ ok: false, code: 'no-bridge', message: 'down' }), realCatalogGlobals(NON_AI_PAGE));
-  await w.sandbox.fetch('https://bucket.s3.us-east-1.amazonaws.com/x', { method: 'POST', body: 'a=b' });
-  assert.equal(w.netCalls.length, 1);
+test('a wildcard api host does not over-match (the label rule)', async () => {
+  const { outcome } = await fetchOutcome(SIGNED_OUT, realCatalogGlobals(NON_AI_PAGE),
+    'https://bucket.s3.us-east-1.amazonaws.com/x', { method: 'POST', body: 'a=b' });
+  assert.equal(outcome, 'SENT');
 });
 
-test('locke unreachable: a POST from an AI page to a host the catalog never names blocks (reviewer finding 2)', async () => {
+test('a missing or empty SONOMOS_API_HOSTS list refuses the pass (round 2 a)', async () => {
+  for (const opt of [{ noApi: true }, { emptyApi: true }]) {
+    for (const code of [SIGNED_OUT, ...NO_PASS_CODES]) {
+      const { outcome, w } = await fetchOutcome(code, realCatalogGlobals(BYOK, opt), 'https://api.openai.com/v1/chat/completions');
+      assert.equal(outcome, 'BLOCKED', `${code} ${JSON.stringify(opt)}`);
+      assert.equal(w.netCalls.length, 0);
+    }
+    // Even a login from a plain page: no list, no pass.
+    const { outcome } = await fetchOutcome(SIGNED_OUT, realCatalogGlobals(NON_AI_PAGE, opt), CLERK_URL, { method: 'POST', body: 'a=b' });
+    assert.equal(outcome, 'BLOCKED', JSON.stringify(opt));
+  }
+});
+
+test('a POST from an AI page to a host the catalog never names blocks (reviewer finding 2)', async () => {
   const bytes = () => new TextEncoder().encode('Jane Roe 078-05-1120');
   const cases = [
     ['chatgpt Sentry', 'https://chatgpt.com/c/1', 'https://o33249.ingest.sentry.io/api/123/envelope/', { method: 'POST', body: REVIEW_PROMPT }],
     ['claude Segment', 'https://claude.ai/chat/1', 'https://api.segment.io/v1/t', { method: 'POST', body: REVIEW_PROMPT, headers: { 'content-type': 'application/json' } }],
     ['chatgpt S3 Uint8Array', 'https://chatgpt.com/c/1', 'https://bucket.s3.amazonaws.com/upload?X-Amz-Signature=x', { method: 'POST', body: bytes() }],
+    ['chatgpt PUT presigned', 'https://chatgpt.com/c/1', 'https://files.oaiusercontent.com/file-abc?sig=1', { method: 'PUT', body: 'Jane Roe 078-05-1120' }],
     ['claude untyped Blob', 'https://claude.ai/chat/1', 'https://storage.example-cdn.net/u', { method: 'POST', body: new Blob(['Jane Roe 078-05-1120']) }],
     ['aistudio clients6 RPC', 'https://aistudio.google.com/prompts/new',
       'https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent',
-      { method: 'POST', body: REVIEW_PROMPT, headers: { 'content-type': 'application/json+protobuf' } }]
+      { method: 'POST', body: REVIEW_PROMPT, headers: { 'content-type': 'application/json+protobuf' } }],
+    ['duck.ai telemetry', 'https://duck.ai/chat', 'https://improving.duckduckgo.com/t/x', { method: 'POST', body: REVIEW_PROMPT }]
   ];
-  for (const code of ['no-bridge', 'bridge-unreachable']) {
+  for (const code of [SIGNED_OUT, ...NO_PASS_CODES]) {
     for (const [name, page, url, init] of cases) {
-      const w = makeDebugWorld(() => ({ ok: false, code, message: 'down' }), realCatalogGlobals(page));
-      await assert.rejects(w.sandbox.fetch(url, init), blockedError, `${code} ${name}`);
+      const { outcome, w } = await fetchOutcome(code, realCatalogGlobals(page), url, init);
+      assert.equal(outcome, 'BLOCKED', `${code} ${name}`);
       assert.equal(w.netCalls.length, 0, `${code} ${name}`);
       assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'), name);
     }
   }
 });
 
-test('locke unreachable: loopback and private targets block (self-hosted models)', async () => {
-  const targets = [
-    'http://127.0.0.1:11434/api/generate', 'http://localhost:11434/api/chat',
-    'http://foo.localhost:8080/v1/chat/completions', 'http://127.1.2.3/x',
-    'http://[::1]:11434/api/chat', 'http://10.0.0.5:8000/v1', 'http://172.16.4.2/x', 'http://172.31.255.1/x',
-    'http://192.168.1.20:11434/api', 'http://169.254.169.254/latest', 'http://[fc00::1]/x', 'http://[fd12:3456::1]/x',
-    'http://[fe80::1]/x', 'http://[::ffff:127.0.0.1]:11434/x', 'http://0.0.0.0:11434/x'
-  ];
-  for (const url of targets) {
-    const w = makeDebugWorld(() => ({ ok: false, code: 'no-bridge', message: 'down' }), realCatalogGlobals(NON_AI_PAGE));
-    await assert.rejects(w.sandbox.fetch(url, { method: 'POST', body: REVIEW_PROMPT }), blockedError, url);
-    assert.equal(w.netCalls.length, 0, url);
-  }
-  // Public neighbours of the private ranges are ordinary sites.
-  for (const url of ['http://172.32.0.1/x', 'http://172.15.0.1/x', 'http://8.8.8.8/x', 'http://[2001:db8::1]/x']) {
-    const w = makeDebugWorld(() => ({ ok: false, code: 'no-bridge', message: 'down' }), realCatalogGlobals(NON_AI_PAGE));
-    await w.sandbox.fetch(url, { method: 'POST', body: 'a=b' });
-    assert.equal(w.netCalls.length, 1, url);
+test('a page whose host is a catalog API host blocks (openrouter.ai/chat, round 2 c)', async () => {
+  for (const code of [SIGNED_OUT, ...NO_PASS_CODES]) {
+    const { outcome } = await fetchOutcome(code, realCatalogGlobals('https://openrouter.ai/chat'),
+      'https://us.i.posthog.com/e/');
+    assert.equal(outcome, 'BLOCKED', code);
   }
 });
 
-test('locke unreachable: outcomes where Locke was reached, or unreachable is unproven, still block open_web', async () => {
+test('an opaque data: frame, or a frame built by an AI page, blocks (round 2 b)', async () => {
+  const frames = [
+    ['data: iframe', realCatalogGlobals('data:text/html,<p>x', { base: 'data:text/html,<p>x' })],
+    ['about:srcdoc in chatgpt', realCatalogGlobals('about:srcdoc', { base: 'https://chatgpt.com/c/1' })],
+    ['about:blank in claude', realCatalogGlobals('about:blank', { base: 'https://claude.ai/chat/1' })],
+    ['blob: frame from chatgpt', realCatalogGlobals('blob:https://chatgpt.com/0b1c', { base: 'blob:https://chatgpt.com/0b1c' })]
+  ];
+  for (const code of [SIGNED_OUT, ...NO_PASS_CODES]) {
+    for (const [name, globals] of frames) {
+      const { outcome, w } = await fetchOutcome(code, globals, 'https://o1.ingest.sentry.io/api/1/envelope/');
+      assert.equal(outcome, 'BLOCKED', `${code} ${name}`);
+      assert.equal(w.netCalls.length, 0, `${code} ${name}`);
+    }
+  }
+});
+
+test('an artifact or sandbox frame inside an AI page blocks via ancestorOrigins (round 2 d)', async () => {
+  const frames = [
+    ['Claude artifact', 'https://www.claudeusercontent.com/?domain=claude.ai', ['https://claude.ai']],
+    ['ChatGPT sandbox', 'https://abc.web-sandbox.oaiusercontent.com/', ['https://chatgpt.com']],
+    ['nested two deep', 'https://third-party.example/embed', ['https://www.example.com', 'https://aistudio.google.com']],
+    ['opaque ancestor', 'https://third-party.example/embed', ['null']],
+    ['API-host ancestor', 'https://third-party.example/embed', ['https://openrouter.ai']]
+  ];
+  for (const code of [SIGNED_OUT, ...NO_PASS_CODES]) {
+    for (const [name, page, ancestors] of frames) {
+      const { outcome, w } = await fetchOutcome(code, realCatalogGlobals(page, { ancestors }), 'https://api.example-anything.com/collect');
+      assert.equal(outcome, 'BLOCKED', `${code} ${name}`);
+      assert.equal(w.netCalls.length, 0, `${code} ${name}`);
+    }
+  }
+  // An ordinary embed (no AI ancestor) is an ordinary page.
+  const ok = await fetchOutcome(SIGNED_OUT, realCatalogGlobals('https://js.stripe.com/v3/m-outer.html',
+    { ancestors: ['https://shop.example.com'] }), 'https://m.stripe.com/6', { method: 'POST', body: 'a=b' });
+  assert.equal(ok.outcome, 'SENT');
+});
+
+test('loopback, private and local-network targets block (self-hosted models, round 2 e)', async () => {
+  const targets = [
+    'http://127.0.0.1:11434/api/generate', 'http://localhost:11434/api/chat',
+    'http://foo.localhost:8080/v1/chat/completions', 'http://127.1.2.3/x', 'http://127.1:11434/x',
+    'http://2130706433:11434/x', 'http://0x7f000001:11434/x', 'http://0177.0.0.1:11434/x',
+    'http://[::1]:11434/api/chat', 'http://[::]:11434/x', 'http://10.0.0.5:8000/v1', 'http://172.16.4.2/x',
+    'http://172.31.255.1/x', 'http://192.168.1.20:11434/api', 'http://169.254.169.254/latest',
+    'http://[fc00::1]/x', 'http://[fd7a:115c:a1e0::1]:11434/x', 'http://[fe80::1]/x',
+    'http://[::ffff:127.0.0.1]:11434/x', 'http://[::ffff:10.0.0.5]/x', 'http://[::127.0.0.1]:11434/x',
+    'http://[64:ff9b::a00:5]:11434/x', 'http://0.0.0.0:11434/x', 'http://0:11434/x',
+    // CGNAT 100.64/10 (Tailscale)
+    'http://100.64.0.1/x', 'http://100.101.102.103:11434/x', 'http://100.127.255.254/x',
+    // single-label names and local-network suffixes
+    'http://gpu-box:11434/api/generate', 'http://ollama:11434/x', 'http://ollama.local:11434/x', 'http://box.lan/x',
+    'http://host.docker.internal:11434/x', 'http://nas.intranet/x', 'http://pc.localdomain/x',
+    'http://printer.home.arpa/x', 'http://box.tail1234.ts.net:11434/x', 'http://localhost.:11434/x'
+  ];
+  for (const url of targets) {
+    for (const code of [SIGNED_OUT, 'no-bridge']) {
+      const { outcome, w } = await fetchOutcome(code, realCatalogGlobals(NON_AI_PAGE), url);
+      assert.equal(outcome, 'BLOCKED', `${code} ${url}`);
+      assert.equal(w.netCalls.length, 0, `${code} ${url}`);
+    }
+  }
+  // Public neighbours of those ranges are ordinary sites.
+  for (const url of ['http://172.32.0.1/x', 'http://172.15.0.1/x', 'http://8.8.8.8/x', 'http://100.63.0.1/x',
+    'http://100.128.0.1/x', 'http://[2001:db8::1]/x', 'http://intranet.example.com/x', 'http://local.example.com/x']) {
+    const { outcome } = await fetchOutcome(SIGNED_OUT, realCatalogGlobals(NON_AI_PAGE), url, { method: 'POST', body: 'a=b' });
+    assert.equal(outcome, 'SENT', url);
+  }
+});
+
+test('locke-signed-out: outcomes where Locke was reached, or signed-out is unproven, still block open_web', async () => {
   const blocked = [
-    // Host answered, ran out of time mid-screen: the request may be AI.
     ['screening-timeout', { ok: false, code: 'screening-timeout', message: 'deadline' }],
     ['native-timeout', { ok: false, code: 'native-timeout' }],
     ['bridge-error', { ok: false, code: 'bridge-error', message: 'Native host has exited.' }],
+    ['bridge-dropped', { ok: false, code: 'bridge-dropped' }],
+    ['no-bridge', { ok: false, code: 'no-bridge' }],
+    ['bridge-unreachable', { ok: false, code: 'bridge-unreachable' }],
     ['receipt-too-large', { ok: false, code: 'receipt-too-large' }],
     ['host-panic', { ok: false, code: 'host-panic' }],
     ['bridge-protocol-mismatch', { ok: false, code: 'bridge-protocol-mismatch' }],
@@ -4837,39 +4977,45 @@ test('locke unreachable: outcomes where Locke was reached, or unreachable is unp
     ['bridge-empty', { ok: false, code: 'bridge-empty' }],
     ['bridge-unknown-response', { ok: false, code: 'bridge-unknown-response' }],
     ['data-consent-required', { ok: false, code: 'data-consent-required' }],
+    ['an unknown code', { ok: false, code: 'something-new' }],
     ['a null verdict', null],
     ['a real guard block', { ok: true, receipt: { decision: 'block', reason: 'found a key', redactedCount: 0 } }],
     ['an infrastructure block receipt', { ok: true, receipt: { decision: 'block', blockCause: 'infrastructure', reason: 'screener unavailable' } }],
     ['a malformed receipt', { ok: true }]
   ];
   for (const [name, verdict] of blocked) {
-    const { sandbox, netCalls, logs } = makeWorld(() => verdict);
+    const { sandbox, netCalls, logs } = makeWorld(() => verdict, realCatalogGlobals(NON_AI_PAGE));
     await assert.rejects(sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' }), blockedError, name);
     assert.equal(netCalls.length, 0, name);
     assert.ok(!findLine(logs, 'locke-unreachable-unclassified'), name);
   }
+  // An unknown code gets the generic "could not be reached" copy, not the signed-out one.
+  const unknown = await blockedByRelayCode('something-new');
+  assert.equal(unknown.sonomosBlockReason, 'native-call-failed');
 });
 
-test('locke unreachable: a plain verdict timeout on open_web still blocks (a hang does not prove unreachable)', async () => {
-  const w = makeWorld(() => new Promise(() => {}));
+test('a plain verdict timeout on open_web still blocks (a hang does not prove signed out)', async () => {
+  const w = makeWorld(() => new Promise(() => {}), realCatalogGlobals(NON_AI_PAGE));
   w.deliver({ type: 'SONOMOS_CONFIG', config: { enforceTimeoutMs: 1000 } });
   await assert.rejects(w.sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' }), blockedError);
   assert.equal(w.netCalls.length, 0);
   assertBlocked(w.logs, 'verdict-timeout');
 });
 
-test('locke unreachable: a dead channel on open_web still blocks', async () => {
-  const w = makeWorld(() => allowVerdict, { postMessage: () => { throw new Error('channel gone'); } });
+test('a dead channel on open_web still blocks', async () => {
+  const w = makeWorld(() => allowVerdict, { ...realCatalogGlobals(NON_AI_PAGE), postMessage: () => { throw new Error('channel gone'); } });
   await assert.rejects(w.sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' }), blockedError);
   assert.equal(w.netCalls.length, 0);
 });
 
-test('locke unreachable: the user fail-open window keeps its own reason and tally', async () => {
-  const w = makeWorld(() => ({ ok: false, code: 'no-bridge', message: 'down' }));
-  w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
-  await w.sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' });
-  assert.equal(w.netCalls.length, 1);
-  assert.deepEqual(w.unchecked, ['relay-no-bridge']);
-  assertReason(w.logs, 'unchecked-fail-open', 'warn');
-  assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'));
+test('the user fail-open window keeps its own reason and tally', async () => {
+  for (const code of [SIGNED_OUT, 'no-bridge', 'bridge-unreachable', 'bridge-dropped']) {
+    const w = makeWorld(() => ({ ok: false, code, message: 'down' }));
+    w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+    await w.sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' });
+    assert.equal(w.netCalls.length, 1, code);
+    assert.deepEqual(w.unchecked, [`relay-${code}`], code);
+    assertReason(w.logs, 'unchecked-fail-open', 'warn');
+    assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'), code);
+  }
 });

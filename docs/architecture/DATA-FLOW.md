@@ -206,7 +206,7 @@ never sent.
 | Class | Means | Branches |
 |---|---|---|
 | `policy` | the screener looked and said no | `decision-block` |
-| `unavailable` | screening never happened, or the chain answered unintelligibly | `verdict-timeout`, `verdict-channel-failed`, `verdict-missing`, `native-call-failed`, `connector-not-started`, `bridge-unreachable`, `bridge-unreadable-reply`, `relay-error`, `relay-rejected`, `extension-reloaded`, `screening-timeout`, `screening-unavailable`, `verdict-malformed`, `decision-missing`, `decision-unknown`, `redact-*`, `internal-error` |
+| `unavailable` | screening never happened, or the chain answered unintelligibly | `verdict-timeout`, `verdict-channel-failed`, `verdict-missing`, `native-call-failed`, `connector-not-started`, `bridge-unreachable`, `bridge-dropped`, `locke-signed-out`, `bridge-unreadable-reply`, `relay-error`, `relay-rejected`, `extension-reloaded`, `screening-timeout`, `screening-unavailable`, `verdict-malformed`, `decision-missing`, `decision-unknown`, `redact-*`, `internal-error` |
 | `too-large` | over the screening size limit — **not** a sensitive-data block | `uncapturable-oversize`, `receipt-too-large` |
 | `unsupported` | this surface cannot screen this request at all | `uncapturable-stream`, `uncapturable-document`, `uncapturable-unreadable`, `uncapturable-request-clone`, `uncapturable-sync-xhr`, `uncapturable-beacon`, `scope-unresolvable` |
 
