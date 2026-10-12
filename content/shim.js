@@ -1671,14 +1671,6 @@
   function isFramed() {
     try { return typeof window !== 'undefined' && window.top !== window; } catch { return true; }
   }
-  function documentReferrer() {
-    try {
-      return (typeof document !== 'undefined' && document && typeof document.referrer === 'string')
-        ? document.referrer : '';
-    } catch {
-      return '';
-    }
-  }
   function ancestorIsAiSurface() {
     let origins = null;
     try { origins = location.ancestorOrigins; } catch { /* fall through to the referrer */ }
@@ -1688,7 +1680,12 @@
       }
       return false;
     }
-    return isFramed() && ancestorHostIsAi(hostOfHref(documentReferrer()));
+    // No ancestor list (older Firefox): the referrer names only the direct
+    // parent, and a nested or self-navigated frame inside an AI page shows an
+    // ordinary referrer. Without the full chain we can't prove no AI page is
+    // above us, so any framed page refuses the pass. Only reachable while
+    // Locke is signed out; a top-level page is unaffected.
+    return isFramed();
   }
 
   function unreachableMayPass(coverage, scope, url) {

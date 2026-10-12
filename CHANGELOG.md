@@ -39,9 +39,9 @@ strict SemVer.
   can hand a prompt to Sentry, Segment, S3 or Google's clients6 RPC) and has no
   AI-surface ancestor frame (`location.ancestorOrigins` where the browser has
   it: an artifact or sandbox frame inside claude.ai or chatgpt.com; where it
-  does not, i.e. Firefox, a framed page (`window.top !== window`, or reading it
-  throws) is judged by `document.referrer`, and an empty referrer or one naming
-  a catalog API host or an AI surface blocks; a top-level page is unaffected);
+  does not, i.e. older Firefox, any framed page (`window.top !== window`, or
+  reading it throws) refuses the pass, because a referrer names only the
+  direct parent; a top-level page is unaffected);
   the target is not loopback, private or a local-network name (self-hosted
   models, e.g. Ollama :11434). Covered exactly: IPv4 127/8, 10/8, 172.16/12,
   192.168/16, 169.254/16, 0/8 and CGNAT 100.64/10; IPv6 `::`, `::1`, ULA

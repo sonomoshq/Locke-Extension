@@ -4941,7 +4941,7 @@ test('an artifact or sandbox frame inside an AI page blocks via ancestorOrigins 
 
 // Firefox has no `location.ancestorOrigins`. A frame there is told from a page by
 // `window.top !== window`, and its parent by `document.referrer`.
-test('Firefox: with no ancestorOrigins, a frame is judged by its referrer (F1, F3, F5, F8)', async () => {
+test('Firefox: with no ancestorOrigins, any framed page refuses the pass (F1, F3, F5, F8, nested)', async () => {
   const frames = [
     ['F1 Claude artifact frame', 'https://www.claudeusercontent.com/?domain=claude.ai', 'https://claude.ai/', 'https://api.example-anything.com/collect'],
     ['F3 ChatGPT sandbox frame', 'https://abc.web-sandbox.oaiusercontent.com/', 'https://chatgpt.com/c/1', 'https://api.example-anything.com/collect'],
@@ -4964,10 +4964,12 @@ test('Firefox: with no ancestorOrigins, a frame is judged by its referrer (F1, F
   Object.defineProperty(tw.sandbox, 'top', { get() { throw new Error('SecurityError'); }, configurable: true });
   await assert.rejects(tw.sandbox.fetch('https://y.example.com/c', { method: 'POST', body: REVIEW_PROMPT }), blockedError, 'window.top throws');
   assert.equal(tw.netCalls.length, 0);
-  // An ordinary embed whose referrer is an ordinary page is an ordinary page.
-  const ok = await fetchOutcome(SIGNED_OUT, realCatalogGlobals('https://js.stripe.com/v3/m-outer.html', { framed: true, referrer: 'https://shop.example.com/cart' }),
+  // Without the full chain an ordinary referrer proves nothing: a nested or
+  // self-navigated frame inside chatgpt shows its ordinary parent. So even an
+  // ordinary embed with an ordinary referrer is refused (fail closed).
+  const nested = await fetchOutcome(SIGNED_OUT, realCatalogGlobals('https://js.stripe.com/v3/m-outer.html', { framed: true, referrer: 'https://shop.example.com/cart' }),
     'https://m.stripe.com/6', { method: 'POST', body: 'a=b' });
-  assert.equal(ok.outcome, 'SENT');
+  assert.equal(nested.outcome, 'BLOCKED');
   // A TOP-LEVEL page in Firefox can still pass whatever its referrer (sonomos.ai -> Clerk),
   // including a referrer that is an AI surface (the user followed a link from chatgpt.com).
   for (const referrer of [undefined, '', 'https://chatgpt.com/c/1']) {
