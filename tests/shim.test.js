@@ -4612,3 +4612,147 @@ test('fail-open: oversize, stream and unreadable bodies send unscreened in an op
     assert.equal(expired.unchecked.length, 0);
   }
 });
+
+// ── Locke unreachable: only a request nobody called AI may pass ────────────
+//
+// The bug (manual test 2026-10-12): since super PR #15 every bodied request on
+// every site is held, and with Locke off `decide()` blocked all of them — every
+// login, form and POST, including Clerk's sign-in call, so the user could not
+// even sign in to Locke. The rule mirrors the proxy shim's "capture DOWN":
+// PROVABLY unreachable (`no-bridge`, `bridge-unreachable`) on `open_web` (a
+// host the catalog does not name) sends the original, as
+// `locke-unreachable-unclassified`. Every AI host fails CLOSED, as in the proxy
+// shim: `catalog_host`, `capture_path` and SCOPE.UPLOAD keep blocking, and so
+// does every outcome where Locke WAS reached or where unreachable cannot be
+// proven.
+
+const OPEN_WEB_URL = 'https://accounts.example.com/signin/v2/challenge';
+const CLERK_URL = 'https://clerk.sonomos.ai/v1/client/sign_ins';
+const CATALOG_HOST_URL = 'https://chatgpt.com/backend-api/me'; // off CHATGPT_PATHS's capture paths
+const CAPTURE_PATH_URL = 'https://chatgpt.com/backend-api/conversation';
+
+test('locke unreachable: open_web + no-bridge sends the original, under its own reason', async () => {
+  const captured = [];
+  const { sandbox, netCalls, logs, unchecked } = makeDebugWorld((msg) => {
+    captured.push(msg);
+    return { ok: false, code: 'no-bridge', message: 'Native host has exited.' };
+  });
+  for (const url of [OPEN_WEB_URL, CLERK_URL]) {
+    await sandbox.fetch(url, { method: 'POST', body: 'user=a&pass=b' });
+  }
+  assert.deepEqual(captured.map((m) => m.coverage), ['open_web', 'open_web']);
+  assert.equal(netCalls.length, 2, 'both logins went out');
+  assert.equal(netCalls[0][0], OPEN_WEB_URL);
+  const line = assertReason(logs, 'locke-unreachable-unclassified', 'debug');
+  assert.match(line, /\bcode=no-bridge\b/);
+  assert.match(line, /\bcoverage=open_web\b/);
+  // Distinguishable from a screened allow and from the user's fail-open window.
+  assert.ok(!findLine(logs, 'allow'));
+  assert.ok(!findLine(logs, 'unchecked-fail-open'));
+  assert.equal(unchecked.length, 0, 'not tallied as an unchecked send: it was never judged AI');
+});
+
+test('locke unreachable: catalog_host (an AI host off its prompt paths) still blocks, uploads included', async () => {
+  for (const code of ['no-bridge', 'bridge-unreachable']) {
+    const captured = [];
+    const { sandbox, netCalls, logs } = makeDebugWorld((msg) => {
+      captured.push(msg);
+      return { ok: false, code, message: 'down' };
+    }, CHATGPT_PATHS);
+    await assert.rejects(sandbox.fetch(CATALOG_HOST_URL, { method: 'POST', body: '{}' }), blockedError, code);
+    await assert.rejects(sandbox.fetch(DICTATION_URL, { method: 'POST', body: dictationForm() }), blockedError, code);
+    assert.deepEqual(captured.map((m) => m.coverage), ['catalog_host', 'catalog_host'], code);
+    assert.equal(netCalls.length, 0, code);
+    assert.ok(!findLine(logs, 'locke-unreachable-unclassified'), code);
+  }
+});
+
+test('locke unreachable: capture_path + no-bridge or bridge-unreachable still blocks', async () => {
+  for (const code of ['no-bridge', 'bridge-unreachable']) {
+    const { sandbox, netCalls, logs } = makeWorld(() => ({ ok: false, code, message: 'down' }), CHATGPT_PATHS);
+    await assert.rejects(sandbox.fetch(CAPTURE_PATH_URL, { method: 'POST', body: '{"prompt":"x"}' }), blockedError, code);
+    assert.equal(netCalls.length, 0, code);
+    assert.ok(!findLine(logs, 'locke-unreachable-unclassified'), code);
+  }
+  // And the default-world prompt endpoint the rest of this file uses.
+  const w = makeWorld(() => ({ ok: false, code: 'no-bridge', message: 'down' }));
+  await assert.rejects(w.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
+  assert.equal(w.netCalls.length, 0);
+});
+
+test('locke unreachable: SCOPE.UPLOAD + no-bridge still blocks, fetch and XHR', async () => {
+  const down = () => ({ ok: false, code: 'no-bridge', message: 'down' });
+  const form = () => s3PolicyForm(new Blob(['Jane Roe, SSN 078-05-1120'], { type: 'text/plain' }));
+  const { sandbox, netCalls, logs } = makeWorld(down);
+  await assert.rejects(sandbox.fetch(S3_POST, { method: 'POST', body: form() }), blockedError);
+  assert.equal(netCalls.length, 0);
+  assert.ok(!findLine(logs, 'locke-unreachable-unclassified'));
+
+  const world = makeXhrWorld(down);
+  const xhr = new world.sandbox.XMLHttpRequest();
+  xhr.open('POST', S3_POST, true);
+  xhr.send(form());
+  await waitFor(() => xhr.aborted);
+  assert.deepEqual(xhr.sent, []);
+});
+
+test('locke unreachable: open_web XHR + no-bridge is released too', async () => {
+  const { sandbox, logs } = makeXhrWorld(() => ({ ok: false, code: 'no-bridge', message: 'down' }));
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', CLERK_URL, true);
+  xhr.send('a=b');
+  await waitFor(() => xhr.sent.length === 1);
+  assert.deepEqual(xhr.sent, ['a=b']);
+  assert.equal(xhr.aborted, false);
+  assert.ok(!logs.some((l) => l.level === 'warn'), 'a pass is not a warning');
+});
+
+test('locke unreachable: outcomes where Locke was reached, or unreachable is unproven, still block open_web', async () => {
+  const blocked = [
+    // Host answered, ran out of time mid-screen: the request may be AI.
+    ['screening-timeout', { ok: false, code: 'screening-timeout', message: 'deadline' }],
+    ['native-timeout', { ok: false, code: 'native-timeout' }],
+    ['bridge-error', { ok: false, code: 'bridge-error', message: 'Native host has exited.' }],
+    ['receipt-too-large', { ok: false, code: 'receipt-too-large' }],
+    ['host-panic', { ok: false, code: 'host-panic' }],
+    ['bridge-protocol-mismatch', { ok: false, code: 'bridge-protocol-mismatch' }],
+    ['extension-reloaded', { ok: false, code: 'extension-reloaded' }],
+    ['bridge-empty', { ok: false, code: 'bridge-empty' }],
+    ['bridge-unknown-response', { ok: false, code: 'bridge-unknown-response' }],
+    ['data-consent-required', { ok: false, code: 'data-consent-required' }],
+    ['a null verdict', null],
+    ['a real guard block', { ok: true, receipt: { decision: 'block', reason: 'found a key', redactedCount: 0 } }],
+    ['an infrastructure block receipt', { ok: true, receipt: { decision: 'block', blockCause: 'infrastructure', reason: 'screener unavailable' } }],
+    ['a malformed receipt', { ok: true }]
+  ];
+  for (const [name, verdict] of blocked) {
+    const { sandbox, netCalls, logs } = makeWorld(() => verdict);
+    await assert.rejects(sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' }), blockedError, name);
+    assert.equal(netCalls.length, 0, name);
+    assert.ok(!findLine(logs, 'locke-unreachable-unclassified'), name);
+  }
+});
+
+test('locke unreachable: a plain verdict timeout on open_web still blocks (a hang does not prove unreachable)', async () => {
+  const w = makeWorld(() => new Promise(() => {}));
+  w.deliver({ type: 'SONOMOS_CONFIG', config: { enforceTimeoutMs: 1000 } });
+  await assert.rejects(w.sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' }), blockedError);
+  assert.equal(w.netCalls.length, 0);
+  assertBlocked(w.logs, 'verdict-timeout');
+});
+
+test('locke unreachable: a dead channel on open_web still blocks', async () => {
+  const w = makeWorld(() => allowVerdict, { postMessage: () => { throw new Error('channel gone'); } });
+  await assert.rejects(w.sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' }), blockedError);
+  assert.equal(w.netCalls.length, 0);
+});
+
+test('locke unreachable: the user fail-open window keeps its own reason and tally', async () => {
+  const w = makeWorld(() => ({ ok: false, code: 'no-bridge', message: 'down' }));
+  w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  await w.sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' });
+  assert.equal(w.netCalls.length, 1);
+  assert.deepEqual(w.unchecked, ['relay-no-bridge']);
+  assertReason(w.logs, 'unchecked-fail-open', 'warn');
+  assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'));
+});

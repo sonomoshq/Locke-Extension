@@ -22,9 +22,16 @@ strict SemVer.
 - Path allow-lists no longer stop a request being held; they demote it to
   `catalog_host`. The `web_screening: "none"` search hosts' own pages are
   classified too, instead of passed through.
-- Fail-closed is unchanged and now applies on every site: with the desktop
-  app down, bodied requests everywhere are blocked unless the user opened a
-  fail-open window in the desktop app.
+- Fail-closed applies on every site, with one narrow exception: when Locke is
+  provably unreachable (`no-bridge`, `bridge-unreachable`) a request to an
+  ordinary site the catalog does not name (`open_web`) is sent as it was
+  (reason `locke-unreachable-unclassified`). Without it, Locke being off
+  blocked every login and form on the web, including Locke's own sign-in. AI
+  hosts still fail closed, as in the proxy shim: `catalog_host` and
+  `capture_path` requests and cross-origin uploads from a catalog page all
+  block, as does every outcome where Locke was reached or unreachable is
+  unproven (`screening-timeout`, plain timeouts, guard blocks). The user's
+  fail-open window is unchanged.
 - `sendBeacon`, `fetchLater()` and synchronous XHR are refused only on
   catalog prompt paths and sent elsewhere (they cannot be held, so cannot be
   classified). Without data-sharing consent, only catalog prompt paths are

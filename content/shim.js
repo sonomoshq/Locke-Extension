@@ -33,6 +33,20 @@
 // never a decision the extension makes; when it is exercised, the verdict says
 // so (`unchecked`) and we say so too.
 //
+// THE ONE NARROW EXCEPTION, and it is not a fail-open window: when Locke is
+// PROVABLY UNREACHABLE (`no-bridge`, `bridge-unreachable` — see
+// UNREACHABLE_RELAY_CODES) and the capture is `open_web` (a host the catalog
+// does not name), the original request goes out, as
+// `locke-unreachable-unclassified`. Since
+// super PR #15 every bodied request on every site is held, so with Locke off
+// the unconditional block above took down every login, form and POST on the
+// web — including Clerk's sign-in call, which is how the user would turn
+// Locke back on. This mirrors the proxy shim, which with capture down fails
+// open for non-AI hosts and CLOSED for every AI host: a catalog host is an AI
+// host, so `catalog_host` and `capture_path` (and SCOPE.UPLOAD) still block,
+// even off the prompt paths — chatgpt.com's audio and image uploads, for one,
+// must never leave unscreened. See decide().
+//
 // Hard rule: out-of-scope requests (a host the user switched off, or no body
 // to scan) must pass through untouched — every hook wraps its scoping work in
 // try/catch and only ever alters requests it has deliberately committed to
@@ -1488,7 +1502,42 @@
     };
   }
 
-  function decide(res) {
+  // Relay codes that PROVE Locke could not be reached, so no classifier ever
+  // saw the request. Deliberately the two that say so and nothing wider:
+  //
+  //   `no-bridge`          — the browser could not START our native-messaging
+  //     host (not registered, or it exited at once): Locke is not installed,
+  //     not running, or the user is signed out.
+  //   `bridge-unreachable` — the host launched and answered, but could not
+  //     reach the screening service beneath it.
+  //
+  // NOT here, on purpose: `screening-timeout` (the host answered and was
+  // MID-screen when it ran out of time — the request may be AI), `native-timeout`
+  // and a plain verdict timeout (a hang proves nothing about reachability),
+  // `bridge-error` (the unclassified fallback; could be anything),
+  // `receipt-too-large`, `host-panic`, `bridge-protocol-mismatch`,
+  // `extension-reloaded`, malformed or unknown replies, consent, and any real
+  // receipt including a guard block. When in doubt a code stays out: the cost
+  // of a wrong entry is an unscreened AI prompt, the cost of a missing one is
+  // a blocked request with an honest reason.
+  const UNREACHABLE_RELAY_CODES = new Set(['no-bridge', 'bridge-unreachable']);
+
+  // Locke being down is only allowed to let a request through when its host is
+  // not in the catalog at all (`open_web`). This mirrors the proxy shim, which
+  // on "capture DOWN" fails open for non-AI hosts and CLOSED for every AI
+  // host. A catalog host is an AI host even off its prompt paths (sign-in,
+  // billing, but also audio and image uploads such as chatgpt.com's
+  // /backend-api/transcribe, which the path list does not name), so
+  // `catalog_host` keeps blocking along with `capture_path`. SCOPE.UPLOAD (a
+  // catalog surface's attachment) keeps blocking too; it is checked
+  // explicitly although coverageFor already makes every upload a
+  // capture_path, so a change to one cannot quietly loosen the other. An
+  // absent `coverage` (a caller that did not say) is not open: it blocks.
+  function unreachableMayPass(coverage, scope) {
+    return scope !== SCOPE.UPLOAD && coverage === COVERAGE.OPEN_WEB;
+  }
+
+  function decide(res, coverage, scope) {
     const waitedMs = res.elapsedMs;
     if (res.outcome === 'timeout' && failOpenActive()) return failOpenSend('verdict-timeout', waitedMs);
     if (res.outcome === 'channel-failed' && failOpenActive()) return failOpenSend('verdict-channel-failed', waitedMs);
@@ -1608,6 +1657,19 @@
       // `bridge-error` (native messaging itself failed — the port died, the
       // host exited) keeps `native-call-failed`: there the app really is the
       // thing that is not answering.
+      //
+      // THE EXCEPTION (the bug this fixes): Locke provably unreachable on a
+      // request to a host the catalog does not name (`open_web`). The page's own request goes out
+      // untouched. It is distinguishable from a screened `allow` and from the
+      // user's fail-open window (`unchecked-fail-open`) by its reason, and it
+      // is not tallied as an unchecked send: it is not an AI host.
+      if (UNREACHABLE_RELAY_CODES.has(v.code) && unreachableMayPass(coverage, scope)) {
+        return {
+          action: 'send',
+          reason: 'locke-unreachable-unclassified',
+          fields: { waitedMs, code: clip(v.code), coverage, because: 'locke-unreachable-not-catalog-host' }
+        };
+      }
       const reason = RELAY_BLOCK_REASON[v.code] ?? 'native-call-failed';
       return {
         action: 'block',
@@ -2820,7 +2882,8 @@
               const res = await enforce(b64FromBytes(raw), providerFor(url, scope), consentGeneration,
                 coverageFor(url, scope));
               const d = decide(!dataSharingAllowed || consentGeneration !== dataConsentGeneration
-                ? { outcome: 'verdict', verdict: { ok: false, code: 'data-consent-required' } } : res);
+                ? { outcome: 'verdict', verdict: { ok: false, code: 'data-consent-required' } } : res,
+              coverageFor(url, scope), scope);
               action = d.action;
               let reason = d.reason;
               let extra = d.fields;
@@ -3206,7 +3269,7 @@
         const res = await enforce(b64FromBytes(raw), providerFor(s.url, scope), s.consentGeneration,
           coverageFor(s.url, scope));
         if (abandoned()) return;
-        const d = decide(res);
+        const d = decide(res, coverageFor(s.url, scope), scope);
         const veto = (d.action === 'redact' && scope === SCOPE.UPLOAD)
           ? uploadRedactVeto(d.reason, s.headers, unsigned != null) : null;
         if (veto) {
