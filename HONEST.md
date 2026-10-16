@@ -171,7 +171,7 @@ verdict means no send. The residuals we accept and document:
   | Host | Paths screened — and nothing else on that host |
   | --- | --- |
   | `chatgpt.com` | `/backend-api/conversation`, `/backend-api/f/conversation`, `/backend-anon/conversation`, `/backend-anon/f/conversation`, `/unauth-mweb/conversation/updates`, `/backend-api/codex/responses`, `/backend-api/files` |
-  | `claude.ai` | `/api/organizations/*/chat_conversations/*/completion`, `/api/organizations/*/chat_conversations/*/retry_completion`, `/api/*/upload`, `/api/organizations/*/convert_document` |
+  | `claude.ai` | `/api/organizations/*/chat_conversations/*/completion`, `/api/organizations/*/chat_conversations/*/retry_completion`, `/api/*/upload`, `/api/organizations/*/convert_document`, `/api/organizations/*/conversations/*/wiggle/upload-file` |
   | `www.perplexity.ai` | `/rest/sse/perplexity_ask` |
 
   The narrowing applies to subdomains too (most specific entry wins), so
@@ -239,8 +239,13 @@ verdict means no send. The residuals we accept and document:
   `content/web-surfaces.generated.js`.** The catalog change adding
   `claude.ai`'s two attachment paths (`/api/*/upload`,
   `/api/organizations/*/convert_document`) landed in the vendored copy
-  on 2026-09-08 and is what the table above reflects; the four paths in
-  the table are the whole of what `claude.ai` screens. This table is
+  on 2026-09-08; the fifth, `/api/organizations/*/conversations/*/wiggle/upload-file`,
+  landed 2026-10-16 after SP14 found that claude.ai had MOVED its attach
+  button there and every `.txt` attachment was leaving unredacted. The
+  five paths in the table are the whole of what `claude.ai` screens by
+  path — and since 2026-10-16 a file-bearing POST to a catalog host on a
+  path the list does not name is upload scope too (`isUploadScope`), so a
+  future rename is screened by the body rule rather than missed. This table is
   regenerated from the vendored copy whenever the catalog changes, and
   `tests/honest-capture-paths.test.js` fails until it is, because it
   compares the table above with `SONOMOS_CAPTURE_PATHS` at run time. So
