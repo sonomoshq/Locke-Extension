@@ -4768,13 +4768,16 @@ test('bridge-dropped blocks with the "try again shortly" copy bridge-unreachable
 });
 
 test('locke-signed-out: catalog_host, capture_path and upload block with the signed-out copy', async () => {
-  // catalog_host (an AI host off its prompt paths, uploads included)
+  // catalog_host (an AI host off its prompt paths) — and, since 2026-10-16,
+  // a same-host upload off those paths is `capture_path`: a user's file on
+  // the AI host itself never goes to the classifier (SP14: claude.ai moved
+  // its attach button and every .txt left raw). Both block here all the same.
   {
     const captured = [];
     const w = makeDebugWorld((msg) => { captured.push(msg); return { ok: false, code: SIGNED_OUT, message: 'x' }; }, CHATGPT_PATHS);
     await assert.rejects(w.sandbox.fetch(CATALOG_HOST_URL, { method: 'POST', body: '{}' }), blockedError);
     await assert.rejects(w.sandbox.fetch(DICTATION_URL, { method: 'POST', body: dictationForm() }), blockedError);
-    assert.deepEqual(captured.map((m) => m.coverage), ['catalog_host', 'catalog_host']);
+    assert.deepEqual(captured.map((m) => m.coverage), ['catalog_host', 'capture_path']);
     assert.equal(w.netCalls.length, 0);
     assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'));
     const line = assertBlocked(w.logs, 'locke-signed-out');
@@ -4871,6 +4874,55 @@ test('a missing or empty SONOMOS_API_HOSTS list refuses the pass (round 2 a)', a
   }
 });
 
+// ── same-host uploads off the allow-list (SP14, 2026-10-16) ─────────
+//
+// claude.ai moved its attach button from /api/{org}/upload to
+// /api/organizations/{org}/conversations/{conv}/wiggle/upload-file. With the
+// old path alone in the catalog the shim filed that POST as `catalog_host`,
+// the guard's classifier read a 300-byte multipart as not-AI, and every .txt
+// attachment reached Anthropic unredacted. Two things close it: the catalog
+// names the new path (vendored here), and a file-bearing POST to a catalog
+// host on ANY unlisted path is upload scope — the header comment's promise,
+// now kept — so the next rename cannot reopen the hole.
+const CLAUDE_ORG = '8d3a1c7e-0000-4f00-9c00-abcdef012345';
+const CLAUDE_CONV = '1f2e3d4c-1111-4a00-8b00-0123456789ab';
+function claudeAttachForm() {
+  const form = new FormData();
+  form.append('file', new Blob(['Name: Jane Doe\nSSN: 312-45-6789\n'], { type: 'text/plain' }), 'ssn.txt');
+  return form;
+}
+test('claude.ai: the moved attachment upload is a capture path, not a classifier call', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((m) => { captured.push(m); return allowVerdict; }, realCatalogGlobals('https://claude.ai/chat/1'));
+  await sandbox.fetch(`https://claude.ai/api/organizations/${CLAUDE_ORG}/conversations/${CLAUDE_CONV}/wiggle/upload-file`,
+    { method: 'POST', body: claudeAttachForm() });
+  assert.equal(captured.length, 1, 'held and relayed');
+  assert.equal(captured[0].coverage, 'capture_path', 'the catalog names this path: screened regardless');
+  assert.equal(captured[0].provider, 'anthropic');
+  const { head } = splitRaw(rawOf(captured[0].requestB64));
+  assert.match(head, /^POST \/api\/organizations\/[0-9a-f-]+\/conversations\/[0-9a-f-]+\/wiggle\/upload-file HTTP\/1\.1\r\nHost: claude\.ai\r\n/);
+  assert.equal(netCalls.length, 1, 'an allow releases it');
+});
+test('claude.ai: a file-bearing POST to a path the allow-list does NOT name is still upload scope', async () => {
+  const captured = [];
+  const { sandbox } = makeWorld((m) => { captured.push(m); return allowVerdict; }, realCatalogGlobals('https://claude.ai/chat/1'));
+  // The next rename, before any catalog catches up with it.
+  await sandbox.fetch(`https://claude.ai/api/organizations/${CLAUDE_ORG}/conversations/${CLAUDE_CONV}/attachments/put`,
+    { method: 'POST', body: claudeAttachForm() });
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].coverage, 'capture_path', 'a user file on the AI host itself never goes to the classifier');
+  assert.equal(captured[0].provider, 'anthropic', 'borrowed from the page, as for cross-origin uploads');
+});
+test('claude.ai: a bodied JSON POST off the allow-list keeps its catalog_host coverage', async () => {
+  const captured = [];
+  const { sandbox } = makeWorld((m) => { captured.push(m); return allowVerdict; }, realCatalogGlobals('https://claude.ai/chat/1'));
+  // Sign-in, settings and conversation reads must keep classifying, not
+  // screening: field-agnostic redaction there breaks authentication.
+  await sandbox.fetch(`https://claude.ai/api/organizations/${CLAUDE_ORG}/chat_conversations/${CLAUDE_CONV}/current_leaf_message_uuid`,
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"uuid":"x"}' });
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].coverage, 'catalog_host', 'no file, not a prompt path: the classifier decides');
+});
 test('a POST from an AI page to a host the catalog never names blocks (reviewer finding 2)', async () => {
   const bytes = () => new TextEncoder().encode('Jane Roe 078-05-1120');
   const cases = [

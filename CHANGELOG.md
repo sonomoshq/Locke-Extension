@@ -8,6 +8,21 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Fixed — claude.ai attachments left unredacted after Anthropic moved the upload (SP14, 2026-10-16)**
+- claude.ai's attach button now POSTs to
+  `/api/organizations/{org}/conversations/{conv}/wiggle/upload-file`. The
+  vendored catalog named only `/api/{org}/upload`, so the shim filed the
+  upload as `catalog_host`, the guard's classifier read a 300-byte multipart
+  as not-AI, and the file reached Anthropic raw while the completion beside it
+  was masked. The vendored `shared/ai-surfaces.json` now carries the new path
+  (sonomos-vocab catalog v12).
+- `isUploadScope` keeps the promise its own comment made on 2026-10-06: a
+  file-bearing POST to a catalog host on a path the allow-list does not name
+  is upload scope (`capture_path`, provider borrowed from the page), not a
+  classifier call. Listed paths and bodiless or JSON POSTs on a catalog host
+  are unchanged.
+
+
 **Changed — every website goes to the classifier (super PR #15)**
 - Content scripts now match every http/https page (`http://*/*`,
   `https://*/*`; still no `<all_urls>`, no new host permission). Every bodied

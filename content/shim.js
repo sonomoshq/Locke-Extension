@@ -949,7 +949,18 @@
     try {
       if (!pageIsAiSurface()) return false;
       if (!url || url.protocol !== 'https:') return false;
-      if (isAiHost(url.hostname)) return false; // a catalog host is ordinary scope
+      // A catalog host's listed paths are ordinary scope: the allow-list
+      // already screens them. A file-bearing POST to a catalog host on a
+      // path the list does NOT name falls through to the body and type
+      // tests below — the header comment has promised that since
+      // 2026-10-06, and until 2026-10-16 this line returned early instead:
+      // claude.ai moved its attachment upload to
+      // /api/organizations/{org}/conversations/{conv}/wiggle/upload-file,
+      // the list still said /api/{org}/upload, so the upload went out as
+      // `catalog_host`, the classifier read a 300-byte multipart as not-AI,
+      // and every .txt attachment reached Anthropic unredacted (SP14,
+      // Windows). A rename now degrades to "screened by the body rule".
+      if (isAiHost(url.hostname) && isScreenedPath(url.hostname, url.pathname)) return false;
       if (!hasBody()) return false;
       const verb = String(method || 'GET').toUpperCase();
       if (verb === 'PUT') return true;
