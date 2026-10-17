@@ -8,6 +8,21 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Fixed — claude.ai attachments left unredacted after Anthropic moved the upload (SP14, 2026-10-16)**
+- claude.ai's attach button now POSTs to
+  `/api/organizations/{org}/conversations/{conv}/wiggle/upload-file`. The
+  vendored catalog named only `/api/{org}/upload`, so the shim filed the
+  upload as `catalog_host`, the guard's classifier read a 300-byte multipart
+  as not-AI, and the file reached Anthropic raw while the completion beside it
+  was masked. The vendored `shared/ai-surfaces.json` now carries the new path
+  (sonomos-vocab catalog v12).
+- `isUploadScope` keeps the promise its own comment made on 2026-10-06: a
+  file-bearing POST to a catalog host on a path the allow-list does not name
+  is upload scope (`capture_path`, provider borrowed from the page), not a
+  classifier call. Listed paths and bodiless or JSON POSTs on a catalog host
+  are unchanged.
+
+
 **Changed — every website goes to the classifier (super PR #15)**
 - Content scripts now match every http/https page (`http://*/*`,
   `https://*/*`; still no `<all_urls>`, no new host permission). Every bodied
@@ -22,9 +37,55 @@ strict SemVer.
 - Path allow-lists no longer stop a request being held; they demote it to
   `catalog_host`. The `web_screening: "none"` search hosts' own pages are
   classified too, instead of passed through.
-- Fail-closed is unchanged and now applies on every site: with the desktop
-  app down, bodied requests everywhere are blocked unless the user opened a
-  fail-open window in the desktop app.
+- Fail-closed applies on every site, with one narrow exception: when Locke is
+  DELIBERATELY SIGNED OUT, a request is sent as it was (reason
+  `locke-unreachable-unclassified`). The signal is the new relay code
+  `locke-signed-out`, which the native host sends only when it could not
+  connect to Locke AND the desktop app's capture lease
+  (`~/.sonomos/capture-lease.json`) says `signed-out` AND the machine has no
+  team lock. `no-bridge` and `bridge-unreachable` BLOCK again: "unreachable"
+  cannot be told from "Locke crashed mid-screen", and a pass keyed on it
+  leaked uncataloged AI. Even on `locke-signed-out` the request is sent only if
+  ALL hold: it is `open_web`; the generated API-host list loaded and the
+  destination is not a catalog AI web or API host (api.openai.com,
+  api.anthropic.com, openrouter.ai, generativelanguage, bedrock-runtime...);
+  the page has a readable host (an opaque `data:` frame refuses), is not itself
+  an AI surface or API host (chatgpt.com, claude.ai, aistudio, openrouter.ai/chat
+  can hand a prompt to Sentry, Segment, S3 or Google's clients6 RPC) and has no
+  AI-surface ancestor frame (`location.ancestorOrigins` where the browser has
+  it: an artifact or sandbox frame inside claude.ai or chatgpt.com; where it
+  does not, i.e. older Firefox, any framed page (`window.top !== window`, or
+  reading it throws) refuses the pass, because a referrer names only the
+  direct parent; a top-level page is unaffected);
+  the target is not loopback, private or a local-network name (self-hosted
+  models, e.g. Ollama :11434). Covered exactly: IPv4 127/8, 10/8, 172.16/12,
+  192.168/16, 169.254/16, 0/8 and CGNAT 100.64/10; IPv6 `::`, `::1`, ULA
+  fc00::/7, link-local fe80::/10, site-local fec0::/10, NAT64 64:ff9b::/96 and
+  RFC 8215 64:ff9b:1::/48 (wholly private), and the forms that embed an IPv4
+  address, judged by that address: `::a.b.c.d`, `::ffff:a.b.c.d` (mapped),
+  `::ffff:0:a.b.c.d` (SIIT) and 6to4 2002::/16; single-label hosts; and the
+  suffixes `.localhost` `.local` `.lan` `.internal` `.intranet` `.localdomain`
+  `.home.arpa` `.ts.net` `.corp` `.home` `.private`. A public name that merely
+  resolves to a private address (`127.0.0.1.nip.io`) cannot be seen from here.
+  The scope must also not be an upload. Without it, Locke being signed
+  out blocked every login and form on the web, including Locke's own sign-in.
+  Everything else blocks, as does every outcome where Locke was reached or
+  signed-out is unproven (`screening-timeout`, plain timeouts, guard blocks, an
+  unknown code). `locke-signed-out` that does not pass shows "Locke is signed
+  out. Sign in to the Locke desktop app, then try again." The user's fail-open
+  window is unchanged. The native host reports `locke-signed-out` only for a
+  deliberate sign-out: a signed-out lease that names a vault still on disk with
+  no `.signed-out` tombstone is a signed-in user whose keyring is unavailable,
+  and reads `bridge-unreachable` (blocks).
+- Copy: `bridge-unreachable` now says the browser connector could not connect to
+  Locke's screening service (it used to say the desktop app answered, which is
+  `bridge-dropped`). The popup shows "Locke is signed out. Sign in to the Locke
+  desktop app to resume screening." when the last capture failure is
+  `locke-signed-out`, instead of the offline / held-back text.
+- Native host relay codes: the failure after Locke was reached (`bridge-error`
+  in the previous build) is now `bridge-dropped`, because `bridge-error` is the
+  service worker's own catch-all. It shows the "answered, but could not reach
+  its screening service, try again shortly" message `bridge-unreachable` used to.
 - `sendBeacon`, `fetchLater()` and synchronous XHR are refused only on
   catalog prompt paths and sent elsewhere (they cannot be held, so cannot be
   classified). Without data-sharing consent, only catalog prompt paths are
@@ -36,6 +97,9 @@ strict SemVer.
   risk register R-07 and popup copy updated to match. Chrome/Edge will ask
   users to re-approve the broader access on update.
 
+**Changed**
+- Images are V1.X (2026-10-06): the extension holds and relays an image upload like any file and obeys the desktop app, which sends it unscreened by default and blocks it when the file-type setting says Block. A blocked image is refused with "this image was blocked by your file-type setting, so it was not sent" (it was D-30's "too large to screen"). NSFW filtering is not in V1; we plan to add this in a future release.
+
 **Documentation**
 - Correct privacy disclosures to describe local native-app transfer of
   request content, files and metadata, plus actual browser retention and
@@ -44,7 +108,34 @@ strict SemVer.
   Firefox's `none` declaration and missing consent experience remain an
   explicit release-review blocker. No manifest or runtime behavior changed.
 
+**Changed**
+- Audio and voice uploads (dictation, a voice clip) are no longer blocked by
+  default. Locke cannot screen audio until V2, so the desktop app allows them
+  unscreened unless the device setting or a Teams policy says Block; the
+  extension holds and relays them as before and follows that answer. Video and
+  other unreadable formats stay blocked. Decided 2026-10-06 ("Allow audio,
+  disclose"); listed in the known limitations.
+
 **Fixed**
+- Uploads that declared nothing in a header left unscreened: Perplexity's
+  attachments (an S3 POST-policy form to `ppl-ai-file-upload.s3.amazonaws.com`,
+  images the same way to Cloudinary), a tus `PATCH`, and a file POSTed to an
+  AI host's own path that its capture-path allow-list does not name. A `POST`
+  or `PATCH` from a screened AI page is now held when its body is a file, a
+  form with a file in it, a file-typed Blob, an unreadable stream, or a
+  declared multipart/file media type; only types are read to decide, so the
+  same test blocks such an upload before data-sharing consent. A beacon
+  carrying a file is refused. Telemetry shapes (strings, JSON/text Blobs,
+  form-encoded data) still pass untouched. A signed form's credential and
+  signature fields (S3 POST policy, Cloudinary, GCS) are left out of what is
+  screened, as a pre-signed URL's query string already was, so a clean
+  upload is not masked into one the storage provider refuses; a `redact` on
+  a signed form is refused (`upload-signed-form`) rather than re-sent.
+- On the raw-upload path a withheld image is refused with decision D-30's
+  notice ("this image was too large to screen, so it was not sent"), the
+  desktop app's wording, instead of the generic "could not be examined".
+- Re-vendored the surface catalog: `chatgpt.com` admits `/backend-api/files`
+  (the attachment create call, which carries the file name).
 - A tab that was already open when the extension was reloaded, updated or
   re-enabled blocked every in-scope request with a generic reason, so a
   healthy install looked broken. The block itself was correct and stays

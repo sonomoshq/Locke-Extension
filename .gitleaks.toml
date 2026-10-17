@@ -36,6 +36,20 @@ regexes = [
 
 [[allowlists]]
 description = """
+Synthetic S3 POST-policy credentials in tests/shim.test.js (teams-v1/fix-upload-leaks).
+
+The upload tests build the form a page posts to S3, so the signing fields have
+to look like a real temporary credential: an ASIA… access key id ending in
+EXAMPLE and a truncated session token. Neither has ever been valid anywhere.
+Exempted by value, so any other secret-shaped string in that file still fails.
+"""
+regexes = [
+  '''ASIAZ4TQXY3EXAMPLE7Q''',
+  '''IQoJb3JpZ2luX2VjEJr//////////wEaCXVzLWVhc3QtMSJH''',
+]
+
+[[allowlists]]
+description = """
 Synthetic AWS S3 POST-policy fixture in tests/shim.test.js, commit 2abbc2e.
 
 That commit (a closed teams-v1 PR, still reachable from other branches, and

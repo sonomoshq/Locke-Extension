@@ -114,10 +114,15 @@ import {
 } from './constants.js';
 
 // Relay failures that PROVE nothing was screened. Deliberately short: only
-// the two codes that mean "the hop below the browser reached far enough to
-// establish that no verdict could be produced".
+// the codes that mean "the hop below the browser reached far enough to
+// establish that no verdict could be produced". `locke-signed-out` is the
+// native host's `bridge-unreachable` plus the desktop app's own record that the
+// user signed out; it is also the one code the shim lets ordinary website
+// traffic through on (content/shim.js UNREACHABLE_RELAY_CODES), so the popup
+// must read it as "nothing is screening", never as a stale Active.
 export const RELAY_FAILURES_PROVING_NO_SCREEN = Object.freeze([
   'bridge-unreachable', // the host could not reach the desktop app
+  'locke-signed-out',   // ...and the user had signed out of it on purpose
   'screening-timeout'   // the host's own deadline expired with no verdict
 ]);
 
@@ -168,6 +173,7 @@ export const RELAY_FAILURES_PROVING_NO_VERDICT = Object.freeze([
   'bridge-empty',            // the host answered with nothing we can read
   'bridge-unknown-response', // ...or with a frame type this build doesn't know
   'bridge-error',            // native messaging itself failed
+  'bridge-dropped',          // the host reached Locke and the exchange failed mid-way
   'capture-error',           // the worker threw relaying it
   'bad-request',             // the host rejected our frame as malformed
   'native-timeout',          // the host neither answered nor exited in time

@@ -560,6 +560,23 @@ test('service-worker: a good capture after a bad one clears the doubt immediatel
   assert.equal(state.lastCaptureFailure, null);
 });
 
+test('service-worker: the host\'s signed-out and dropped codes relay verbatim and downgrade the popup', async () => {
+  // The relay does not rewrite codes (the shim keys the open-web pass on
+  // `locke-signed-out` alone), and both must stop the popup reading a stale
+  // Active: signed out proves nothing is screening, a drop only "not confirmed".
+  for (const code of ['locke-signed-out', 'bridge-dropped']) {
+    await resetScreening();
+    nativeHandler = () => ({ type: 'error', code, message: 'x' });
+    const reply = await deliver(captureMsg, TRUSTED);
+    await flush();
+    assert.equal(reply?.code ?? reply?.verdict?.code, code);
+    nativeHandler = guardIsUp;
+    const { state } = await deliver({ type: 'requestCheck' }, TRUSTED);
+    assert.equal(state.lastCaptureFailure?.code, code, code);
+    assert.notEqual(state.screening, 'available', code);
+  }
+});
+
 test('service-worker: "restored" is only ever written on a real positive', async () => {
   await resetScreening();
   delete store.local.auditLog;

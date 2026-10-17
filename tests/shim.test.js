@@ -1,6 +1,7 @@
 // Copyright © 2026 Sonomos, Inc. All rights reserved.
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
@@ -79,6 +80,10 @@ function makeWorld(onCapture, extraGlobals = {}, { settleConfig = true, document
     SONOMOS_WEB_HOSTS: ['chat.openai.com', 'chatgpt.com'],
     // The host -> catalog id map the generator emits beside the host list.
     SONOMOS_WEB_PROVIDERS: { 'chat.openai.com': 'openai', 'chatgpt.com': 'openai' },
+    // A top-level window is its own `top`. The shim reads this to tell a frame
+    // from a page where `location.ancestorOrigins` is absent (Firefox); a test
+    // that wants a frame overrides it through `extraGlobals`.
+    get top() { return innerWindow; },
     // Realm intrinsics the shim touches.
     URL, TextEncoder, TextDecoder, btoa, atob,
     Response, Request, Headers, FormData, Blob, URLSearchParams, ReadableStream,
@@ -455,12 +460,13 @@ test('fail-closed: a bridge-unreachable relay failure is told apart from a missi
   await assert.rejects(
     sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }),
     (e) => {
-      // Must NOT claim the desktop app itself could not be reached — the
-      // native host DID answer, which is exactly what the popup's Status row
-      // reflects too. Saying so would have the two surfaces disagree.
+      // Must NOT claim the desktop app itself could not be reached, and since
+      // the host could not connect to Locke's screening service it must NOT
+      // claim the desktop app ANSWERED either (that is `bridge-dropped`).
       assert.ok(!/desktop app could not be reached/.test(e.message), e.message);
-      assert.match(e.message, /answered/);
-      assert.match(e.message, /screening service/);
+      assert.doesNotMatch(e.message, /answered/);
+      assert.match(e.message, /connector could not connect to Locke’s screening service/);
+      assert.match(e.message, /nothing was sent/);
       assert.match(e.message, /NOT a sensitive-data block/);
       assert.match(e.message, /\bkind=unavailable\b/);
       return true;
@@ -2271,7 +2277,8 @@ test('upload: an unexaminable attachment is blocked, never replaced with a place
   await assert.rejects(
     sandbox.fetch(STORAGE_PUT, { method: 'PUT', headers: { 'content-type': 'image/png' }, body: 'realbytes' }),
     (e) => {
-      assert.match(e.message, /could not be examined, so it was not uploaded/);
+      // D-30's notice, in the desktop app toast's own words.
+      assert.match(e.message, /this image was blocked by your file-type setting, so it was not sent/);
       assert.match(e.message, /Nothing left your machine/);
       assert.match(e.message, /\bkind=unsupported\b/);
       assert.match(e.message, /\breason=upload-withheld\b/);
@@ -2409,6 +2416,340 @@ test('upload: an XHR to an ordinary third-party host is classified, not an uploa
   assert.equal(captured[0].coverage, 'open_web');
   assert.equal(xhr.aborted, false);
   assert.equal(logs.filter((l) => l.level === 'warn').length, 0);
+});
+
+// ── POST-shaped uploads: the body says "file" (2026-10-06) ─────────
+//
+// Perplexity's attachments, observed in public client code
+// (henrique-coder/perplexity-webui-scraper core/files.py; helallao/perplexity-ai
+// client.py): /rest/uploads/create_upload_url answers an S3 POST policy, and
+// the page POSTs a multipart FORM — the signing fields plus the file — to
+// ppl-ai-file-upload.s3.amazonaws.com (images go to Cloudinary the same way).
+// No object-write header, so the header-only predicate passed every one of
+// them unscreened. What only an upload carries is the FILE in its body.
+
+const S3_POST = 'https://ppl-ai-file-upload.s3.amazonaws.com/';
+
+function s3PolicyForm(file, name = 'cv.txt') {
+  const form = new FormData();
+  form.append('key', `web/direct-files/u1/f1/${name}`);
+  form.append('x-amz-credential', 'ASIAZ4TQXY3EXAMPLE7Q/20261006/us-east-1/s3/aws4_request');
+  form.append('x-amz-security-token', 'IQoJb3JpZ2luX2VjEJr//////////wEaCXVzLWVhc3QtMSJH');
+  form.append('policy', 'eyJleHBpcmF0aW9uIjoiMjAyNi0xMC0wNlQwMDowMDowMFoifQ==');
+  form.append('x-amz-signature', '3f1e2d4c5b6a79880716253443526170f0e1d2c3b4a59687');
+  form.append('file', file, name);
+  return form;
+}
+
+test('upload: a POST-policy form carrying a file is held and screened (Perplexity to S3)', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; });
+
+  await sandbox.fetch(S3_POST, { method: 'POST', body: s3PolicyForm(new Blob(['Jane Roe, SSN 078-05-1120'], { type: 'text/plain' })) });
+
+  assert.equal(captured.length, 1, 'the form reached the desktop app');
+  const raw = rawOf(captured[0]).toString('utf8');
+  assert.match(raw, /^POST \/ HTTP\/1\.1\r\nHost: ppl-ai-file-upload\.s3\.amazonaws\.com\r\n/);
+  assert.match(raw, /content-type: multipart\/form-data; boundary=/i);
+  assert.match(raw, /Jane Roe, SSN 078-05-1120/, 'the file part itself was screened');
+  assert.match(raw, /name="key"\r\n\r\nweb\/direct-files\/u1\/f1\/cv\.txt/, 'the object key (the filename) was screened');
+  // The signing fields are a credential minted for this one upload, like a
+  // pre-signed URL's query string: they never cross the seam, so the screener
+  // cannot mask them into an upload the storage provider refuses.
+  for (const name of ['x-amz-credential', 'x-amz-security-token', 'policy', 'x-amz-signature']) {
+    assert.ok(!raw.includes(`name="${name}"`), `${name} crossed the seam`);
+  }
+  assert.ok(!raw.includes('ASIAZ4TQXY3EXAMPLE7Q'));
+  assert.equal(netCalls.length, 1, 'a clean allow releases the upload');
+  assert.equal(netCalls[0][0], S3_POST);
+  const shipped = Buffer.from(netCalls[0][1].body).toString('utf8');
+  assert.match(shipped, /ASIAZ4TQXY3EXAMPLE7Q/, 'the page\'s own signed form is what an allow releases');
+  assert.match(shipped, /Jane Roe, SSN 078-05-1120/);
+});
+
+test('upload: a form with no signature field is screened whole, whatever its fields are called', async () => {
+  const captured = [];
+  const { sandbox } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; });
+  const form = new FormData();
+  form.append('timestamp', '2026-10-06 note for Jane Roe');
+  form.append('api_key', 'not-a-signed-form');
+  form.append('file', new Blob(['hello'], { type: 'text/plain' }), 'a.txt');
+  await sandbox.fetch('https://uploads.example.net/form', { method: 'POST', body: form });
+  const raw = rawOf(captured[0]).toString('utf8');
+  assert.match(raw, /name="timestamp"\r\n\r\n2026-10-06 note for Jane Roe/);
+  assert.match(raw, /name="api_key"/);
+});
+
+test('upload: a signed form whose screen found something is blocked, never re-sent without its signature', async () => {
+  const { sandbox, netCalls, logs } = makeWorld(() => rebuiltVerdict(
+    ['POST / HTTP/1.1', 'Host: ppl-ai-file-upload.s3.amazonaws.com', 'content-type: multipart/form-data; boundary=FRESH'],
+    Buffer.from('--FRESH\r\nContent-Disposition: form-data; name="file"; filename="cv.txt"\r\n\r\nJane Roe, SSN SSN_ab12\r\n--FRESH--\r\n'),
+    1
+  ));
+  await assert.rejects(
+    sandbox.fetch(S3_POST, { method: 'POST', body: s3PolicyForm(new Blob(['Jane Roe, SSN 078-05-1120'], { type: 'text/plain' })) }),
+    (e) => {
+      assert.match(e.message, /signed form/);
+      assert.match(e.message, /Nothing left your machine/);
+      assert.match(e.message, /\breason=upload-signed-form\b/);
+      return true;
+    }
+  );
+  assert.equal(netCalls.length, 0, 'neither the original nor a rebuilt form left');
+  assertBlocked(logs, 'upload-signed-form', 'unsupported');
+});
+
+test('upload: an XHR signed form is screened without its signing fields and blocked on a redact', async () => {
+  const captured = [];
+  const { sandbox, logs } = makeXhrWorld((msg) => {
+    captured.push(msg.requestB64);
+    return rebuiltVerdict(['POST / HTTP/1.1', 'Host: ppl-ai-file-upload.s3.amazonaws.com',
+      'content-type: multipart/form-data; boundary=FRESH'], Buffer.from('--FRESH--\r\n'), 1);
+  });
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', S3_POST, true);
+  xhr.send(s3PolicyForm(new Blob(['Jane Roe, SSN 078-05-1120'], { type: 'text/plain' })));
+  await waitFor(() => xhr.aborted);
+  assert.deepEqual(xhr.sent, [], 'nothing was uploaded');
+  assert.ok(!rawOf(captured[0]).toString('utf8').includes('x-amz-signature'), 'the signature never crossed the seam');
+  assertBlocked(logs, 'upload-signed-form', 'unsupported');
+});
+
+test('upload: an image the screener withholds from a POST-policy form is blocked with the file-type-setting notice', async () => {
+  const { sandbox, netCalls, logs } = makeWorld(() => {
+    const v = rebuiltVerdict(['POST / HTTP/1.1', 'Host: ppl-ai-file-upload.s3.amazonaws.com',
+      'content-type: multipart/form-data; boundary=FRESH'], Buffer.from('--FRESH--\r\n'), 0);
+    v.receipt.unchecked = false;
+    v.receipt.unscreened = [pngUnscreened];
+    return v;
+  });
+
+  await assert.rejects(
+    sandbox.fetch(S3_POST, { method: 'POST', body: s3PolicyForm(new Blob([Uint8Array.from([0x89, 0x50, 0x4e, 0x47])], { type: 'image/png' }), 'scan.png') }),
+    (e) => {
+      assert.match(e.message, /this image was blocked by your file-type setting, so it was not sent/);
+      assert.match(e.message, /Nothing left your machine/);
+      assert.match(e.message, /\breason=upload-withheld\b/);
+      return true;
+    }
+  );
+  assert.equal(netCalls.length, 0, 'no placeholder was uploaded into the bucket');
+  assertBlocked(logs, 'upload-withheld', 'unsupported');
+});
+
+test('upload: an XHR form carrying a file is held too', async () => {
+  const captured = [];
+  const { sandbox } = makeXhrWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; });
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://api.cloudinary.com/v1_1/pplx/image/upload', true);
+  xhr.send(s3PolicyForm(new Blob(['note'], { type: 'text/plain' }), 'note.txt'));
+  await waitFor(() => xhr.sent.length === 1);
+  assert.equal(captured.length, 1, 'the form was screened before it left');
+});
+
+test('upload: a file POSTed to the AI host itself on a path its allow-list does not name is held', async () => {
+  // A narrowed host passes every path its list does not name — right for
+  // sign-in and telemetry, a leak for an upload. An upload that the catalog
+  // does not recognise must fail closed, never pass.
+  const captured = [];
+  const { sandbox } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; }, CHATGPT_PATHS);
+  const form = new FormData();
+  form.append('file', new Blob(['Jane Roe 078-05-1120'], { type: 'text/plain' }), 'notes.txt');
+  await sandbox.fetch('https://chatgpt.com/backend-api/files/upload_direct', { method: 'POST', body: form });
+  assert.equal(captured.length, 1, 'the unlisted same-origin upload was screened');
+  assert.match(rawOf(captured[0]).toString('utf8'), /^POST \/backend-api\/files\/upload_direct HTTP\/1\.1\r\nHost: chatgpt\.com\r\n/);
+});
+
+test('upload: raw file bodies by type — a typed Blob, a tus PATCH, a File — are held', async () => {
+  const captured = [];
+  const { sandbox } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; }, { File });
+  await sandbox.fetch('https://uploads.example.net/blob', { method: 'POST', body: new Blob(['%PDF-1.7'], { type: 'application/pdf' }) });
+  await sandbox.fetch('https://uploads.example.net/files/abc', {
+    method: 'PATCH',
+    headers: { 'tus-resumable': '1.0.0', 'upload-offset': '0', 'content-type': 'application/offset+octet-stream' },
+    body: Uint8Array.from([1, 2, 3])
+  });
+  await sandbox.fetch('https://uploads.example.net/raw', { method: 'POST', body: new File(['hello'], 'hello.txt', { type: 'text/plain' }) });
+  assert.equal(captured.length, 3);
+});
+
+test('upload: a form carried on a Request object, and a deferred fetch of one, are in scope too', async () => {
+  const captured = [];
+  let deferredSends = 0;
+  const { sandbox } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; },
+    { fetchLater() { deferredSends++; } });
+  const form = () => {
+    const f = new FormData();
+    f.append('file', new Blob(['Jane Roe 078-05-1120'], { type: 'text/plain' }), 'n.txt');
+    return f;
+  };
+  // A Request's own Content-Type (multipart, minted by the Request) stands in
+  // for the body we cannot see through it.
+  await sandbox.fetch(new Request('https://uploads.example.net/r', { method: 'POST', body: form() }));
+  assert.equal(captured.length, 1, 'the Request-borne form was screened');
+  assert.throws(() => sandbox.fetchLater('https://uploads.example.net/later', { method: 'POST', body: form() }),
+    /cannot be held for screening/);
+  assert.equal(deferredSends, 0, 'a deferred upload cannot be held, so it is refused');
+});
+
+test('upload: a streamed POST body cannot be looked into, so it is held and refused', async () => {
+  let meshAsked = false;
+  const { sandbox, netCalls, logs } = makeWorld(() => { meshAsked = true; return allowVerdict; });
+  const body = new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1])); c.close(); } });
+  await assert.rejects(sandbox.fetch('https://uploads.example.net/stream', { method: 'POST', body, duplex: 'half' }));
+  assert.equal(meshAsked, false);
+  assert.equal(netCalls.length, 0, 'an unreadable upload never leaves');
+  assert.match(assertBlocked(logs, 'uncapturable-stream', 'unsupported'), /\bscope=upload\b/);
+});
+
+test('upload: a beacon carrying a file is refused; telemetry beacons are not', () => {
+  const sent = [];
+  const { sandbox, logs } = makeWorld(() => allowVerdict, {
+    navigator: { sendBeacon(url, data) { sent.push(url); return true; } }
+  });
+  const form = new FormData();
+  form.append('file', new Blob(['x'], { type: 'image/png' }), 'a.png');
+  assert.equal(sandbox.navigator.sendBeacon('https://collector.example.net/b', form), false);
+  assert.equal(sandbox.navigator.sendBeacon('https://collector.example.net/t', new Blob(['{"e":1}'], { type: 'application/json' })), true);
+  assert.equal(sandbox.navigator.sendBeacon('https://collector.example.net/t', '{"e":1}'), true);
+  assert.deepEqual(sent, ['https://collector.example.net/t', 'https://collector.example.net/t']);
+  assert.match(assertBlocked(logs, 'uncapturable-beacon'), /\bscope=upload\b/);
+});
+
+test('upload: the body test keeps the false-positive floor — telemetry shapes are never claimed as uploads', async () => {
+  // Every bodied request is classified since super PR #15, so these reach the
+  // desktop app — as ordinary open-web capture, never as an upload (which the
+  // guard screens regardless).
+  const captured = [];
+  const { sandbox, netCalls, logs } = makeDebugWorld((msg) => { captured.push(msg); return allowVerdict; });
+  const strings = new FormData();
+  strings.append('event', 'page_view');
+  const passers = [
+    ['https://o123.ingest.sentry.io/api/1/envelope/', { method: 'POST', body: new Blob(['{"e":1}'], { type: 'application/x-sentry-envelope' }) }],
+    ['https://api.segment.io/v1/t', { method: 'POST', body: new Blob(['{"a":1}'], { type: 'application/json' }) }],
+    ['https://browser-intake-datadoghq.com/api/v2/rum', { method: 'POST', body: new Blob(['x']) }],
+    ['https://www.google-analytics.com/g/collect', { method: 'POST', body: new URLSearchParams('v=2&tid=G-1') }],
+    ['https://forms.example.net/subscribe', { method: 'POST', body: strings }],
+    ['https://metrics.example.net/bin', { method: 'POST', body: Uint8Array.from([1, 2, 3]) }],
+    ['https://api.example.net/item/1', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{"title":"x"}' }]
+  ];
+  for (const [url, init] of passers) await sandbox.fetch(url, init);
+  assert.ok(captured.every((m) => m.coverage === 'open_web'), 'not one of these may be claimed as an upload');
+  assert.equal(netCalls.length, passers.length);
+  assert.equal(logs.filter((l) => l.level === 'warn').length, 0);
+});
+
+test('upload: on a search page that screens nothing, a file POST is classified, never claimed as an upload', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => { captured.push(msg); return allowVerdict; }, {
+    location: { href: 'https://www.google.com/', origin: 'https://www.google.com', hostname: 'www.google.com' },
+    SONOMOS_WEB_HOSTS: ['chatgpt.com', 'www.google.com'],
+    SONOMOS_CAPTURE_PATHS: { 'www.google.com': [] }
+  });
+  const form = new FormData();
+  form.append('encoded_image', new Blob(['x'], { type: 'image/jpeg' }), 'photo.jpg');
+  await sandbox.fetch('https://lens.google.com/v3/upload', { method: 'POST', body: form });
+  assert.ok(captured.every((m) => m.coverage === 'open_web'),
+    'the catalog says this surface has no screened submission path');
+  assert.equal(netCalls.length, 1);
+});
+
+// ── audio and voice (Nate, 2026-10-06: "Allow audio, disclose") ─────
+//
+// Locke cannot screen audio until V2, so the desktop app's answer for an audio
+// upload is a clean allow by default, and a block when the device setting or
+// the team policy says Block. The extension does not decide that, on either
+// side: it holds the upload like any other file, relays it, and obeys the
+// verdict. These tests pin that the hold-and-relay path lets audio through on
+// an allow with the page's own bytes, stops it on a block, and is no looser
+// for video or when the desktop app cannot answer.
+
+const DICTATION_URL = 'https://chatgpt.com/backend-api/transcribe';
+
+function dictationForm(type = 'audio/webm', name = 'audio.webm') {
+  const form = new FormData();
+  form.append('file', new Blob([Uint8Array.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86])], { type }), name);
+  form.append('duration_seconds', '4.2');
+  return form;
+}
+
+test('audio: dictation (a File in a form to an unlisted ChatGPT path) is relayed and, on a clean allow, sent as the page built it', async () => {
+  const captured = [];
+  const { sandbox, netCalls, logs } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; }, CHATGPT_PATHS);
+  await sandbox.fetch(DICTATION_URL, { method: 'POST', body: dictationForm() });
+  assert.equal(captured.length, 1, 'held and relayed, so the app (and a team policy) can decide');
+  const raw = rawOf(captured[0]).toString('latin1');
+  assert.match(raw, /^POST \/backend-api\/transcribe HTTP\/1\.1\r\nHost: chatgpt\.com\r\n/);
+  assert.match(raw, /filename="audio\.webm"/);
+  assert.match(raw, /Content-Type: audio\/webm/i);
+  assert.equal(netCalls.length, 1, 'allowed: the upload leaves');
+  const shipped = Buffer.from(netCalls[0][1].body);
+  assert.ok(shipped.includes(Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86])), 'the clip itself went out unchanged');
+  assert.match(shipped.toString('latin1'), /filename="audio\.webm"/);
+  assert.equal(logs.filter((l) => l.level === 'warn').length, 0);
+});
+
+test('audio: a raw recorder blob and an XHR form are relayed and released the same way', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; });
+  await sandbox.fetch('https://uploads.example.net/voice', {
+    method: 'POST', body: new Blob([Uint8Array.from([0x1a, 0x45, 0xdf, 0xa3])], { type: 'audio/webm;codecs=opus' })
+  });
+  await sandbox.fetch('https://uploads.example.net/voice-ogg', {
+    method: 'POST', headers: { 'content-type': 'audio/ogg' }, body: Uint8Array.from([0x4f, 0x67, 0x67, 0x53])
+  });
+  assert.equal(captured.length, 2);
+  assert.equal(netCalls.length, 2);
+
+  const xhrCaptured = [];
+  const world = makeXhrWorld((msg) => { xhrCaptured.push(msg.requestB64); return allowVerdict; });
+  const xhr = new world.sandbox.XMLHttpRequest();
+  xhr.open('POST', DICTATION_URL, true);
+  xhr.send(dictationForm('audio/mp4', 'audio.m4a'));
+  await waitFor(() => xhr.sent.length === 1);
+  assert.equal(xhrCaptured.length, 1);
+  assert.equal(xhr.aborted, false);
+});
+
+test('audio: when the desktop app says Block (device setting or team policy) the upload never leaves, fetch and XHR', async () => {
+  const block = () => ({ ok: true, receipt: { decision: 'block', reason: '1 item(s) could not be examined (file: audio/webm)', redactedCount: 0 } });
+  const { sandbox, netCalls, logs } = makeWorld(block, CHATGPT_PATHS);
+  await assert.rejects(sandbox.fetch(DICTATION_URL, { method: 'POST', body: dictationForm() }), blockedError);
+  assert.equal(netCalls.length, 0);
+  assert.match(assertBlocked(logs, 'decision-block', 'policy'), /file: audio\/webm/);
+
+  const world = makeXhrWorld(block);
+  const xhr = new world.sandbox.XMLHttpRequest();
+  xhr.open('POST', DICTATION_URL, true);
+  xhr.send(dictationForm());
+  await waitFor(() => xhr.aborted);
+  assert.deepEqual(xhr.sent, [], 'the blocked clip was not uploaded');
+});
+
+test('audio: the extension adds no pass of its own — a desktop app that cannot answer still blocks it', async () => {
+  const { sandbox, netCalls } = makeWorld(() => ({ ok: false, code: 'no-bridge', message: 'not found' }), CHATGPT_PATHS);
+  await assert.rejects(sandbox.fetch(DICTATION_URL, { method: 'POST', body: dictationForm() }));
+  assert.equal(netCalls.length, 0);
+});
+
+test('audio: video and other unreadable files are held exactly as before, and a block verdict stops them', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => {
+    captured.push(msg.requestB64);
+    return { ok: true, receipt: { decision: 'block', reason: '1 item(s) could not be examined (file: video/mp4)', redactedCount: 0 } };
+  }, CHATGPT_PATHS);
+  for (const [type, name] of [['video/mp4', 'clip.mp4'], ['application/pdf', 'doc.pdf'], ['application/octet-stream', 'blob.bin']]) {
+    await assert.rejects(sandbox.fetch(DICTATION_URL, { method: 'POST', body: dictationForm(type, name) }), blockedError, type);
+  }
+  assert.equal(captured.length, 3, 'every one was held and relayed');
+  assert.equal(netCalls.length, 0);
+});
+
+test('pre-consent: a form carrying a file is in upload scope by its TYPE alone', async () => {
+  let captures = 0;
+  const { sandbox } = makeWorld(() => { captures++; return allowVerdict; }, { navigator: { userAgent: 'Chrome/130.0 Edg/130.0' } });
+  await assert.rejects(sandbox.fetch(S3_POST, { method: 'POST', body: s3PolicyForm(new Blob(['private'], { type: 'text/plain' })) }), /Data sharing/);
+  assert.equal(captures, 0);
 });
 
 // ── frames with no url of their own ────────────────────────────────
@@ -4100,6 +4441,43 @@ test('pre-consent XHR keeps only routing metadata, not query credentials', () =>
   assert.equal(xhr.__sonomos.url.pathname, '/upload');
 });
 
+// ── images (Nate, 2026-10-06: images and NSFW are V1.X) ─────────────
+//
+// Image screening is dormant in V1: the desktop app answers a clean allow for
+// an image by default (sent unscreened) and a block when the device setting or
+// the team policy says Block. The extension, as with audio, holds the upload,
+// relays it and obeys; it never decides.
+
+function imageForm(type = 'image/png', name = 'screenshot.png') {
+  const form = new FormData();
+  form.append('file', new Blob([Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])], { type }), name);
+  return form;
+}
+
+test('images: an upload is relayed and, on the allow the app gives by default, sent as the page built it', async () => {
+  const captured = [];
+  const { sandbox, netCalls, logs } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; }, CHATGPT_PATHS);
+  await sandbox.fetch(DICTATION_URL, { method: 'POST', body: imageForm() });
+  assert.equal(captured.length, 1, 'held and relayed, so the app (and a team policy) can decide');
+  assert.match(rawOf(captured[0]).toString('latin1'), /Content-Type: image\/png/i);
+  assert.equal(netCalls.length, 1, 'allowed: the image leaves, unscreened');
+  assert.ok(Buffer.from(netCalls[0][1].body).includes(Buffer.from([0x89, 0x50, 0x4e, 0x47])), 'the image itself went out unchanged');
+  assert.equal(logs.filter((l) => l.level === 'warn').length, 0);
+});
+
+test('images: when the desktop app says Block the image never leaves, and the notice names the file-type setting', async () => {
+  const block = () => ({ ok: true, receipt: { decision: 'block', reason: '1 item(s) could not be examined (file: image/png)', redactedCount: 0 } });
+  const { sandbox, netCalls } = makeWorld(block, CHATGPT_PATHS);
+  await assert.rejects(sandbox.fetch(DICTATION_URL, { method: 'POST', body: imageForm() }), blockedError);
+  assert.equal(netCalls.length, 0);
+});
+
+test('images: the extension adds no pass of its own, a desktop app that cannot answer still blocks it', async () => {
+  const { sandbox, netCalls } = makeWorld(() => ({ ok: false, code: 'no-bridge', message: 'not found' }), CHATGPT_PATHS);
+  await assert.rejects(sandbox.fetch(DICTATION_URL, { method: 'POST', body: imageForm() }));
+  assert.equal(netCalls.length, 0);
+});
+
 // ── the discovery gate without consent, and for unholdable sends ───
 //
 // Every request goes to the classifier now — but only when it CAN. Without the
@@ -4238,5 +4616,538 @@ test('fail-open: oversize, stream and unreadable bodies send unscreened in an op
     await assert.rejects(expired.sandbox.fetch(AI_URL, { method: 'POST', body, duplex: 'half' }), blockedError);
     assert.equal(expired.netCalls.length, 0);
     assert.equal(expired.unchecked.length, 0);
+  }
+});
+
+// ── Locke signed out: only a request nobody called AI may pass ─────────────
+//
+// The bug (manual test 2026-10-12): since super PR #15 every bodied request on
+// every site is held, and with Locke off `decide()` blocked all of them — every
+// login, form and POST, including Clerk's sign-in call, so the user could not
+// even sign back in to Locke.
+//
+// The rule, after two adversarial reviews: the pass happens ONLY when Locke is
+// DELIBERATELY signed out. The native host says so with the relay code
+// `locke-signed-out` (its connect failed AND the desktop app's capture lease
+// says signed-out AND no team lock). `no-bridge` and `bridge-unreachable` do
+// NOT pass: "unreachable" cannot be told from "crashed mid-screen". Even on
+// `locke-signed-out` only `open_web` passes, from a readable page that is not
+// an AI surface or API host and has no AI ancestor frame, to a destination
+// that is not a catalog API host and not loopback/private/local, with the
+// generated API-host list loaded, and never an upload.
+
+const OPEN_WEB_URL = 'https://accounts.example.com/signin/v2/challenge';
+const CLERK_URL = 'https://clerk.sonomos.ai/v1/client/sign_ins';
+const GOOGLE_LOGIN_URL = 'https://accounts.google.com/v3/signin/_/AccountsSignInUi/data/batchexecute';
+const CATALOG_HOST_URL = 'https://chatgpt.com/backend-api/me'; // off CHATGPT_PATHS's capture paths
+const CAPTURE_PATH_URL = 'https://chatgpt.com/backend-api/conversation';
+const SIGNED_OUT = 'locke-signed-out';
+const NO_PASS_CODES = ['no-bridge', 'bridge-unreachable'];
+const SIGNED_OUT_COPY = /Locke is signed out.*Sign in to the Locke desktop app, then try again/;
+
+// The REAL generated catalog (web hosts, providers, capture paths, API hosts),
+// not the harness's two-host stand-in: AI API hosts read `open_web` (they are
+// not web surfaces), and an AI page can hand a prompt to a host the catalog
+// never names.
+const GENERATED = (() => {
+  const ctx = {};
+  ctx.globalThis = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(readFileSync(new URL('../content/web-surfaces.generated.js', import.meta.url), 'utf8'), ctx);
+  return ctx;
+})();
+function realCatalogGlobals(pageHref, { ancestors, base, noApi = false, emptyApi = false, framed = false, referrer } = {}) {
+  let loc;
+  try {
+    const u = new URL(pageHref);
+    loc = { href: u.href, origin: u.origin, hostname: u.hostname };
+  } catch {
+    loc = { href: pageHref, origin: 'null', hostname: '' };
+  }
+  if (ancestors) loc.ancestorOrigins = ancestors;
+  const g = {
+    location: loc,
+    SONOMOS_WEB_HOSTS: [...GENERATED.SONOMOS_WEB_HOSTS],
+    SONOMOS_WEB_PROVIDERS: { ...GENERATED.SONOMOS_WEB_PROVIDERS },
+    SONOMOS_CAPTURE_PATHS: JSON.parse(JSON.stringify(GENERATED.SONOMOS_CAPTURE_PATHS)),
+    SONOMOS_SKIP_PATH_SEGMENTS: JSON.parse(JSON.stringify(GENERATED.SONOMOS_SKIP_PATH_SEGMENTS))
+  };
+  if (!noApi) g.SONOMOS_API_HOSTS = emptyApi ? [] : [...GENERATED.SONOMOS_API_HOSTS];
+  if (base !== undefined || referrer !== undefined) {
+    g.document = { ...(base !== undefined ? { baseURI: base } : {}), ...(referrer !== undefined ? { referrer } : {}) };
+  }
+  // The harness's `window.top` is the window itself unless a test says otherwise.
+  if (framed) g.top = {};
+  return g;
+}
+const REVIEW_PROMPT = JSON.stringify({ model: 'gpt-4o', messages: [{ role: 'user', content: 'Patient Jane Roe SSN 078-05-1120' }] });
+const NON_AI_PAGE = 'https://www.sonomos.ai/';
+const BYOK = 'https://chat.example-byok.app/';
+const down = (code) => () => ({ ok: false, code, message: 'down' });
+// Run one POST through fetch; resolves 'SENT' | 'BLOCKED' and the world.
+async function fetchOutcome(code, globals, url, init = { method: 'POST', body: REVIEW_PROMPT }) {
+  const w = makeDebugWorld(down(code), globals);
+  let outcome;
+  try { await w.sandbox.fetch(url, init); outcome = w.netCalls.length ? 'SENT' : 'no-net'; }
+  catch (e) { outcome = blockedError(e) ? 'BLOCKED' : `ERR:${e.message}`; }
+  return { outcome, w };
+}
+
+test('locke-signed-out: open_web from a non-AI page sends the original (Clerk, Google login), under its own reason', async () => {
+  const captured = [];
+  const w = makeDebugWorld((msg) => {
+    captured.push(msg);
+    return { ok: false, code: SIGNED_OUT, message: 'signed out' };
+  }, realCatalogGlobals(NON_AI_PAGE));
+  for (const url of [OPEN_WEB_URL, CLERK_URL, GOOGLE_LOGIN_URL]) {
+    await w.sandbox.fetch(url, { method: 'POST', body: 'user=a&pass=b' });
+  }
+  assert.deepEqual(captured.map((m) => m.coverage), ['open_web', 'open_web', 'open_web']);
+  assert.equal(w.netCalls.length, 3, 'all three logins went out');
+  assert.equal(w.netCalls[0][0], OPEN_WEB_URL);
+  const line = assertReason(w.logs, 'locke-unreachable-unclassified', 'debug');
+  assert.match(line, /\bcode=locke-signed-out\b/);
+  assert.match(line, /\bcoverage=open_web\b/);
+  // Distinguishable from a screened allow and from the user's fail-open window.
+  assert.ok(!findLine(w.logs, 'allow'));
+  assert.ok(!findLine(w.logs, 'unchecked-fail-open'));
+  assert.equal(w.unchecked.length, 0, 'not tallied as an unchecked send: it was never judged AI');
+});
+
+test('locke-signed-out: an open_web XHR is released too', async () => {
+  const w = makeXhrWorld(down(SIGNED_OUT), { extraGlobals: realCatalogGlobals(NON_AI_PAGE) });
+  const xhr = new w.sandbox.XMLHttpRequest();
+  xhr.open('POST', CLERK_URL, true);
+  xhr.send('a=b');
+  await waitFor(() => xhr.sent.length === 1);
+  assert.deepEqual(xhr.sent, ['a=b']);
+  assert.equal(xhr.aborted, false);
+  assert.ok(!w.logs.some((l) => l.level === 'warn'), 'a pass is not a warning');
+});
+
+test('no-bridge and bridge-unreachable BLOCK open_web, fetch and XHR (reverses ea36703/56dffaa)', async () => {
+  for (const code of NO_PASS_CODES) {
+    const captured = [];
+    const w = makeDebugWorld((msg) => { captured.push(msg); return { ok: false, code, message: 'down' }; },
+      realCatalogGlobals(NON_AI_PAGE));
+    for (const url of [OPEN_WEB_URL, CLERK_URL, GOOGLE_LOGIN_URL]) {
+      await assert.rejects(w.sandbox.fetch(url, { method: 'POST', body: 'a=b' }), blockedError, `${code} ${url}`);
+    }
+    assert.deepEqual(captured.map((m) => m.coverage), ['open_web', 'open_web', 'open_web'], code);
+    assert.equal(w.netCalls.length, 0, code);
+    assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'), code);
+
+    const x = makeXhrWorld(down(code), { extraGlobals: realCatalogGlobals(NON_AI_PAGE) });
+    const xhr = new x.sandbox.XMLHttpRequest();
+    xhr.open('POST', CLERK_URL, true);
+    xhr.send('a=b');
+    await waitFor(() => xhr.aborted);
+    assert.deepEqual(xhr.sent, [], code);
+  }
+  // And the words: no-bridge still says the connector did not start;
+  // bridge-unreachable keeps the sentence it had at 470d493.
+  const nb = await blockedByRelayCode('no-bridge');
+  assert.equal(nb.sonomosBlockReason, 'connector-not-started');
+  const bu = await blockedByRelayCode('bridge-unreachable');
+  assert.equal(bu.sonomosBlockReason, 'bridge-unreachable');
+});
+
+test('bridge-dropped blocks with the "try again shortly" copy bridge-unreachable had at 470d493', async () => {
+  const xhr = await blockedByRelayCode('bridge-dropped', 'eof');
+  assert.equal(xhr.sonomosBlockReason, 'bridge-dropped');
+  assert.equal(xhr.sonomosBlockKind, 'unavailable');
+  assert.match(xhr.sonomosBlockMessage,
+    /the Locke desktop app answered, but it could not reach its screening service — this is NOT a sensitive-data block\. Try again shortly; if it keeps happening, restart Locke\./);
+  assert.doesNotMatch(xhr.sonomosBlockMessage, /Start it/);
+  assert.deepEqual(xhr.sent, []);
+  // Also on open_web from a non-AI page: Locke was reached, so nothing passes.
+  const { outcome, w } = await fetchOutcome('bridge-dropped', realCatalogGlobals(NON_AI_PAGE), OPEN_WEB_URL);
+  assert.equal(outcome, 'BLOCKED');
+  assert.equal(w.netCalls.length, 0);
+  assertBlocked(w.logs, 'bridge-dropped');
+});
+
+test('locke-signed-out: catalog_host, capture_path and upload block with the signed-out copy', async () => {
+  // catalog_host (an AI host off its prompt paths) — and, since 2026-10-16,
+  // a same-host upload off those paths is `capture_path`: a user's file on
+  // the AI host itself never goes to the classifier (SP14: claude.ai moved
+  // its attach button and every .txt left raw). Both block here all the same.
+  {
+    const captured = [];
+    const w = makeDebugWorld((msg) => { captured.push(msg); return { ok: false, code: SIGNED_OUT, message: 'x' }; }, CHATGPT_PATHS);
+    await assert.rejects(w.sandbox.fetch(CATALOG_HOST_URL, { method: 'POST', body: '{}' }), blockedError);
+    await assert.rejects(w.sandbox.fetch(DICTATION_URL, { method: 'POST', body: dictationForm() }), blockedError);
+    assert.deepEqual(captured.map((m) => m.coverage), ['catalog_host', 'capture_path']);
+    assert.equal(w.netCalls.length, 0);
+    assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'));
+    const line = assertBlocked(w.logs, 'locke-signed-out');
+    assert.match(line, /kind=unavailable/);
+  }
+  // capture_path
+  {
+    const w = makeWorld(down(SIGNED_OUT), CHATGPT_PATHS);
+    await assert.rejects(w.sandbox.fetch(CAPTURE_PATH_URL, { method: 'POST', body: '{"prompt":"x"}' }),
+      (e) => blockedError(e) && SIGNED_OUT_COPY.test(e.message));
+    assert.equal(w.netCalls.length, 0);
+    const d = makeWorld(down(SIGNED_OUT));
+    await assert.rejects(d.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
+    assert.equal(d.netCalls.length, 0);
+  }
+  // SCOPE.UPLOAD, fetch and XHR
+  {
+    const form = () => s3PolicyForm(new Blob(['Jane Roe, SSN 078-05-1120'], { type: 'text/plain' }));
+    const w = makeWorld(down(SIGNED_OUT));
+    await assert.rejects(w.sandbox.fetch(S3_POST, { method: 'POST', body: form() }),
+      (e) => blockedError(e) && SIGNED_OUT_COPY.test(e.message));
+    assert.equal(w.netCalls.length, 0);
+    assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'));
+    const world = makeXhrWorld(down(SIGNED_OUT));
+    const xhr = new world.sandbox.XMLHttpRequest();
+    xhr.open('POST', S3_POST, true);
+    xhr.send(form());
+    await waitFor(() => xhr.aborted);
+    assert.deepEqual(xhr.sent, []);
+    assert.equal(xhr.sonomosBlockReason, 'locke-signed-out');
+    assert.match(xhr.sonomosBlockMessage, SIGNED_OUT_COPY);
+  }
+  // The same on every no-pass code: catalog hosts never pass.
+  for (const code of NO_PASS_CODES) {
+    const w = makeDebugWorld(down(code), CHATGPT_PATHS);
+    await assert.rejects(w.sandbox.fetch(CATALOG_HOST_URL, { method: 'POST', body: '{}' }), blockedError, code);
+    assert.equal(w.netCalls.length, 0, code);
+  }
+});
+
+test('locke-signed-out: the copy is honest and the code is in the evidence lists', () => {
+  assert.match(SHIM_SRC, /'locke-signed-out': \['unavailable',\s*'Locke is signed out, so this request could not be screened/);
+  assert.ok(RELAY_FAILURES_PROVING_NO_SCREEN.includes('locke-signed-out'));
+  assert.ok(RELAY_FAILURES_PROVING_NO_VERDICT.includes('bridge-dropped'));
+  assert.deepEqual(/const UNREACHABLE_RELAY_CODES = new Set\(\[([^\]]*)\]\)/.exec(SHIM_SRC)[1].trim(), "'locke-signed-out'");
+});
+
+test('catalog API hosts block from a non-AI page, both codes (reviewer finding 1)', async () => {
+  const targets = [
+    'https://api.openai.com/v1/chat/completions',
+    'https://api.anthropic.com/v1/messages',
+    'https://openrouter.ai/api/v1/chat/completions',
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent',
+    'https://bedrock-runtime.us-east-1.amazonaws.com/model/x/invoke',
+    'https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com/model/x/invoke',
+    'https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/l:predict',
+    'https://api.openai.com%2e/v1/chat/completions',
+    'https://CHATGPT.COM/backend-api/me', 'https://chatgpt.com./backend-api/me',
+    'https://api.individual.githubcopilot.com/chat/completions'
+  ];
+  for (const code of [SIGNED_OUT, ...NO_PASS_CODES]) {
+    for (const url of targets) {
+      const { outcome, w } = await fetchOutcome(code, realCatalogGlobals(NON_AI_PAGE), url);
+      assert.equal(outcome, 'BLOCKED', `${code} ${url}`);
+      assert.equal(w.netCalls.length, 0, `${code} ${url}`);
+      assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'), url);
+    }
+  }
+  // Same rule on the XHR path.
+  const x = makeXhrWorld(down(SIGNED_OUT), { extraGlobals: realCatalogGlobals(NON_AI_PAGE) });
+  const xhr = new x.sandbox.XMLHttpRequest();
+  xhr.open('POST', 'https://api.openai.com/v1/chat/completions', true);
+  xhr.send(REVIEW_PROMPT);
+  await waitFor(() => xhr.aborted);
+  assert.deepEqual(xhr.sent, []);
+});
+
+test('a wildcard api host does not over-match (the label rule)', async () => {
+  const { outcome } = await fetchOutcome(SIGNED_OUT, realCatalogGlobals(NON_AI_PAGE),
+    'https://bucket.s3.us-east-1.amazonaws.com/x', { method: 'POST', body: 'a=b' });
+  assert.equal(outcome, 'SENT');
+});
+
+test('a missing or empty SONOMOS_API_HOSTS list refuses the pass (round 2 a)', async () => {
+  for (const opt of [{ noApi: true }, { emptyApi: true }]) {
+    for (const code of [SIGNED_OUT, ...NO_PASS_CODES]) {
+      const { outcome, w } = await fetchOutcome(code, realCatalogGlobals(BYOK, opt), 'https://api.openai.com/v1/chat/completions');
+      assert.equal(outcome, 'BLOCKED', `${code} ${JSON.stringify(opt)}`);
+      assert.equal(w.netCalls.length, 0);
+    }
+    // Even a login from a plain page: no list, no pass.
+    const { outcome } = await fetchOutcome(SIGNED_OUT, realCatalogGlobals(NON_AI_PAGE, opt), CLERK_URL, { method: 'POST', body: 'a=b' });
+    assert.equal(outcome, 'BLOCKED', JSON.stringify(opt));
+  }
+});
+
+// ── same-host uploads off the allow-list (SP14, 2026-10-16) ─────────
+//
+// claude.ai moved its attach button from /api/{org}/upload to
+// /api/organizations/{org}/conversations/{conv}/wiggle/upload-file. With the
+// old path alone in the catalog the shim filed that POST as `catalog_host`,
+// the guard's classifier read a 300-byte multipart as not-AI, and every .txt
+// attachment reached Anthropic unredacted. Two things close it: the catalog
+// names the new path (vendored here), and a file-bearing POST to a catalog
+// host on ANY unlisted path is upload scope — the header comment's promise,
+// now kept — so the next rename cannot reopen the hole.
+const CLAUDE_ORG = '8d3a1c7e-0000-4f00-9c00-abcdef012345';
+const CLAUDE_CONV = '1f2e3d4c-1111-4a00-8b00-0123456789ab';
+function claudeAttachForm() {
+  const form = new FormData();
+  form.append('file', new Blob(['Name: Jane Doe\nSSN: 312-45-6789\n'], { type: 'text/plain' }), 'ssn.txt');
+  return form;
+}
+test('claude.ai: the moved attachment upload is a capture path, not a classifier call', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((m) => { captured.push(m); return allowVerdict; }, realCatalogGlobals('https://claude.ai/chat/1'));
+  await sandbox.fetch(`https://claude.ai/api/organizations/${CLAUDE_ORG}/conversations/${CLAUDE_CONV}/wiggle/upload-file`,
+    { method: 'POST', body: claudeAttachForm() });
+  assert.equal(captured.length, 1, 'held and relayed');
+  assert.equal(captured[0].coverage, 'capture_path', 'the catalog names this path: screened regardless');
+  assert.equal(captured[0].provider, 'anthropic');
+  const { head } = splitRaw(rawOf(captured[0].requestB64));
+  assert.match(head, /^POST \/api\/organizations\/[0-9a-f-]+\/conversations\/[0-9a-f-]+\/wiggle\/upload-file HTTP\/1\.1\r\nHost: claude\.ai\r\n/);
+  assert.equal(netCalls.length, 1, 'an allow releases it');
+});
+test('claude.ai: a file-bearing POST to a path the allow-list does NOT name is still upload scope', async () => {
+  const captured = [];
+  const { sandbox } = makeWorld((m) => { captured.push(m); return allowVerdict; }, realCatalogGlobals('https://claude.ai/chat/1'));
+  // The next rename, before any catalog catches up with it.
+  await sandbox.fetch(`https://claude.ai/api/organizations/${CLAUDE_ORG}/conversations/${CLAUDE_CONV}/attachments/put`,
+    { method: 'POST', body: claudeAttachForm() });
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].coverage, 'capture_path', 'a user file on the AI host itself never goes to the classifier');
+  assert.equal(captured[0].provider, 'anthropic', 'borrowed from the page, as for cross-origin uploads');
+});
+test('claude.ai: a bodied JSON POST off the allow-list keeps its catalog_host coverage', async () => {
+  const captured = [];
+  const { sandbox } = makeWorld((m) => { captured.push(m); return allowVerdict; }, realCatalogGlobals('https://claude.ai/chat/1'));
+  // Sign-in, settings and conversation reads must keep classifying, not
+  // screening: field-agnostic redaction there breaks authentication.
+  await sandbox.fetch(`https://claude.ai/api/organizations/${CLAUDE_ORG}/chat_conversations/${CLAUDE_CONV}/current_leaf_message_uuid`,
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"uuid":"x"}' });
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].coverage, 'catalog_host', 'no file, not a prompt path: the classifier decides');
+});
+test('a POST from an AI page to a host the catalog never names blocks (reviewer finding 2)', async () => {
+  const bytes = () => new TextEncoder().encode('Jane Roe 078-05-1120');
+  const cases = [
+    ['chatgpt Sentry', 'https://chatgpt.com/c/1', 'https://o33249.ingest.sentry.io/api/123/envelope/', { method: 'POST', body: REVIEW_PROMPT }],
+    ['claude Segment', 'https://claude.ai/chat/1', 'https://api.segment.io/v1/t', { method: 'POST', body: REVIEW_PROMPT, headers: { 'content-type': 'application/json' } }],
+    ['chatgpt S3 Uint8Array', 'https://chatgpt.com/c/1', 'https://bucket.s3.amazonaws.com/upload?X-Amz-Signature=x', { method: 'POST', body: bytes() }],
+    ['chatgpt PUT presigned', 'https://chatgpt.com/c/1', 'https://files.oaiusercontent.com/file-abc?sig=1', { method: 'PUT', body: 'Jane Roe 078-05-1120' }],
+    ['claude untyped Blob', 'https://claude.ai/chat/1', 'https://storage.example-cdn.net/u', { method: 'POST', body: new Blob(['Jane Roe 078-05-1120']) }],
+    ['aistudio clients6 RPC', 'https://aistudio.google.com/prompts/new',
+      'https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent',
+      { method: 'POST', body: REVIEW_PROMPT, headers: { 'content-type': 'application/json+protobuf' } }],
+    ['duck.ai telemetry', 'https://duck.ai/chat', 'https://improving.duckduckgo.com/t/x', { method: 'POST', body: REVIEW_PROMPT }]
+  ];
+  for (const code of [SIGNED_OUT, ...NO_PASS_CODES]) {
+    for (const [name, page, url, init] of cases) {
+      const { outcome, w } = await fetchOutcome(code, realCatalogGlobals(page), url, init);
+      assert.equal(outcome, 'BLOCKED', `${code} ${name}`);
+      assert.equal(w.netCalls.length, 0, `${code} ${name}`);
+      assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'), name);
+    }
+  }
+});
+
+test('a page whose host is a catalog API host blocks (openrouter.ai/chat, round 2 c)', async () => {
+  for (const code of [SIGNED_OUT, ...NO_PASS_CODES]) {
+    const { outcome } = await fetchOutcome(code, realCatalogGlobals('https://openrouter.ai/chat'),
+      'https://us.i.posthog.com/e/');
+    assert.equal(outcome, 'BLOCKED', code);
+  }
+});
+
+test('an opaque data: frame, or a frame built by an AI page, blocks (round 2 b)', async () => {
+  const frames = [
+    ['data: iframe', realCatalogGlobals('data:text/html,<p>x', { base: 'data:text/html,<p>x' })],
+    ['about:srcdoc in chatgpt', realCatalogGlobals('about:srcdoc', { base: 'https://chatgpt.com/c/1' })],
+    ['about:blank in claude', realCatalogGlobals('about:blank', { base: 'https://claude.ai/chat/1' })],
+    ['blob: frame from chatgpt', realCatalogGlobals('blob:https://chatgpt.com/0b1c', { base: 'blob:https://chatgpt.com/0b1c' })]
+  ];
+  for (const code of [SIGNED_OUT, ...NO_PASS_CODES]) {
+    for (const [name, globals] of frames) {
+      const { outcome, w } = await fetchOutcome(code, globals, 'https://o1.ingest.sentry.io/api/1/envelope/');
+      assert.equal(outcome, 'BLOCKED', `${code} ${name}`);
+      assert.equal(w.netCalls.length, 0, `${code} ${name}`);
+    }
+  }
+});
+
+test('an artifact or sandbox frame inside an AI page blocks via ancestorOrigins (round 2 d)', async () => {
+  const frames = [
+    ['Claude artifact', 'https://www.claudeusercontent.com/?domain=claude.ai', ['https://claude.ai']],
+    ['ChatGPT sandbox', 'https://abc.web-sandbox.oaiusercontent.com/', ['https://chatgpt.com']],
+    ['nested two deep', 'https://third-party.example/embed', ['https://www.example.com', 'https://aistudio.google.com']],
+    ['opaque ancestor', 'https://third-party.example/embed', ['null']],
+    ['API-host ancestor', 'https://third-party.example/embed', ['https://openrouter.ai']]
+  ];
+  for (const code of [SIGNED_OUT, ...NO_PASS_CODES]) {
+    for (const [name, page, ancestors] of frames) {
+      const { outcome, w } = await fetchOutcome(code, realCatalogGlobals(page, { ancestors }), 'https://api.example-anything.com/collect');
+      assert.equal(outcome, 'BLOCKED', `${code} ${name}`);
+      assert.equal(w.netCalls.length, 0, `${code} ${name}`);
+    }
+  }
+  // An ordinary embed (no AI ancestor) is an ordinary page.
+  const ok = await fetchOutcome(SIGNED_OUT, realCatalogGlobals('https://js.stripe.com/v3/m-outer.html',
+    { ancestors: ['https://shop.example.com'] }), 'https://m.stripe.com/6', { method: 'POST', body: 'a=b' });
+  assert.equal(ok.outcome, 'SENT');
+});
+
+// Firefox has no `location.ancestorOrigins`. A frame there is told from a page by
+// `window.top !== window`, and its parent by `document.referrer`.
+test('Firefox: with no ancestorOrigins, any framed page refuses the pass (F1, F3, F5, F8, nested)', async () => {
+  const frames = [
+    ['F1 Claude artifact frame', 'https://www.claudeusercontent.com/?domain=claude.ai', 'https://claude.ai/', 'https://api.example-anything.com/collect'],
+    ['F3 ChatGPT sandbox frame', 'https://abc.web-sandbox.oaiusercontent.com/', 'https://chatgpt.com/c/1', 'https://api.example-anything.com/collect'],
+    ['F5 Stripe frame in ChatGPT', 'https://js.stripe.com/v3/m-outer.html', 'https://chatgpt.com/', 'https://m.stripe.com/6'],
+    ['F8 third-party frame in Gemini', 'https://x.scf.usercontent.goog/', 'https://gemini.google.com/app', 'https://y.example.com/c'],
+    ['frame in an API-host page', 'https://third-party.example/embed', 'https://openrouter.ai/chat', 'https://y.example.com/c'],
+    // No referrer at all (a no-referrer policy, a sandbox): cannot be ruled out.
+    ['framed, empty referrer', 'https://third-party.example/embed', '', 'https://y.example.com/c'],
+    ['framed, no document', 'https://third-party.example/embed', undefined, 'https://y.example.com/c']
+  ];
+  for (const [name, page, referrer, url] of frames) {
+    const { outcome, w } = await fetchOutcome(SIGNED_OUT, realCatalogGlobals(page, { framed: true, referrer }), url);
+    assert.equal(outcome, 'BLOCKED', name);
+    assert.equal(w.netCalls.length, 0, name);
+    assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'), name);
+  }
+  // A throwing `window.top` counts as framed.
+  // (The shim reads it per request, so it can start throwing after load.)
+  const tw = makeDebugWorld(down(SIGNED_OUT), realCatalogGlobals('https://third-party.example/embed', { referrer: '' }));
+  Object.defineProperty(tw.sandbox, 'top', { get() { throw new Error('SecurityError'); }, configurable: true });
+  await assert.rejects(tw.sandbox.fetch('https://y.example.com/c', { method: 'POST', body: REVIEW_PROMPT }), blockedError, 'window.top throws');
+  assert.equal(tw.netCalls.length, 0);
+  // Without the full chain an ordinary referrer proves nothing: a nested or
+  // self-navigated frame inside chatgpt shows its ordinary parent. So even an
+  // ordinary embed with an ordinary referrer is refused (fail closed).
+  const nested = await fetchOutcome(SIGNED_OUT, realCatalogGlobals('https://js.stripe.com/v3/m-outer.html', { framed: true, referrer: 'https://shop.example.com/cart' }),
+    'https://m.stripe.com/6', { method: 'POST', body: 'a=b' });
+  assert.equal(nested.outcome, 'BLOCKED');
+  // A TOP-LEVEL page in Firefox can still pass whatever its referrer (sonomos.ai -> Clerk),
+  // including a referrer that is an AI surface (the user followed a link from chatgpt.com).
+  for (const referrer of [undefined, '', 'https://chatgpt.com/c/1']) {
+    const top = await fetchOutcome(SIGNED_OUT, realCatalogGlobals(NON_AI_PAGE, { referrer }), CLERK_URL, { method: 'POST', body: 'a=b' });
+    assert.equal(top.outcome, 'SENT', `top-level, referrer ${referrer}`);
+  }
+  // Where the browser does give ancestorOrigins it wins: no referrer is needed.
+  const chrome = await fetchOutcome(SIGNED_OUT, realCatalogGlobals('https://js.stripe.com/v3/m-outer.html', { framed: true, referrer: '', ancestors: ['https://shop.example.com'] }),
+    'https://m.stripe.com/6', { method: 'POST', body: 'a=b' });
+  assert.equal(chrome.outcome, 'SENT');
+});
+
+test('IPv6 and local-name rows N1-N5 block (RFC 8215, SIIT, site-local, .corp, .home) and public neighbours do not', async () => {
+  const blocked = [
+    'http://[64:ff9b:1::a00:5]:11434/api/generate',   // N1 NAT64 local-use /48
+    'http://[64:ff9b:1:ffff::1]/x',                    // anywhere in that /48
+    'http://[::ffff:0:127.0.0.1]:11434/api/generate', // N2 SIIT
+    'http://[::ffff:0:10.0.0.5]/x',
+    'http://[fec0::1]:11434/api/generate',            // N3 site-local
+    'http://[feff::1]/x',                              // top of fec0::/10
+    'http://gpu.corp:11434/api/generate',             // N4
+    'http://llm.home:11434/api/generate',             // N5
+    'http://nas.private/x'
+  ];
+  for (const url of blocked) {
+    for (const code of [SIGNED_OUT, 'no-bridge']) {
+      const { outcome, w } = await fetchOutcome(code, realCatalogGlobals(BYOK), url);
+      assert.equal(outcome, 'BLOCKED', `${code} ${url}`);
+      assert.equal(w.netCalls.length, 0, `${code} ${url}`);
+    }
+  }
+  // SIIT and mapped forms are judged by the address they embed; the rest of
+  // the neighbourhood is ordinary.
+  for (const url of ['http://[::ffff:0:8.8.8.8]/x', 'http://[64:ff9b::808:808]/x', 'http://[fe00::1]/x',
+    'http://[64:ff9c::1]/x', 'http://corp.example.com/x', 'http://home.example.com/x', 'http://private.example.com/x']) {
+    const { outcome } = await fetchOutcome(SIGNED_OUT, realCatalogGlobals(NON_AI_PAGE), url, { method: 'POST', body: 'a=b' });
+    assert.equal(outcome, 'SENT', url);
+  }
+});
+
+test('loopback, private and local-network targets block (self-hosted models, round 2 e)', async () => {
+  const targets = [
+    'http://127.0.0.1:11434/api/generate', 'http://localhost:11434/api/chat',
+    'http://foo.localhost:8080/v1/chat/completions', 'http://127.1.2.3/x', 'http://127.1:11434/x',
+    'http://2130706433:11434/x', 'http://0x7f000001:11434/x', 'http://0177.0.0.1:11434/x',
+    'http://[::1]:11434/api/chat', 'http://[::]:11434/x', 'http://10.0.0.5:8000/v1', 'http://172.16.4.2/x',
+    'http://172.31.255.1/x', 'http://192.168.1.20:11434/api', 'http://169.254.169.254/latest',
+    'http://[fc00::1]/x', 'http://[fd7a:115c:a1e0::1]:11434/x', 'http://[fe80::1]/x',
+    'http://[::ffff:127.0.0.1]:11434/x', 'http://[::ffff:10.0.0.5]/x', 'http://[::127.0.0.1]:11434/x',
+    'http://[64:ff9b::a00:5]:11434/x', 'http://0.0.0.0:11434/x', 'http://0:11434/x',
+    // CGNAT 100.64/10 (Tailscale)
+    'http://100.64.0.1/x', 'http://100.101.102.103:11434/x', 'http://100.127.255.254/x',
+    // single-label names and local-network suffixes
+    'http://gpu-box:11434/api/generate', 'http://ollama:11434/x', 'http://ollama.local:11434/x', 'http://box.lan/x',
+    'http://host.docker.internal:11434/x', 'http://nas.intranet/x', 'http://pc.localdomain/x',
+    'http://printer.home.arpa/x', 'http://box.tail1234.ts.net:11434/x', 'http://localhost.:11434/x'
+  ];
+  for (const url of targets) {
+    for (const code of [SIGNED_OUT, 'no-bridge']) {
+      const { outcome, w } = await fetchOutcome(code, realCatalogGlobals(NON_AI_PAGE), url);
+      assert.equal(outcome, 'BLOCKED', `${code} ${url}`);
+      assert.equal(w.netCalls.length, 0, `${code} ${url}`);
+    }
+  }
+  // Public neighbours of those ranges are ordinary sites.
+  for (const url of ['http://172.32.0.1/x', 'http://172.15.0.1/x', 'http://8.8.8.8/x', 'http://100.63.0.1/x',
+    'http://100.128.0.1/x', 'http://[2001:db8::1]/x', 'http://intranet.example.com/x', 'http://local.example.com/x']) {
+    const { outcome } = await fetchOutcome(SIGNED_OUT, realCatalogGlobals(NON_AI_PAGE), url, { method: 'POST', body: 'a=b' });
+    assert.equal(outcome, 'SENT', url);
+  }
+});
+
+test('locke-signed-out: outcomes where Locke was reached, or signed-out is unproven, still block open_web', async () => {
+  const blocked = [
+    ['screening-timeout', { ok: false, code: 'screening-timeout', message: 'deadline' }],
+    ['native-timeout', { ok: false, code: 'native-timeout' }],
+    ['bridge-error', { ok: false, code: 'bridge-error', message: 'Native host has exited.' }],
+    ['bridge-dropped', { ok: false, code: 'bridge-dropped' }],
+    ['no-bridge', { ok: false, code: 'no-bridge' }],
+    ['bridge-unreachable', { ok: false, code: 'bridge-unreachable' }],
+    ['receipt-too-large', { ok: false, code: 'receipt-too-large' }],
+    ['host-panic', { ok: false, code: 'host-panic' }],
+    ['bridge-protocol-mismatch', { ok: false, code: 'bridge-protocol-mismatch' }],
+    ['extension-reloaded', { ok: false, code: 'extension-reloaded' }],
+    ['bridge-empty', { ok: false, code: 'bridge-empty' }],
+    ['bridge-unknown-response', { ok: false, code: 'bridge-unknown-response' }],
+    ['data-consent-required', { ok: false, code: 'data-consent-required' }],
+    ['an unknown code', { ok: false, code: 'something-new' }],
+    ['a null verdict', null],
+    ['a real guard block', { ok: true, receipt: { decision: 'block', reason: 'found a key', redactedCount: 0 } }],
+    ['an infrastructure block receipt', { ok: true, receipt: { decision: 'block', blockCause: 'infrastructure', reason: 'screener unavailable' } }],
+    ['a malformed receipt', { ok: true }]
+  ];
+  for (const [name, verdict] of blocked) {
+    const { sandbox, netCalls, logs } = makeWorld(() => verdict, realCatalogGlobals(NON_AI_PAGE));
+    await assert.rejects(sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' }), blockedError, name);
+    assert.equal(netCalls.length, 0, name);
+    assert.ok(!findLine(logs, 'locke-unreachable-unclassified'), name);
+  }
+  // An unknown code gets the generic "could not be reached" copy, not the signed-out one.
+  const unknown = await blockedByRelayCode('something-new');
+  assert.equal(unknown.sonomosBlockReason, 'native-call-failed');
+});
+
+test('a plain verdict timeout on open_web still blocks (a hang does not prove signed out)', async () => {
+  const w = makeWorld(() => new Promise(() => {}), realCatalogGlobals(NON_AI_PAGE));
+  w.deliver({ type: 'SONOMOS_CONFIG', config: { enforceTimeoutMs: 1000 } });
+  await assert.rejects(w.sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' }), blockedError);
+  assert.equal(w.netCalls.length, 0);
+  assertBlocked(w.logs, 'verdict-timeout');
+});
+
+test('a dead channel on open_web still blocks', async () => {
+  const w = makeWorld(() => allowVerdict, { ...realCatalogGlobals(NON_AI_PAGE), postMessage: () => { throw new Error('channel gone'); } });
+  await assert.rejects(w.sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' }), blockedError);
+  assert.equal(w.netCalls.length, 0);
+});
+
+test('the user fail-open window keeps its own reason and tally', async () => {
+  for (const code of [SIGNED_OUT, 'no-bridge', 'bridge-unreachable', 'bridge-dropped']) {
+    const w = makeWorld(() => ({ ok: false, code, message: 'down' }));
+    w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+    await w.sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' });
+    assert.equal(w.netCalls.length, 1, code);
+    assert.deepEqual(w.unchecked, [`relay-${code}`], code);
+    assertReason(w.logs, 'unchecked-fail-open', 'warn');
+    assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'), code);
   }
 });

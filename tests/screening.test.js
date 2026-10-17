@@ -851,6 +851,24 @@ test('a fail-open send gets the opposite sentence, not the "nothing leaked" one'
   assert.match(copy.detail, /same event, not a second problem/);
 });
 
+test('a recent locke-signed-out failure says Locke is signed out, not "offline" or "held back"', () => {
+  const failure = { code: 'locke-signed-out', at: NOW };
+  const want = 'Locke is signed out. Sign in to the Locke desktop app to resume screening.';
+  // The status check reads disconnected beside it (nothing to answer it); the
+  // connected shapes are covered too, since the recent failure is what is true.
+  for (const state of [
+    { status: STATUS.DISCONNECTED, screening: SCREENING.UNAVAILABLE, lastCaptureFailure: failure },
+    connected({ screening: SCREENING.UNAVAILABLE, lastCaptureFailure: failure }),
+    connected({ screening: SCREENING.UNCONFIRMED, lastCaptureFailure: failure })
+  ]) {
+    const copy = copyFor(state);
+    assert.equal(copy.detail, want);
+    assert.ok(!/isn’t answering|held back|nothing was sent unscreened/.test(copy.detail), copy.detail);
+  }
+  // Any other failure code still reads as before.
+  assert.match(copyFor({ status: STATUS.DISCONNECTED, lastCaptureFailure: { code: 'bridge-unreachable', at: NOW } }).detail, /isn’t answering/);
+});
+
 test('a malformed lastCaptureFailure is ignored rather than guessed at', () => {
   for (const failure of [null, undefined, {}, 'bridge-error', { code: 'x' }, 42]) {
     const copy = copyFor(connected({ screening: SCREENING.UNCONFIRMED, lastCaptureFailure: failure }));

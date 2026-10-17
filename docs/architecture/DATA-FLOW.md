@@ -206,7 +206,7 @@ never sent.
 | Class | Means | Branches |
 |---|---|---|
 | `policy` | the screener looked and said no | `decision-block` |
-| `unavailable` | screening never happened, or the chain answered unintelligibly | `verdict-timeout`, `verdict-channel-failed`, `verdict-missing`, `native-call-failed`, `connector-not-started`, `bridge-unreachable`, `bridge-unreadable-reply`, `relay-error`, `relay-rejected`, `extension-reloaded`, `screening-timeout`, `screening-unavailable`, `verdict-malformed`, `decision-missing`, `decision-unknown`, `redact-*`, `internal-error` |
+| `unavailable` | screening never happened, or the chain answered unintelligibly | `verdict-timeout`, `verdict-channel-failed`, `verdict-missing`, `native-call-failed`, `connector-not-started`, `bridge-unreachable`, `bridge-dropped`, `locke-signed-out`, `bridge-unreadable-reply`, `relay-error`, `relay-rejected`, `extension-reloaded`, `screening-timeout`, `screening-unavailable`, `verdict-malformed`, `decision-missing`, `decision-unknown`, `redact-*`, `internal-error` |
 | `too-large` | over the screening size limit — **not** a sensitive-data block | `uncapturable-oversize`, `receipt-too-large` |
 | `unsupported` | this surface cannot screen this request at all | `uncapturable-stream`, `uncapturable-document`, `uncapturable-unreadable`, `uncapturable-request-clone`, `uncapturable-sync-xhr`, `uncapturable-beacon`, `scope-unresolvable` |
 
@@ -261,3 +261,43 @@ to the browser — an absent flag and a `false` flag would make a withheld
 attachment and a fail-open send read alike.
 - **Oversized receipt** (a rebuilt request too large for Chrome's 1 MB
   native-messaging reply cap): the host returns a compact error instead → block.
+
+### The one send that is neither screened nor fail-open: `locke-unreachable-unclassified`
+
+When Locke is **deliberately signed out**, the original request is sent as the
+page made it, logged at `console.debug` as
+`reason=locke-unreachable-unclassified … code=locke-signed-out`. It is not a
+screened `allow`, it is not the fail-open window (`unchecked-fail-open`), and it
+is not tallied as an unchecked send: it is only ever an ordinary website
+request, never AI traffic. Without it every login and form on the web would
+block while Locke is signed out, including the sign-in that gets the user back
+in.
+
+The final rule. The page sends only if **all** hold:
+
+1. The relay code is exactly `locke-signed-out`. `no-bridge`,
+   `bridge-unreachable`, `bridge-dropped`, timeouts, malformed replies and every
+   unknown code block.
+2. The native host emits that code only when it could not connect to Locke,
+   **and** the desktop app's capture lease (`~/.sonomos/capture-lease.json`)
+   says `signed-out`, **and** the lease is not pointing at a live vault (it names
+   no `vault_path`, or the named vault is gone or has its `<vault>.signed-out`
+   tombstone), **and** no team-lock record exists in any state. A signed-in user
+   whose keyring is unavailable, or whose vault will not decrypt, has a vault on
+   disk and no tombstone, so the host reports `bridge-unreachable` and the
+   request blocks.
+3. The request is `open_web` (not a catalog web host or capture path), is not an
+   upload, and the generated API-host list loaded.
+4. The destination is not a catalog API host, and is not loopback, private or a
+   local-network name (a self-hosted model).
+5. The page has a readable host, is not itself a catalog API host or an AI
+   surface (unless that surface is unscreened by catalog), and has no AI
+   ancestor frame: from `location.ancestorOrigins` where the browser has it; in
+   Firefox, which does not, a framed page (`window.top !== window`, or reading it
+   throws) is judged by `document.referrer`, and an empty referrer, a catalog
+   API host or an AI surface blocks. A top-level page needs no referrer.
+
+Not covered, and accepted: AI endpoints the catalog does not name and
+HuggingChat while signed out (both need a catalog change), public names that
+resolve to a private address (`127.0.0.1.nip.io`), and a mount-namespace
+difference between the browser and the app.
