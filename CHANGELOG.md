@@ -8,6 +8,15 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Changed — Locke logo on the extension icon and store listing**
+- `icons/icon-{16,32,48,128}.png` are re-rendered from the Locke padlock mark
+  (transparent background), replacing the charcoal-tile version. Sizes are
+  unchanged, so `manifest.json` and the store-build size checks are untouched.
+- `docs/store/assets/store-listing-logo.png` (the Locke mark on white, with
+  padding) and its 300x300 downscale `edge-logo-300x300.png` are the store
+  listing logo. Published listings keep the old art until the next version is
+  submitted. `icons/action.svg` is no longer the master for the PNG icons.
+
 **Fixed — claude.ai attachments left unredacted after Anthropic moved the upload (SP14, 2026-10-16)**
 - claude.ai's attach button now POSTs to
   `/api/organizations/{org}/conversations/{conv}/wiggle/upload-file`. The

@@ -233,8 +233,10 @@ the three image files below is missing, so drop them at exactly these paths
       desktop app showing the extension connected.
 - [ ] **[HUMAN]** `docs/store/assets/promo-tile-440x280.png` — Chrome Web
       Store small promo tile.
-- [ ] **[HUMAN]** `docs/store/assets/edge-logo-300x300.png` — Edge Add-ons
-      requires a 300x300 store logo per listing language.
+- [x] `docs/store/assets/edge-logo-300x300.png` — Edge Add-ons
+      requires a 300x300 store logo per listing language. Downscaled from
+      `docs/store/assets/store-listing-logo.png` (1254 px, the Locke mark),
+      which is also the source for the Chrome Web Store listing logo.
 - [x] Icons: shipped in the zip (`icons/icon-128.png` satisfies every
       store's listing-icon requirement). `scripts/package.mjs` stages every
       `icons/*.png` into both artifacts; the SVG design sources are
