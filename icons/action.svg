@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Locke">
-  <!-- Locke toolbar/store icon: charcoal tile (radius 22% of the side) with the light padlock centred at 68% of the tile. Master for icons/icon-{16,32,48,128}.png. -->
+  <!-- Locke toolbar/store icon: charcoal tile (radius 22% of the side) with the light padlock centred at 68% of the tile. Superseded: icons/icon-{16,32,48,128}.png are now rendered from the transparent Locke mark, not this tile. -->
   <rect width="1024" height="1024" rx="225" fill="#202327"/>
   <svg x="246.33" y="163.84" width="531.34" height="696.32" viewBox="270 134 715 937">
   <g fill="#e2e2e2">
