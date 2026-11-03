@@ -8,6 +8,18 @@ strict SemVer.
 
 ## [Unreleased]
 
+## [2.0.3] — 2026-11-03
+
+**Summary.** 2.0.3 changes the extension's icon to the Locke logo. The package
+differs from 2.0.2 only in the four icon PNGs and the version number; no
+script, permission, host or popup markup changes. For reviewers, since the 2.0.2 notes understated it: from
+2.0.2 onward the content scripts match every `http://` and `https://` page (they
+previously matched a fixed list of AI sites) so each bodied request can be
+classified on-device by the Locke desktop app. `host_permissions` is still
+loopback-only (`http://127.0.0.1/*`), no permission was added, and the
+extension sends request content only to the local desktop app over native
+messaging. 2.0.3 is unchanged from 2.0.2 in this respect.
+
 **Changed — Locke logo on the extension icon and store listing**
 - `icons/icon-{16,32,48,128}.png` are re-rendered from the Locke padlock mark
   (transparent background), replacing the charcoal-tile version. Sizes are
@@ -16,6 +28,99 @@ strict SemVer.
   padding) and its 300x300 downscale `edge-logo-300x300.png` are the store
   listing logo. Published listings keep the old art until the next version is
   submitted. `icons/action.svg` is no longer the master for the PNG icons.
+
+<!-- store-notes-end -->
+
+The engineering log for this release follows. Only the summary above the
+marker is sent to the stores.
+
+### Fixed — v2.0.2 never reached the Chrome Web Store, and nothing said so
+
+The 2026-10-18 release shipped 2.0.2 to Edge and Firefox and skipped Chrome:
+`:fetchStatus` answered `published = PUBLISHED 2.0.1, submitted = STAGED 2.0.1`
+weeks after 2.0.1 went live, and `classifyStatus` read every `STAGED`
+submitted revision as a reviewed-but-unreleased build an upload would discard.
+The skip was `ok: true`, so the step went green, `publish-failure-notice` never
+ran, and no issue was opened. Every later release would have skipped the same
+way.
+
+- `scripts/publish/chrome.mjs`: a `STAGED` or `PUBLISHED` submitted revision
+  whose crxVersion is the live crxVersion is stale (`staleSubmission`) and no
+  longer blocks the upload. A `STAGED` build newer than what is live, and a
+  `PENDING_REVIEW`/`REJECTED` revision at any version, still block.
+- Skips that leave a store behind the release version — Chrome in review or
+  holding a real staged build, Edge `InProgressSubmission` — now carry
+  `data.deferred: true`. `scripts/publish.mjs` exits non-zero on them, so the
+  `store-publish` step reports failure (the job is still continue-on-error;
+  `main` stays green) and the failure issue is opened. "Already at this
+  version" skips stay exit 0, so a re-run over a finished release is quiet.
+- `release.yml`'s run summary prints those as `NOT SHIPPED (store busy —
+  re-drive needed)` rather than `skipped`, and the failure issue lists the
+  busy-store case.
+- Chrome skips 2.0.2 and goes from 2.0.1 to 2.0.3. A forced 2.0.2 re-drive
+  from `main` would have rebuilt the package with this release's new icons,
+  sent Chrome a "2.0.2" unlike the one on Edge and Firefox, and clobbered the
+  attested `v2.0.2` GitHub release assets.
+
+## [2.0.2] — 2026-09-08
+
+**Summary.** 2.0.2 raises the fail-closed verdict ceiling so a cold screen of a
+long conversation can finish instead of being blocked for taking too long, and
+documents a coverage limit that had gone unstated since it landed: on
+`chatgpt.com`, `claude.ai` and `www.perplexity.ai` only a short list of paths is
+screened, so other bodied requests on those hosts are not held. The same
+catalog revision closes the worst of that gap by adding `claude.ai`'s two
+attachment-upload paths. For reviewers: nothing here weakens fail-closed, no
+permission was added or widened, outbound requests are still loopback-only, the
+Firefox data-collection declaration is still `none`, and `HONEST.md` now states
+the path limit in full.
+
+**Fixed**
+- A blocked `XMLHttpRequest` left `readyState` at `OPENED` and fired no
+  `readystatechange`, so a page driving XHR through `onreadystatechange` — the
+  older of the two idioms, and still common — waited forever on a request we had
+  already refused. A refused XHR now transitions to `DONE` and fires
+  `readystatechange` before `error` and `loadend`, which is what the page sees
+  from a network failure.
+- `HONEST.md` and `README.md` both claimed a same-origin bodied request to a
+  covered AI host is held. On the three hosts the catalog narrows by path, it is
+  not. Both documents now say which paths are screened and what that leaves
+  unscreened; a test fails if either drifts from the generated file again.
+- Three native-host failure codes (`host-panic`, `bridge-protocol-mismatch`,
+  `native-timeout`) told the user "the Locke desktop app could not be reached.
+  Start it." Nothing was unreachable in any of them. Each now says what actually
+  happened, and the first two no longer leave the popup reading "Active" off a
+  receipt from before the failure.
+
+**Added**
+- `claude.ai` attachment uploads (`/api/*/upload`,
+  `/api/organizations/*/convert_document`) are now held and screened.
+- The popup reports how many requests were **blocked** this session beside the
+  count of items redacted, and the toolbar badge shows the blocked count for ten
+  seconds after a block. A block was previously visible only as a failed request
+  on the page and a line on a console nobody has open. The badge stays empty when
+  healthy and every existing badge state still wins over the count.
+
+**Changed**
+- The fail-closed verdict ceiling is 200 s (was 45 s), behind the service
+  worker's 190 s native-call timeout and the native host's 180 s capture
+  deadline, so a slow-but-valid screen is no longer refused for being slow and
+  each hop still reports its own specific reason. The managed
+  `enforceTimeoutMs` range is 1000–300000, default 200000.
+- Native host requests are cancellable, and live browser connection status
+  recovers rather than staying stuck after a failed round trip.
+
+<!-- store-notes-end -->
+
+### Also in 2.0.2 — merged after the bump, released to the stores 2026-10-18
+
+The entries below sat under `[Unreleased]` until the 2.0.3 bump, but they were
+merged before the 2026-10-18 release run and are in the 2.0.2 package
+(commit `edfd815`). They are recorded here so the changelog matches what each
+version shipped. They were not in the store-facing 2.0.2 notes above, which
+were written when the version was bumped on 2026-09-08 — including the
+every-website content-script scope, which that summary's "no permission was
+added or widened" does not cover. 2.0.3's notes state it for reviewers.
 
 **Fixed — claude.ai attachments left unredacted after Anthropic moved the upload (SP14, 2026-10-16)**
 - claude.ai's attach button now POSTs to
@@ -202,86 +307,6 @@ strict SemVer.
   submitted — an icon change is a package change, and every store rejects a
   re-upload of an existing version, so it ships with the next `npm run bump`.
 
-<!-- store-notes-end -->
-
-The engineering log for this release follows. Only the summary above the
-marker is sent to the stores.
-
-### Fixed — v2.0.2 never reached the Chrome Web Store, and nothing said so
-
-The 2026-10-18 release shipped 2.0.2 to Edge and Firefox and skipped Chrome:
-`:fetchStatus` answered `published = PUBLISHED 2.0.1, submitted = STAGED 2.0.1`
-weeks after 2.0.1 went live, and `classifyStatus` read every `STAGED`
-submitted revision as a reviewed-but-unreleased build an upload would discard.
-The skip was `ok: true`, so the step went green, `publish-failure-notice` never
-ran, and no issue was opened. Every later release would have skipped the same
-way.
-
-- `scripts/publish/chrome.mjs`: a `STAGED` or `PUBLISHED` submitted revision
-  whose crxVersion is the live crxVersion is stale (`staleSubmission`) and no
-  longer blocks the upload. A `STAGED` build newer than what is live, and a
-  `PENDING_REVIEW`/`REJECTED` revision at any version, still block.
-- Skips that leave a store behind the release version — Chrome in review or
-  holding a real staged build, Edge `InProgressSubmission` — now carry
-  `data.deferred: true`. `scripts/publish.mjs` exits non-zero on them, so the
-  `store-publish` step reports failure (the job is still continue-on-error;
-  `main` stays green) and the failure issue is opened. "Already at this
-  version" skips stay exit 0, so a re-run over a finished release is quiet.
-- `release.yml`'s run summary prints those as `NOT SHIPPED (store busy —
-  re-drive needed)` rather than `skipped`, and the failure issue lists the
-  busy-store case.
-- Operator action: re-drive Chrome for 2.0.2 with the Release workflow,
-  `force: true`, `stores: chrome`.
-
-## [2.0.2] — 2026-09-08
-
-**Summary.** 2.0.2 raises the fail-closed verdict ceiling so a cold screen of a
-long conversation can finish instead of being blocked for taking too long, and
-documents a coverage limit that had gone unstated since it landed: on
-`chatgpt.com`, `claude.ai` and `www.perplexity.ai` only a short list of paths is
-screened, so other bodied requests on those hosts are not held. The same
-catalog revision closes the worst of that gap by adding `claude.ai`'s two
-attachment-upload paths. For reviewers: nothing here weakens fail-closed, no
-permission was added or widened, outbound requests are still loopback-only, the
-Firefox data-collection declaration is still `none`, and `HONEST.md` now states
-the path limit in full.
-
-**Fixed**
-- A blocked `XMLHttpRequest` left `readyState` at `OPENED` and fired no
-  `readystatechange`, so a page driving XHR through `onreadystatechange` — the
-  older of the two idioms, and still common — waited forever on a request we had
-  already refused. A refused XHR now transitions to `DONE` and fires
-  `readystatechange` before `error` and `loadend`, which is what the page sees
-  from a network failure.
-- `HONEST.md` and `README.md` both claimed a same-origin bodied request to a
-  covered AI host is held. On the three hosts the catalog narrows by path, it is
-  not. Both documents now say which paths are screened and what that leaves
-  unscreened; a test fails if either drifts from the generated file again.
-- Three native-host failure codes (`host-panic`, `bridge-protocol-mismatch`,
-  `native-timeout`) told the user "the Locke desktop app could not be reached.
-  Start it." Nothing was unreachable in any of them. Each now says what actually
-  happened, and the first two no longer leave the popup reading "Active" off a
-  receipt from before the failure.
-
-**Added**
-- `claude.ai` attachment uploads (`/api/*/upload`,
-  `/api/organizations/*/convert_document`) are now held and screened.
-- The popup reports how many requests were **blocked** this session beside the
-  count of items redacted, and the toolbar badge shows the blocked count for ten
-  seconds after a block. A block was previously visible only as a failed request
-  on the page and a line on a console nobody has open. The badge stays empty when
-  healthy and every existing badge state still wins over the count.
-
-**Changed**
-- The fail-closed verdict ceiling is 200 s (was 45 s), behind the service
-  worker's 190 s native-call timeout and the native host's 180 s capture
-  deadline, so a slow-but-valid screen is no longer refused for being slow and
-  each hop still reports its own specific reason. The managed
-  `enforceTimeoutMs` range is 1000–300000, default 200000.
-- Native host requests are cancellable, and live browser connection status
-  recovers rather than staying stuck after a failed round trip.
-
-<!-- store-notes-end -->
 
 ### Fixed — codes that landed with no entry in either table
 
