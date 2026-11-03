@@ -426,7 +426,9 @@ jobs:
                 for (const s of rows) {
                   const name = s.label ?? s.store ?? "(unknown)";
                   const ok = s.ok ?? s.success ?? (s.status === "ok");
-                  const mark = s.status === "skipped" ? "skipped" : ok ? "shipped" : "FAILED";
+                  const mark = s.status === "skipped"
+                    ? (s.data?.deferred ? "NOT SHIPPED (store busy — re-drive needed)" : "skipped")
+                    : ok ? "shipped" : "FAILED";
                   console.log(`- ${mark}: ${name}${s.message ? " — " + s.message : ""}`);
                 }
                 if (r.releaseNotes === false) {
@@ -489,8 +491,12 @@ jobs:
             echo "1. CWS_REFRESH_TOKEN expired. It lasts **7 days** while the Google"
             echo "   OAuth consent screen is in Testing. This is the most likely cause."
             echo "2. EDGE_API_KEY expired. It lasts **72 days**, with no warning."
-            echo "3. A store rejected the submission on review grounds."
-            echo "4. That version was already uploaded to that store."
+            echo "3. A store was busy, so v${VERSION} was skipped there and never uploaded:"
+            echo "   Chrome still reviewing (or holding a staged build of) the previous"
+            echo "   version, or Edge still certifying it. The run summary marks these"
+            echo "   NOT SHIPPED. Clear it in that store's dashboard, then re-drive."
+            echo "4. A store rejected the submission on review grounds."
+            echo "5. That version was already uploaded to that store."
             echo ""
             echo "To re-drive only the store that failed, run the Release workflow"
             echo "manually with force: true and stores set to that one store. Do not"

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 import { multipart, poll, request } from '../scripts/lib/http.mjs';
 import { STORES, credentialsFor, parseEnvFile, redact, secretValues } from '../scripts/lib/creds.mjs';
-import { releaseNotesFor } from '../scripts/publish.mjs';
+import { deferredResults, releaseNotesFor } from '../scripts/publish.mjs';
 import * as chrome from '../scripts/publish/chrome.mjs';
 import * as edge from '../scripts/publish/edge.mjs';
 import * as firefox from '../scripts/publish/firefox.mjs';
@@ -278,6 +278,94 @@ test('chrome: an item in review is skipped, not failed', () => {
 test('chrome: a rejected or taken-down item is a hard failure', () => {
   assert.equal(chrome.classifyStatus({ submittedItemRevisionStatus: { state: 'REJECTED' } }).rejected, true);
   assert.equal(chrome.classifyStatus({ takenDown: true }).takenDown, true);
+});
+
+test('chrome: a STAGED submitted revision that is already live does not block the upload', () => {
+  // The literal :fetchStatus shape the v2.0.2 release read on 2026-10-18,
+  // weeks after 2.0.1 went live. Treating it as an unreleased build skipped
+  // 2.0.2 on Chrome while Edge and Firefox shipped it.
+  const stale = chrome.classifyStatus({
+    publishedItemRevisionStatus: { state: 'PUBLISHED', distributionChannels: [{ crxVersion: '2.0.1' }] },
+    submittedItemRevisionStatus: { state: 'STAGED', distributionChannels: [{ crxVersion: '2.0.1' }] }
+  });
+  assert.equal(stale.staleSubmission, true);
+  assert.equal(stale.safeToUpload, true);
+
+  // A STAGED build NEWER than what is live is real, unreleased work: still blocks.
+  const staged = chrome.classifyStatus({
+    publishedItemRevisionStatus: { state: 'PUBLISHED', distributionChannels: [{ crxVersion: '2.0.1' }] },
+    submittedItemRevisionStatus: { state: 'STAGED', distributionChannels: [{ crxVersion: '2.0.2' }] }
+  });
+  assert.equal(staged.staleSubmission, false);
+  assert.equal(staged.safeToUpload, false);
+
+  // A review or rejection at the live version still needs a human.
+  for (const state of ['PENDING_REVIEW', 'REJECTED']) {
+    const held = chrome.classifyStatus({
+      publishedItemRevisionStatus: { state: 'PUBLISHED', distributionChannels: [{ crxVersion: '2.0.1' }] },
+      submittedItemRevisionStatus: { state, distributionChannels: [{ crxVersion: '2.0.1' }] }
+    });
+    assert.equal(held.staleSubmission, false, state);
+    assert.equal(held.safeToUpload, false, state);
+  }
+
+  // No version on either side is not "equal": an unversioned STAGED revision blocks.
+  const unversioned = chrome.classifyStatus({ submittedItemRevisionStatus: { state: 'STAGED' } });
+  assert.equal(unversioned.safeToUpload, false);
+});
+
+test('chrome: the 2026-10-18 status now uploads and submits instead of skipping', async () => {
+  const { dir, path } = fixtureZip();
+  try {
+    const impl = fakeFetch([
+      { match: (url) => url.includes('oauth2.googleapis.com/token'), reply: { body: { access_token: 'tok', expires_in: 3600 } } },
+      { match: (url) => url.includes(':fetchStatus'), reply: { body: {
+        itemId: 'x',
+        publishedItemRevisionStatus: { state: 'PUBLISHED', distributionChannels: [{ crxVersion: '2.0.1' }] },
+        submittedItemRevisionStatus: { state: 'STAGED', distributionChannels: [{ crxVersion: '2.0.1' }] }
+      } } },
+      { match: (url) => url.includes(':upload'), reply: { body: { itemId: 'x', crxVersion: '2.0.2', uploadState: 'SUCCEEDED' } } },
+      { match: (url) => url.includes(':publish'), reply: { body: { itemId: 'x', state: 'PENDING_REVIEW' } } }
+    ]);
+    const result = await chrome.publish({ zipPath: path, version: '2.0.2', env: ENV, fetchImpl: impl, log: () => {} });
+    assert.equal(result.status, 'submitted');
+    assert.equal(result.ok, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('chrome: a skip that leaves the store behind is marked deferred; already-published is not', async () => {
+  const run = async (status, version) => {
+    const impl = fakeFetch([
+      { match: (url) => url.includes('oauth2.googleapis.com/token'), reply: { body: { access_token: 'tok', expires_in: 3600 } } },
+      { match: (url) => url.includes(':fetchStatus'), reply: { body: { itemId: 'x', ...status } } }
+    ]);
+    return chrome.publish({ zipPath: '/nonexistent.zip', version, env: ENV, fetchImpl: impl, log: () => {} });
+  };
+  const live = { state: 'PUBLISHED', distributionChannels: [{ crxVersion: '2.0.1' }] };
+
+  const inReview = await run({ publishedItemRevisionStatus: live,
+    submittedItemRevisionStatus: { state: 'PENDING_REVIEW', distributionChannels: [{ crxVersion: '2.0.2' }] } }, '2.0.3');
+  assert.equal(inReview.status, 'skipped');
+  assert.equal(inReview.data.deferred, true);
+
+  const staged = await run({ publishedItemRevisionStatus: live,
+    submittedItemRevisionStatus: { state: 'STAGED', distributionChannels: [{ crxVersion: '2.0.2' }] } }, '2.0.3');
+  assert.equal(staged.status, 'skipped');
+  assert.equal(staged.data.deferred, true);
+
+  const done = await run({ publishedItemRevisionStatus: live }, '2.0.1');
+  assert.equal(done.status, 'skipped');
+  assert.notEqual(done.data.deferred, true);
+
+  const report = { results: [inReview, staged, done] };
+  assert.deepEqual(deferredResults(report).map((r) => r.data.state.submittedState), ['PENDING_REVIEW', 'STAGED']);
+});
+
+test('edge: InProgressSubmission is a deferred skip; NoModulesUpdated is not', () => {
+  assert.equal(edge.describeErrorCode('InProgressSubmission').deferred, true);
+  assert.notEqual(edge.describeErrorCode('NoModulesUpdated').deferred, true);
 });
 
 test('chrome: the happy path is token, status, upload, publish — in that order', async () => {

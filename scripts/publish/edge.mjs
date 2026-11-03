@@ -75,6 +75,8 @@ export const ERROR_CODES = Object.freeze({
   // which can take days. Nothing is wrong; this build simply cannot go now.
   InProgressSubmission: Object.freeze({
     outcome: 'skipped',
+    // This version did not reach Edge; publish.mjs reports it as deferred.
+    deferred: true,
     hint: 'a previous submission is still in certification — retry once it clears (certification can take up to 7 business days)'
   }),
   UnpublishInProgress: Object.freeze({
@@ -559,11 +561,11 @@ export async function publish({
  */
 function terminal(classification, say, result, data = {}) {
   const { errorCode, message } = classification;
-  const { outcome, hint } = describeErrorCode(errorCode);
+  const { outcome, hint, deferred } = describeErrorCode(errorCode);
   const detail = [errorCode, message, hint].filter(Boolean).join(' — ') || 'operation did not succeed';
 
   say(`[edge] ${outcome}: ${detail}`);
-  return result(outcome === 'skipped', outcome, detail, { ...data, errorCode });
+  return result(outcome === 'skipped', outcome, detail, { ...data, errorCode, ...(deferred ? { deferred: true } : {}) });
 }
 
 /**
