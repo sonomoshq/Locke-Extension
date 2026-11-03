@@ -227,38 +227,26 @@ export function classifyStatus(body) {
   const rejected = submittedState === 'REJECTED';
   const takenDown = Boolean(doc.takenDown);
 
-  const publishedVersion = crxVersionOf(published);
-  const submittedVersion = crxVersionOf(submitted);
-
-  // A submitted revision that already went out is not holding anything. CWS
-  // has been observed (v2.0.2 release, 2026-10-18) answering
-  //   published = PUBLISHED 2.0.1, submitted = STAGED 2.0.1
-  // weeks after 2.0.1 went live — despite the reference saying the submitted
-  // status is unset once a publish succeeds. Reading that as "a reviewed but
-  // unreleased build" skipped 2.0.2 on Chrome while Edge and Firefox shipped
-  // it, and every later release would have skipped the same way. The build in
-  // that slot IS the live build, so an upload discards nothing. Only a
-  // reviewed-or-live state qualifies: a PENDING_REVIEW or REJECTED revision at
-  // the live version is still a submission someone has to look at.
-  const staleSubmission = submittedVersion !== null
-    && submittedVersion === publishedVersion
-    && (submittedState === 'STAGED' || submittedState === 'PUBLISHED');
-
   // Anything other than "no meaningful submitted revision" occupies the draft
-  // slot; STAGED in particular is a reviewed-but-unreleased build that an
-  // upload would silently discard.
+  // slot. STAGED in particular is an approved-but-unpublished submission, and
+  // its crxVersion can EQUAL the live one: on 2026-11-03 CWS reported
+  //   published = PUBLISHED 2.0.1, submitted = STAGED 2.0.1
+  // and the staged revision was an approved listing edit (same package, new
+  // listing text) waiting for someone to press Publish. Treating that as stale
+  // and uploading anyway was tried for 2.0.3 and CWS refused the upload with
+  // FAILED_PRECONDITION / NOT_UPDATEABLE ("an item that is in review"). So a
+  // STAGED revision always blocks, whatever its version; the skip is marked
+  // deferred so the release still raises an issue instead of going green.
   const queued = submittedState !== null
     && submittedState !== 'ITEM_STATE_UNSPECIFIED'
-    && submittedState !== 'CANCELLED'
-    && !staleSubmission;
+    && submittedState !== 'CANCELLED';
 
   return {
     inReview,
     rejected,
     takenDown,
-    publishedVersion,
-    submittedVersion,
-    staleSubmission,
+    publishedVersion: crxVersionOf(published),
+    submittedVersion: crxVersionOf(submitted),
     safeToUpload: !queued && !takenDown && !rejected,
     // Extras the caller uses for messages; not part of the decision above.
     publishedState,
@@ -331,6 +319,24 @@ export async function uploadPackage({
 }
 
 /**
+ * The validation warnings from a :publish response, wherever CWS put them.
+ *
+ * On success they are `warningInfo.warnings`. When `blockOnWarnings` stops the
+ * publish, the answer is a google.rpc.Status FAILED_PRECONDITION
+ * (MANUAL_CONFIRMATION_REQUIRED) and the same list arrives as a
+ * `…/google.chrome.webstore.v2.WarningsInfo` entry in `error.details`. Reading
+ * only the first shape logged `warnings: []` for the one failure whose whole
+ * point is "read these warnings" (2.0.3, 2026-11-03).
+ */
+export function publishWarnings(body) {
+  const direct = body?.warningInfo?.warnings;
+  if (Array.isArray(direct) && direct.length) return direct;
+  const details = Array.isArray(body?.error?.details) ? body.error.details : [];
+  const info = details.find((d) => typeof d?.['@type'] === 'string' && d['@type'].endsWith('.WarningsInfo'));
+  return Array.isArray(info?.warnings) ? info.warnings : (Array.isArray(direct) ? direct : []);
+}
+
+/**
  * POST :publish — submits the uploaded draft for review.
  *
  * `blockOnWarnings: true` on purpose: a warning here means the CWS reviewer
@@ -364,7 +370,7 @@ export async function publishItem({
     onRetry
   });
 
-  const warnings = res.json?.warningInfo?.warnings ?? [];
+  const warnings = publishWarnings(res.json);
   return {
     ok: res.ok,
     status: res.status,
@@ -451,9 +457,6 @@ export async function publish({
 
     const state = classifyStatus(gate.json);
     say(`published=${state.publishedVersion ?? 'none'} (${state.publishedState ?? 'unset'}) submitted=${state.submittedState ?? 'unset'} takenDown=${state.takenDown}`);
-    if (state.staleSubmission) {
-      say(`the ${state.submittedState} submitted revision is ${state.submittedVersion}, which is already live — treating the draft slot as free`);
-    }
 
     // Order matters only for the message the operator reads; each of these is
     // a terminal decision for this run.
@@ -488,7 +491,7 @@ export async function publish({
     }
     if (!state.safeToUpload) {
       return outcome(true, 'skipped',
-        `item has an unreleased ${state.submittedState} revision (${state.submittedVersion ?? 'unknown'}) — uploading would discard it; publish or cancel it in the Developer Dashboard, then re-drive chrome`,
+        `item has an unreleased ${state.submittedState} revision (${state.submittedVersion ?? 'unknown'}) — CWS refuses an upload while it is there. It can be an approved listing edit at the live version; publish or cancel it in the Developer Dashboard, then re-drive chrome`,
         { step: 'gate', state, deferred: true });
     }
 
@@ -593,8 +596,15 @@ export async function publish({
     const submitted = await publishItem({ publisherId, extensionId, token, fetchImpl });
     if (!submitted.ok) {
       const warned = submitted.warnings.map((w) => `${w.reason}: ${w.description}`).join('; ');
+      for (const w of submitted.warnings) say(`warning ${w.reason}: ${w.description}`);
+      // blockOnWarnings stopped it AFTER the upload landed: 2.0.x is sitting in
+      // the dashboard as a draft. A re-run uploads the same bytes and stops on
+      // the same warnings, so the next step is a human, not the workflow.
+      const confirm = submitted.warnings.length || /MANUAL_CONFIRMATION_REQUIRED/.test(submitted.error ?? '')
+        ? ` — the package is uploaded as a draft; read the warnings, then submit it from the Developer Dashboard (re-running the release stops here again)`
+        : '';
       return outcome(false, 'failed',
-        `:publish failed — ${submitted.error}${warned ? ` [warnings: ${warned}]` : ''}`,
+        `:publish failed — ${submitted.error}${warned ? ` [warnings: ${warned}]` : ''}${confirm}`,
         { step: 'publish', warnings: submitted.warnings });
     }
 

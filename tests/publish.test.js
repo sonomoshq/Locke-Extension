@@ -280,56 +280,62 @@ test('chrome: a rejected or taken-down item is a hard failure', () => {
   assert.equal(chrome.classifyStatus({ takenDown: true }).takenDown, true);
 });
 
-test('chrome: a STAGED submitted revision that is already live does not block the upload', () => {
-  // The literal :fetchStatus shape the v2.0.2 release read on 2026-10-18,
-  // weeks after 2.0.1 went live. Treating it as an unreleased build skipped
-  // 2.0.2 on Chrome while Edge and Firefox shipped it.
-  const stale = chrome.classifyStatus({
+test('chrome: a STAGED revision blocks even at the live version, and the skip is deferred', async () => {
+  // The literal :fetchStatus shape from 2026-10-18 and 2026-11-03. It looked
+  // stale, but it was an approved listing edit awaiting Publish, and CWS
+  // refused an upload over it (FAILED_PRECONDITION / NOT_UPDATEABLE).
+  const body = {
+    itemId: 'x',
     publishedItemRevisionStatus: { state: 'PUBLISHED', distributionChannels: [{ crxVersion: '2.0.1' }] },
     submittedItemRevisionStatus: { state: 'STAGED', distributionChannels: [{ crxVersion: '2.0.1' }] }
-  });
-  assert.equal(stale.staleSubmission, true);
-  assert.equal(stale.safeToUpload, true);
+  };
+  assert.equal(chrome.classifyStatus(body).safeToUpload, false);
+  assert.equal(chrome.classifyStatus({ submittedItemRevisionStatus: { state: 'STAGED' } }).safeToUpload, false);
 
-  // A STAGED build NEWER than what is live is real, unreleased work: still blocks.
-  const staged = chrome.classifyStatus({
-    publishedItemRevisionStatus: { state: 'PUBLISHED', distributionChannels: [{ crxVersion: '2.0.1' }] },
-    submittedItemRevisionStatus: { state: 'STAGED', distributionChannels: [{ crxVersion: '2.0.2' }] }
-  });
-  assert.equal(staged.staleSubmission, false);
-  assert.equal(staged.safeToUpload, false);
-
-  // A review or rejection at the live version still needs a human.
-  for (const state of ['PENDING_REVIEW', 'REJECTED']) {
-    const held = chrome.classifyStatus({
-      publishedItemRevisionStatus: { state: 'PUBLISHED', distributionChannels: [{ crxVersion: '2.0.1' }] },
-      submittedItemRevisionStatus: { state, distributionChannels: [{ crxVersion: '2.0.1' }] }
-    });
-    assert.equal(held.staleSubmission, false, state);
-    assert.equal(held.safeToUpload, false, state);
-  }
-
-  // No version on either side is not "equal": an unversioned STAGED revision blocks.
-  const unversioned = chrome.classifyStatus({ submittedItemRevisionStatus: { state: 'STAGED' } });
-  assert.equal(unversioned.safeToUpload, false);
+  const impl = fakeFetch([
+    { match: (url) => url.includes('oauth2.googleapis.com/token'), reply: { body: { access_token: 'tok', expires_in: 3600 } } },
+    { match: (url) => url.includes(':fetchStatus'), reply: { body } }
+  ]);
+  const result = await chrome.publish({ zipPath: '/nonexistent.zip', version: '2.0.3', env: ENV, fetchImpl: impl, log: () => {} });
+  assert.equal(result.status, 'skipped');
+  assert.equal(result.data.deferred, true);
+  assert.match(result.message, /Developer Dashboard/);
+  assert.ok(!impl.calls.some((c) => c.url.includes(':upload')), 'must not attempt an upload over a STAGED revision');
 });
 
-test('chrome: the 2026-10-18 status now uploads and submits instead of skipping', async () => {
+test('chrome: publish warnings are read from the error details when blockOnWarnings stops the publish', async () => {
+  const blocked = {
+    error: {
+      code: 400,
+      status: 'FAILED_PRECONDITION',
+      message: 'Validation warnings were encountered that require confirmation.',
+      details: [
+        { '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'MANUAL_CONFIRMATION_REQUIRED' },
+        { '@type': 'type.googleapis.com/google.chrome.webstore.v2.WarningsInfo',
+          warnings: [{ reason: 'BROAD_HOST_PERMISSIONS', description: 'may require an in-depth review' }] }
+      ]
+    }
+  };
+  assert.deepEqual(chrome.publishWarnings(blocked).map((w) => w.reason), ['BROAD_HOST_PERMISSIONS']);
+  assert.deepEqual(chrome.publishWarnings({ warningInfo: { warnings: [{ reason: 'R', description: 'D' }] } }).map((w) => w.reason), ['R']);
+  assert.deepEqual(chrome.publishWarnings({}), []);
+  assert.deepEqual(chrome.publishWarnings(null), []);
+
   const { dir, path } = fixtureZip();
   try {
+    const logged = [];
     const impl = fakeFetch([
       { match: (url) => url.includes('oauth2.googleapis.com/token'), reply: { body: { access_token: 'tok', expires_in: 3600 } } },
-      { match: (url) => url.includes(':fetchStatus'), reply: { body: {
-        itemId: 'x',
-        publishedItemRevisionStatus: { state: 'PUBLISHED', distributionChannels: [{ crxVersion: '2.0.1' }] },
-        submittedItemRevisionStatus: { state: 'STAGED', distributionChannels: [{ crxVersion: '2.0.1' }] }
-      } } },
-      { match: (url) => url.includes(':upload'), reply: { body: { itemId: 'x', crxVersion: '2.0.2', uploadState: 'SUCCEEDED' } } },
-      { match: (url) => url.includes(':publish'), reply: { body: { itemId: 'x', state: 'PENDING_REVIEW' } } }
+      { match: (url) => url.includes(':fetchStatus'), reply: { body: { itemId: 'x', publishedItemRevisionStatus: { state: 'PUBLISHED', distributionChannels: [{ crxVersion: '2.0.1' }] } } } },
+      { match: (url) => url.includes(':upload'), reply: { body: { itemId: 'x', crxVersion: '2.0.3', uploadState: 'SUCCEEDED' } } },
+      { match: (url) => url.includes(':publish'), reply: { status: 400, body: blocked } }
     ]);
-    const result = await chrome.publish({ zipPath: path, version: '2.0.2', env: ENV, fetchImpl: impl, log: () => {} });
-    assert.equal(result.status, 'submitted');
-    assert.equal(result.ok, true);
+    const result = await chrome.publish({ zipPath: path, version: '2.0.3', env: ENV, fetchImpl: impl, log: (m) => logged.push(m) });
+    assert.equal(result.status, 'failed');
+    assert.match(result.message, /BROAD_HOST_PERMISSIONS: may require an in-depth review/);
+    assert.match(result.message, /submit it from the Developer Dashboard/);
+    assert.equal(result.data.warnings.length, 1);
+    assert.ok(logged.some((m) => m.includes('warning BROAD_HOST_PERMISSIONS')), 'the warning must reach the job log');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
