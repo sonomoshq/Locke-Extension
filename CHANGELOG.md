@@ -8,6 +8,31 @@ strict SemVer.
 
 ## [Unreleased]
 
+<!-- store-notes-end -->
+
+The engineering log for this release follows. Only the summary above the
+marker is sent to the stores.
+
+### Fixed — Chrome publishing: a staged revision always blocks, and blocked-on-warnings says why
+
+Two things the 2.0.3 release (2026-11-03) showed:
+
+- **Reverted the 2.0.3 "stale STAGED" shortcut.** `classifyStatus` treated a
+  `STAGED` submitted revision at the live crxVersion as stale and uploaded over
+  it. CWS refused: `FAILED_PRECONDITION … You may not edit or publish an item
+  that is in review (NOT_UPDATEABLE)`. The staged revision was an approved
+  listing edit (same 2.0.1 package, new listing text) waiting for Publish. A
+  `STAGED` revision now always blocks, as a `deferred` skip that tells the
+  operator to publish or cancel it in the dashboard. The 2.0.3 alerting stays,
+  so the skip still fails the step and opens an issue.
+- **`:publish` warnings are no longer dropped.** When `blockOnWarnings` stops a
+  publish, CWS answers `FAILED_PRECONDITION` (`MANUAL_CONFIRMATION_REQUIRED`)
+  and puts the warnings in `error.details` as a `WarningsInfo` entry, not in
+  `warningInfo`. The publisher read only `warningInfo`, so the 2.0.3 report
+  said `warnings: []`. `publishWarnings()` reads both, prints each warning to
+  the job log, and the failure message says the package is uploaded as a draft
+  and should be submitted from the dashboard rather than re-run.
+
 ## [2.0.3] — 2026-11-03
 
 **Summary.** 2.0.3 changes the extension's icon to the Locke logo. The package
