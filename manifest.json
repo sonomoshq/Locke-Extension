@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Locke Extension",
   "short_name": "Locke",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Connects your browser to the Locke desktop app so web requests are checked on-device for AI traffic and screened before they leave.",
   "author": "Sonomos, Inc.",
   "minimum_chrome_version": "120",
