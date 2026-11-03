@@ -202,6 +202,37 @@ strict SemVer.
   submitted — an icon change is a package change, and every store rejects a
   re-upload of an existing version, so it ships with the next `npm run bump`.
 
+<!-- store-notes-end -->
+
+The engineering log for this release follows. Only the summary above the
+marker is sent to the stores.
+
+### Fixed — v2.0.2 never reached the Chrome Web Store, and nothing said so
+
+The 2026-10-18 release shipped 2.0.2 to Edge and Firefox and skipped Chrome:
+`:fetchStatus` answered `published = PUBLISHED 2.0.1, submitted = STAGED 2.0.1`
+weeks after 2.0.1 went live, and `classifyStatus` read every `STAGED`
+submitted revision as a reviewed-but-unreleased build an upload would discard.
+The skip was `ok: true`, so the step went green, `publish-failure-notice` never
+ran, and no issue was opened. Every later release would have skipped the same
+way.
+
+- `scripts/publish/chrome.mjs`: a `STAGED` or `PUBLISHED` submitted revision
+  whose crxVersion is the live crxVersion is stale (`staleSubmission`) and no
+  longer blocks the upload. A `STAGED` build newer than what is live, and a
+  `PENDING_REVIEW`/`REJECTED` revision at any version, still block.
+- Skips that leave a store behind the release version — Chrome in review or
+  holding a real staged build, Edge `InProgressSubmission` — now carry
+  `data.deferred: true`. `scripts/publish.mjs` exits non-zero on them, so the
+  `store-publish` step reports failure (the job is still continue-on-error;
+  `main` stays green) and the failure issue is opened. "Already at this
+  version" skips stay exit 0, so a re-run over a finished release is quiet.
+- `release.yml`'s run summary prints those as `NOT SHIPPED (store busy —
+  re-drive needed)` rather than `skipped`, and the failure issue lists the
+  busy-store case.
+- Operator action: re-drive Chrome for 2.0.2 with the Release workflow,
+  `force: true`, `stores: chrome`.
+
 ## [2.0.2] — 2026-09-08
 
 **Summary.** 2.0.2 raises the fail-closed verdict ceiling so a cold screen of a

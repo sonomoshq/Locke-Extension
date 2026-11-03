@@ -426,11 +426,11 @@ current wall clock into every entry.
 
 | Symptom | What it means | What to do |
 |---|---|---|
-| chrome `skipped`: item is already `PENDING_REVIEW` | A submission is queued; CWS refuses an upload while one is | Wait for the review to finish, then re-run `npm run publish-stores -- --store=chrome`.  Not a failure. |
+| chrome `skipped`: item is already `PENDING_REVIEW` | A submission is queued; CWS refuses an upload while one is | Wait for the review to finish, then re-drive Chrome (Release workflow, `force: true`, `stores: chrome`).  Marked `deferred`: the publish step exits non-zero and an issue is opened, because this version has **not** reached Chrome. |
 | chrome `skipped`: version already published | CWS always rejects a re-upload of an existing `crxVersion` | Bump to a new version and merge again.  A re-run against a finished release is expected to skip. |
-| chrome `skipped`: unreleased `STAGED` revision | A reviewed-but-unreleased build occupies the draft slot; uploading would discard it | Release or cancel it in the Developer Dashboard, then re-run. |
+| chrome `skipped`: unreleased `STAGED` revision | A reviewed-but-unreleased build occupies the draft slot; uploading would discard it | Release or cancel it in the Developer Dashboard, then re-drive Chrome.  Marked `deferred` (exit non-zero, issue opened).  A `STAGED` revision whose version is the one already live is *not* this case — CWS reports that stale state after a normal publish, and the publisher logs it and uploads anyway. |
 | chrome `failed`: `token refresh failed — invalid_grant` | The refresh token expired (7 days, while the consent screen is in Testing) or was revoked | Mint a new `CWS_REFRESH_TOKEN`; see `CREDENTIALS.md`.  On an unattended pipeline this is the failure you should expect most often. |
-| edge `skipped`: `InProgressSubmission` | A previous submission is still in certification, which can take 7 business days | Retry once it clears.  Nothing is wrong. |
+| edge `skipped`: `InProgressSubmission` | A previous submission is still in certification, which can take 7 business days | Re-drive Edge once it clears.  Nothing is broken, but this version has not reached Edge, so it is marked `deferred` (exit non-zero, issue opened). |
 | edge `skipped`: `NoModulesUpdated` | The draft is byte-identical to what is already live | Nothing to submit.  This is the normal result of a merge that did not change the extension. |
 | edge `failed`: `CreateNotAllowed` | The Update API can update a product but can never create one | Create the extension once by hand in Partner Center, then set `EDGE_PRODUCT_ID`. |
 | edge `failed`: `ModuleStateUnPublishable` | The Partner Center listing/availability sections are incomplete | Finish the listing by hand, then re-run. |

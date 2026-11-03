@@ -306,7 +306,10 @@ test('release.yml tells a skipped store apart from a shipped one, and says when 
   // Every publisher returns ok:true, status:'skipped' for "already in review"
   // and "already at this version"; labelling that "shipped" is a lie in the
   // one place the operator reads.
-  assert.match(text, /s\.status === "skipped" \? "skipped"/);
+  assert.match(text, /s\.status === "skipped"\s*\?/);
+  // A deferred skip (store busy, this version never uploaded) must read as
+  // NOT shipped — a plain "skipped" is how v2.0.2 sat off Chrome unnoticed.
+  assert.match(text, /s\.data\?\.deferred \? "NOT SHIPPED/);
   // publish.mjs writes releaseNotes:false when the CHANGELOG section was
   // empty or placeholder-only; the summary is the only place it surfaces.
   assert.match(text, /r\.releaseNotes === false/);

@@ -145,6 +145,24 @@ export async function publishAll({ stores = STORES, dryRun = false, env = loadEn
   return { version, dryRun, releaseNotes: Boolean(releaseNotes), results };
 }
 
+/**
+ * Skips that leave a store BEHIND this version: the store was busy (a review
+ * or certification still queued, a staged build in the way), so nothing was
+ * uploaded and someone has to re-drive that store later.
+ *
+ * These are `ok: true` because nothing is broken — but they are not success
+ * either. Until 2026-11 they exited 0, the release went green, no issue was
+ * opened, and v2.0.2 sat unpublished on Chrome for two weeks while Edge and
+ * Firefox shipped it. So the runner exits non-zero for them: release.yml's
+ * store-publish step is continue-on-error, so main stays green and
+ * publish-failure-notice raises the issue. "Already at this version" skips
+ * carry no `deferred` flag and stay exit 0 — a re-run against a finished
+ * release must stay quiet.
+ */
+export function deferredResults(report) {
+  return (report?.results ?? []).filter((r) => r.ok && r.status === 'skipped' && r.data?.deferred === true);
+}
+
 const isMain = process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
 
 if (isMain) {
@@ -200,8 +218,12 @@ if (isMain) {
   console.log(`\nreport: ${reportPath}`);
 
   const failed = report.results.filter((r) => !r.ok);
+  const deferred = deferredResults(report);
   if (failed.length) {
     console.error(redact(`${failed.length} store(s) failed: ${failed.map((r) => r.store).join(', ')}`, secrets));
-    process.exit(1);
   }
+  if (deferred.length) {
+    console.error(redact(`${deferred.length} store(s) did not receive ${version} and need a re-drive: ${deferred.map((r) => r.store).join(', ')}`, secrets));
+  }
+  if (failed.length || deferred.length) process.exit(1);
 }

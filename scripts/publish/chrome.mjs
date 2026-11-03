@@ -227,19 +227,38 @@ export function classifyStatus(body) {
   const rejected = submittedState === 'REJECTED';
   const takenDown = Boolean(doc.takenDown);
 
+  const publishedVersion = crxVersionOf(published);
+  const submittedVersion = crxVersionOf(submitted);
+
+  // A submitted revision that already went out is not holding anything. CWS
+  // has been observed (v2.0.2 release, 2026-10-18) answering
+  //   published = PUBLISHED 2.0.1, submitted = STAGED 2.0.1
+  // weeks after 2.0.1 went live — despite the reference saying the submitted
+  // status is unset once a publish succeeds. Reading that as "a reviewed but
+  // unreleased build" skipped 2.0.2 on Chrome while Edge and Firefox shipped
+  // it, and every later release would have skipped the same way. The build in
+  // that slot IS the live build, so an upload discards nothing. Only a
+  // reviewed-or-live state qualifies: a PENDING_REVIEW or REJECTED revision at
+  // the live version is still a submission someone has to look at.
+  const staleSubmission = submittedVersion !== null
+    && submittedVersion === publishedVersion
+    && (submittedState === 'STAGED' || submittedState === 'PUBLISHED');
+
   // Anything other than "no meaningful submitted revision" occupies the draft
   // slot; STAGED in particular is a reviewed-but-unreleased build that an
   // upload would silently discard.
   const queued = submittedState !== null
     && submittedState !== 'ITEM_STATE_UNSPECIFIED'
-    && submittedState !== 'CANCELLED';
+    && submittedState !== 'CANCELLED'
+    && !staleSubmission;
 
   return {
     inReview,
     rejected,
     takenDown,
-    publishedVersion: crxVersionOf(published),
-    submittedVersion: crxVersionOf(submitted),
+    publishedVersion,
+    submittedVersion,
+    staleSubmission,
     safeToUpload: !queued && !takenDown && !rejected,
     // Extras the caller uses for messages; not part of the decision above.
     publishedState,
@@ -432,13 +451,18 @@ export async function publish({
 
     const state = classifyStatus(gate.json);
     say(`published=${state.publishedVersion ?? 'none'} (${state.publishedState ?? 'unset'}) submitted=${state.submittedState ?? 'unset'} takenDown=${state.takenDown}`);
+    if (state.staleSubmission) {
+      say(`the ${state.submittedState} submitted revision is ${state.submittedVersion}, which is already live — treating the draft slot as free`);
+    }
 
     // Order matters only for the message the operator reads; each of these is
     // a terminal decision for this run.
     if (state.inReview) {
       return outcome(true, 'skipped',
         `item is already PENDING_REVIEW (submitted ${state.submittedVersion ?? 'unknown'}) — CWS refuses an upload while a submission is queued; re-run after the review completes`,
-        { step: 'gate', state });
+        // deferred: this version did NOT reach the store. publish.mjs exits
+        // non-zero on it so the release raises an issue instead of going green.
+        { step: 'gate', state, deferred: true });
     }
     if (state.takenDown) {
       return outcome(false, 'failed',
@@ -464,8 +488,8 @@ export async function publish({
     }
     if (!state.safeToUpload) {
       return outcome(true, 'skipped',
-        `item has an unreleased ${state.submittedState} revision (${state.submittedVersion ?? 'unknown'}) — uploading would discard it`,
-        { step: 'gate', state });
+        `item has an unreleased ${state.submittedState} revision (${state.submittedVersion ?? 'unknown'}) — uploading would discard it; publish or cancel it in the Developer Dashboard, then re-drive chrome`,
+        { step: 'gate', state, deferred: true });
     }
 
     if (dryRun) {
