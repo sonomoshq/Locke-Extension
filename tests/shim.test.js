@@ -294,6 +294,41 @@ test('shim captures a Request-object body binary-safely', async () => {
   assert.deepEqual(new Uint8Array(await released.arrayBuffer()), bytes);
 });
 
+// Firefox has no `Request.prototype.body`: it reads undefined for every
+// Request. Gemini web posts each prompt as fetch(new Request(url, {method:
+// 'POST', body})), so the shim read "no body" and let every prompt through.
+// Simulate Firefox by removing the accessor from Request.prototype for the
+// duration of one test.
+async function asFirefox(fn) {
+  const desc = Object.getOwnPropertyDescriptor(Request.prototype, 'body');
+  delete Request.prototype.body;
+  try { return await fn(); } finally { Object.defineProperty(Request.prototype, 'body', desc); }
+}
+
+test('Firefox: a Request-object body (no Request.body) is still screened', async () => {
+  const captured = [];
+  const { sandbox } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; });
+  await asFirefox(async () => {
+    const req = new Request(AI_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'f.req=my+name+is+paul+revere'
+    });
+    assert.equal('body' in req, false, 'simulating a Request without .body');
+    await sandbox.fetch(req);
+  });
+  assert.equal(captured.length, 1, 'the prompt must reach the screener');
+  assert.equal(splitRaw(rawOf(captured[0])).body.toString(), 'f.req=my+name+is+paul+revere');
+});
+
+test('Firefox: a bodyless POST Request still goes out untouched', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; });
+  await asFirefox(() => sandbox.fetch(new Request(AI_URL, { method: 'POST' })));
+  assert.equal(captured.length, 0);
+  assert.equal(netCalls.length, 1);
+});
+
 // ── receipt handling ───────────────────────────────────────────────
 
 test('redact: shim re-issues the rebuilt body BYTES with the rebuilt Content-Type', async () => {
