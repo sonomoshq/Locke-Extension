@@ -2917,6 +2917,21 @@
     return raw;
   }
 
+  // Can this Request object carry a body? `request.body` is the obvious test,
+  // but Firefox does not implement `Request.prototype.body` at all — it reads
+  // `undefined` for every Request, body or not. Gemini web sends each prompt as
+  // `fetch(new Request(url, { method: 'POST', body }))`, so on Firefox every
+  // prompt read as "no body" and went out unscreened. Where `body` is not
+  // implemented, any method that may carry one counts as maybe-bodied, and the
+  // capture below reads the clone to find out.
+  function requestMayHaveBody(req) {
+    if (!req || typeof req !== 'object') return false;
+    if (req.body != null) return true;
+    if ('body' in req) return false; // implemented and null → truly no body
+    const m = String(req.method || 'GET').toUpperCase();
+    return m !== 'GET' && m !== 'HEAD';
+  }
+
   // Does this fetch carry a body at all? Existence only — no capture, no
   // consumption. Used to decide whether an UNRESOLVABLE target is a "couldn't
   // check" state worth blocking or just a bodyless call to ignore. If we
@@ -2925,7 +2940,7 @@
   function hasFetchBody(input, init) {
     try {
       if (init && 'body' in init) return init.body != null && init.body !== '';
-      return !!(input && typeof input === 'object' && input.body != null);
+      return requestMayHaveBody(input);
     } catch {
       return true;
     }
@@ -3021,7 +3036,7 @@
             cap = await captureBodyBytes(frozen.uncapturableBody);
           } else if (initBody !== undefined && initBody !== null) {
             cap = await captureBodyBytes(initBody);
-          } else if (reqObj && typeof reqObj.clone === 'function' && reqObj.body != null) {
+          } else if (reqObj && typeof reqObj.clone === 'function' && requestMayHaveBody(reqObj)) {
             // Body carried on the Request object — clone so the held original
             // stays sendable, and read the exact bytes (binary-safe). A
             // Request's body is immutable once constructed, so this one needs
@@ -3031,7 +3046,9 @@
             try {
               let reqCt = null;
               try { reqCt = reqObj.headers ? reqObj.headers.get('content-type') : null; } catch { /* no readable headers */ }
-              cap = capped(new Uint8Array(await reqObj.clone().arrayBuffer()), reqCt);
+              const bytes = new Uint8Array(await reqObj.clone().arrayBuffer());
+              // Firefox (no `Request.body`): a bodyless POST reads zero bytes.
+              cap = bytes.byteLength === 0 && !('body' in reqObj) ? NO_BODY : capped(bytes, reqCt);
             } catch {
               cap = uncapturable('uncapturable-request-clone'); // in scope, fail closed
             }
