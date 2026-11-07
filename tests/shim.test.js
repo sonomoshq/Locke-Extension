@@ -5162,6 +5162,7 @@ const GEMINI_PROMPT_URL = 'https://geminiweb-pa.clients6.google.com/v1/processSe
 const GEMINI_PROMPT_BODY = 'count=1&ofs=1&req0___data__=Eh8IAUobChlyZXBlYXQ6IHRlc3QxMjNAZ21haWwuY29t';
 const GEMINI_GLOBALS = {
   ...pageAt('gemini.google.com', '/app'),
+  SONOMOS_WEB_HOST_ALIASES: { 'geminiweb-pa.clients6.google.com': 'gemini.google.com' },
   SONOMOS_WEB_HOSTS: ['gemini.google.com', 'aistudio.google.com', 'geminiweb-pa.clients6.google.com'],
   SONOMOS_WEB_PROVIDERS: {
     'gemini.google.com': 'google', 'aistudio.google.com': 'google',
@@ -5202,4 +5203,43 @@ test('gemini: without data-sharing consent the geminiweb-pa XHR is refused on it
   assert.equal(xhr.sent.length, 0, 'nothing left the page');
   assert.equal(captured[0].coverage, 'capture_path');
   assert.equal(captured[0].provider, 'google');
+});
+
+// Nate, 2026-11-07: turning off Gemini covers geminiweb-pa too. The alias is a
+// request-only host (web_host_aliases); it is disabled exactly when its page
+// host is, and it is never screened LESS than that host.
+async function geminiPromptWorld(config, globals = GEMINI_GLOBALS) {
+  const captured = [];
+  const w = makeWorld((msg) => { captured.push(msg); return allowVerdict; }, globals);
+  if (config) w.deliver({ type: 'SONOMOS_CONFIG', config });
+  await w.sandbox.fetch(GEMINI_PROMPT_URL, { method: 'POST', body: GEMINI_PROMPT_BODY });
+  return { captured, ...w };
+}
+
+test('gemini alias: page host switched off, a request to geminiweb-pa passes untouched', async () => {
+  const { captured, netCalls } = await geminiPromptWorld({ disabledWebHosts: ['gemini.google.com'] });
+  assert.equal(captured.length, 0, 'the user switched Gemini off');
+  assert.equal(netCalls.length, 1, 'the request still went out');
+});
+
+test('gemini alias: listing the alias itself also switches it off', async () => {
+  const { captured } = await geminiPromptWorld({ disabledWebHosts: ['geminiweb-pa.clients6.google.com'] });
+  assert.equal(captured.length, 0);
+});
+
+test('gemini alias: page host on, the alias is screened as capture_path', async () => {
+  for (const config of [{}, { disabledWebHosts: ['aistudio.google.com'] }]) {
+    const { captured } = await geminiPromptWorld(config);
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].coverage, 'capture_path');
+    assert.equal(captured[0].provider, 'google');
+  }
+});
+
+test('gemini alias: unreadable alias data still screens the request', async () => {
+  for (const bad of [undefined, null, 'x', 7, [], { 'geminiweb-pa.clients6.google.com': 5 }, { 'geminiweb-pa.clients6.google.com': null }]) {
+    const { captured } = await geminiPromptWorld(
+      { disabledWebHosts: ['gemini.google.com'] }, { ...GEMINI_GLOBALS, SONOMOS_WEB_HOST_ALIASES: bad });
+    assert.equal(captured.length, 1, `alias data ${JSON.stringify(bad)} must fail toward screening`);
+  }
 });

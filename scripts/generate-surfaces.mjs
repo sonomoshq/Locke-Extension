@@ -60,6 +60,24 @@ for (const p of surfaces.providers) {
   }
 }
 const hosts = [...hostSet].sort();
+// Request-only web hosts and the page host each follows (`web_host_aliases`).
+// The shim treats an alias as disabled exactly when its page host is, so
+// switching a site off silences the host its prompts actually target. The
+// catalog rules (key and value in the same provider's web_hosts, no chains)
+// are linted in sonomos-vocab; a bad entry here stops the build rather than
+// ship an alias that could screen LESS than its page host.
+const webHostAliases = {};
+for (const p of surfaces.providers) {
+  const own = new Set((p.web_hosts || []).map((h) => h.toLowerCase()));
+  const entries = Object.entries(p.web_host_aliases || {}).map(([a, t]) => [a.toLowerCase(), String(t).toLowerCase()]);
+  const aliasKeys = new Set(entries.map(([a]) => a));
+  for (const [alias, page] of entries) {
+    if (!own.has(alias) || !own.has(page) || aliasKeys.has(page) || alias === page) {
+      throw new Error(`ai-surfaces.json: web_host_aliases ${alias} -> ${page} ("${p.id}") must name two distinct web_hosts of one provider, and the target must not be an alias`);
+    }
+    webHostAliases[alias] = page;
+  }
+}
 // The catalog's API hosts (the proxy's side). Not injected into and not a
 // coverage tier; read only by the shim's Locke-unreachable rule, so a browser
 // request straight to an AI API never takes that pass.
@@ -141,6 +159,7 @@ writeIfChanged(
   banner +
     `globalThis.SONOMOS_WEB_HOSTS = ${JSON.stringify(hosts)};\n` +
     `globalThis.SONOMOS_WEB_PROVIDERS = ${JSON.stringify(providers)};\n` +
+    `globalThis.SONOMOS_WEB_HOST_ALIASES = ${JSON.stringify(webHostAliases)};\n` +
     `globalThis.SONOMOS_CAPTURE_PATHS = ${JSON.stringify(capturePaths)};\n` +
     `globalThis.SONOMOS_SKIP_PATH_SEGMENTS = ${JSON.stringify(skipSegments)};\n` +
     `globalThis.SONOMOS_API_HOSTS = ${JSON.stringify(apiHosts)};\n`

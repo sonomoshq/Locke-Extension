@@ -436,11 +436,41 @@
     if (disabledHosts.size === 0) return false;
     const h = String(host || '').replace(/\.+$/, '').toLowerCase();
     if (h === '') return false;
+    if (disabledEntry(h)) return true;
+    // A request-only alias (geminiweb-pa.clients6.google.com follows
+    // gemini.google.com) is disabled when its PAGE host is: the user switched
+    // the site off, and the site's prompts target the alias. Never the other
+    // way: an alias can only ever be screened as much as its page host, and
+    // an unreadable alias map is an empty one, which screens it.
+    const page = aliasPageHost(h);
+    return page !== null && disabledEntry(page);
+  }
+  function disabledEntry(h) {
     if (disabledHosts.has(h)) return true;
     for (const off of disabledHosts) {
       if (h.endsWith(`.${off}`)) return true;
     }
     return false;
+  }
+  // `web_host_aliases` from the catalog, read defensively: anything that is
+  // not a string -> string pair is dropped, so garbled data means no alias.
+  const WEB_HOST_ALIASES = (() => {
+    const out = new Map();
+    const raw = globalThis.SONOMOS_WEB_HOST_ALIASES;
+    if (!raw || typeof raw !== 'object') return out;
+    for (const [alias, page] of Object.entries(raw)) {
+      if (typeof page !== 'string') continue;
+      const a = String(alias).replace(/\.+$/, '').toLowerCase();
+      const p = page.replace(/\.+$/, '').toLowerCase();
+      if (a !== '' && p !== '' && a !== p) out.set(a, p);
+    }
+    return out;
+  })();
+  function aliasPageHost(h) {
+    for (const [alias, page] of WEB_HOST_ALIASES) {
+      if (h === alias || h.endsWith(`.${alias}`)) return page;
+    }
+    return null;
   }
 
   // ── surfaces an ADMIN policy excluded ───────────────────────────────────
