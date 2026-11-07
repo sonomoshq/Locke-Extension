@@ -503,7 +503,18 @@
   // not a host at all.
   function isScreenedHost(host) {
     const h = String(host || '').replace(/\.+$/, '');
-    return h !== '' && !isDisabledHost(h) && isProviderAllowed(h);
+    return h !== '' && !isSonomosHost(h) && !isDisabledHost(h) && isProviderAllowed(h);
+  }
+
+  // Sonomos's own sites (`sonomos.ai` and every subdomain: Clerk's sign-in at
+  // clerk.sonomos.ai, the account portal, the website) are never held. They
+  // are how a user gets Locke working again, and when Locke was off or still
+  // starting every POST to them was blocked as `bridge-unreachable` — Clerk's
+  // sign-in included, so the user could not sign in to the very app that
+  // would unblock it. Nobody sends an AI prompt to these hosts.
+  function isSonomosHost(host) {
+    const h = String(host || '').replace(/\.+$/, '').toLowerCase();
+    return h === 'sonomos.ai' || h.endsWith('.sonomos.ai');
   }
 
   // A catalog surface still in scope: the bound on the two decisions the

@@ -512,6 +512,33 @@ test('fail-closed: a bridge-unreachable relay failure is told apart from a missi
   assert.match(line, /\bcode=bridge-unreachable\b/);
 });
 
+// Sonomos's own sites are never held: with Locke off, blocking them blocked
+// Clerk's sign-in, which is how the user gets Locke working again.
+test('Sonomos hosts (*.sonomos.ai) go out untouched even when Locke is unreachable', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => {
+    captured.push(msg);
+    return { ok: false, code: 'bridge-unreachable', message: 'no socket' };
+  });
+  for (const url of [
+    'https://clerk.sonomos.ai/v1/client/sign_ins',
+    'https://accounts.sonomos.ai/sign-in',
+    'https://sonomos.ai/contact',
+  ]) {
+    await sandbox.fetch(url, { method: 'POST', body: 'identifier=jane%40example.com' });
+  }
+  assert.equal(captured.length, 0, 'never sent for screening');
+  assert.equal(netCalls.length, 3, 'all three went out');
+});
+
+test('a look-alike host (notsonomos.ai, sonomos.ai.evil.com) is still held', async () => {
+  const { sandbox, netCalls } = makeWorld(() => ({ ok: false, code: 'bridge-unreachable', message: 'no socket' }));
+  for (const url of ['https://notsonomos.ai/x', 'https://sonomos.ai.evil.com/x']) {
+    await assert.rejects(sandbox.fetch(url, { method: 'POST', body: 'x' }), blockedError);
+  }
+  assert.equal(netCalls.length, 0);
+});
+
 // The same wrong-advice shape as above, recurring through a code `decide()`
 // never classified: `receipt-too-large` — raised by the native messaging host
 // — means the host answered, the desktop app answered AND
@@ -4672,7 +4699,8 @@ test('fail-open: oversize, stream and unreadable bodies send unscreened in an op
 // generated API-host list loaded, and never an upload.
 
 const OPEN_WEB_URL = 'https://accounts.example.com/signin/v2/challenge';
-const CLERK_URL = 'https://clerk.sonomos.ai/v1/client/sign_ins';
+// A third-party Clerk tenant: Sonomos's own clerk.sonomos.ai is never held at all.
+const CLERK_URL = 'https://clerk.example-app.com/v1/client/sign_ins';
 const GOOGLE_LOGIN_URL = 'https://accounts.google.com/v3/signin/_/AccountsSignInUi/data/batchexecute';
 const CATALOG_HOST_URL = 'https://chatgpt.com/backend-api/me'; // off CHATGPT_PATHS's capture paths
 const CAPTURE_PATH_URL = 'https://chatgpt.com/backend-api/conversation';
