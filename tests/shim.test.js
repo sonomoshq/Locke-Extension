@@ -5151,3 +5151,55 @@ test('the user fail-open window keeps its own reason and tally', async () => {
     assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'), code);
   }
 });
+
+// ── Gemini web's prompt endpoint (seen 2026-11-07) ─────────────────────────
+// Gemini web posts prompts as an XHR to geminiweb-pa.clients6.google.com with a
+// WebChannel form body (`req0___data__` = base64 protobuf). The host is in the
+// google entry's web_hosts, so it is a capture path attributed to `google`
+// rather than open_web with no provider (which the guard's discovery gate
+// called "not an AI request").
+const GEMINI_PROMPT_URL = 'https://geminiweb-pa.clients6.google.com/v1/processSession';
+const GEMINI_PROMPT_BODY = 'count=1&ofs=1&req0___data__=Eh8IAUobChlyZXBlYXQ6IHRlc3QxMjNAZ21haWwuY29t';
+const GEMINI_GLOBALS = {
+  ...pageAt('gemini.google.com', '/app'),
+  SONOMOS_WEB_HOSTS: ['gemini.google.com', 'aistudio.google.com', 'geminiweb-pa.clients6.google.com'],
+  SONOMOS_WEB_PROVIDERS: {
+    'gemini.google.com': 'google', 'aistudio.google.com': 'google',
+    'geminiweb-pa.clients6.google.com': 'google'
+  }
+};
+
+test('gemini: an XHR prompt to geminiweb-pa is captured as capture_path, provider google', async () => {
+  const captured = [];
+  const { sandbox } = makeXhrWorld((msg) => { captured.push(msg); return allowVerdict; },
+    { extraGlobals: GEMINI_GLOBALS });
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', GEMINI_PROMPT_URL, true);
+  xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded;charset=UTF-8');
+  xhr.send(GEMINI_PROMPT_BODY);
+
+  await waitFor(() => xhr.sent.length === 1);
+  assert.equal(captured.length, 1, 'the prompt was sent for screening');
+  assert.equal(captured[0].coverage, 'capture_path');
+  assert.equal(captured[0].provider, 'google');
+  const raw = rawOf(captured[0].requestB64).toString('utf8');
+  assert.match(raw, /^POST \/v1\/processSession HTTP\/1\.1\r\nHost: geminiweb-pa\.clients6\.google\.com\r\n/);
+  assert.ok(raw.endsWith(GEMINI_PROMPT_BODY));
+  assert.equal(xhr.sent[0], GEMINI_PROMPT_BODY);
+});
+
+test('gemini: without data-sharing consent the geminiweb-pa XHR is refused on its capture path', async () => {
+  const captured = [];
+  const { sandbox } = makeXhrWorld(
+    (msg) => { captured.push(msg); return { ok: false, code: 'data-consent-required' }; },
+    { extraGlobals: GEMINI_GLOBALS });
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open('POST', GEMINI_PROMPT_URL, true);
+  xhr.send(GEMINI_PROMPT_BODY);
+
+  await waitFor(() => xhr.sonomosBlocked === true);
+  assert.equal(xhr.sonomosBlockReason, 'data-consent-required');
+  assert.equal(xhr.sent.length, 0, 'nothing left the page');
+  assert.equal(captured[0].coverage, 'capture_path');
+  assert.equal(captured[0].provider, 'google');
+});
