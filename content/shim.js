@@ -3724,4 +3724,322 @@
       };
     } catch { /* fetchLater not writable here — nothing to install */ }
   }
+
+  // ── WebSocket hook (outgoing frames) ────────────────────────────────────
+  //
+  // Grok web sends every chat prompt as a WebSocket TEXT FRAME on
+  // `wss://grok.com/ws/mgw/`, so a shim that held only fetch and XHR let those
+  // prompts out unscreened. Each outgoing frame is now screened like a fetch
+  // body: same scope (every host the fetch hook holds, `dataSharingAllowed`
+  // and the consent generation included), same `enforce` round trip, same
+  // `decide` — so the fail-open window, the signed-out pass and every relay
+  // code behave exactly as they do for fetch. The extension adds no policy of
+  // its own: the guard classifies the frame and answers allow / redact / block.
+  //
+  // WIRE SHAPE. A frame goes to the guard as a raw request whose METHOD is
+  // `WS-SEND` — the guard's own name for an outgoing WebSocket frame (its
+  // classifier's `transport_ws` feature keys on exactly that method):
+  //   WS-SEND <path+query of the socket URL> HTTP/1.1\r\nHost: <host>\r\n\r\n<frame bytes>
+  // No content-type: a frame has none, and inventing one would tell the
+  // screener something the page never said.
+  //
+  // ORDER. `send()` is synchronous and frames on one socket are ordered, so
+  // each socket keeps a FIFO. Every frame starts its screen the moment it is
+  // sent (frames are screened concurrently), but is released only after every
+  // frame before it has been released or refused. While anything is queued,
+  // later frames — screened or not — queue behind it rather than overtake it.
+  //
+  // WHAT THE PAGE SEES. `bufferedAmount` counts the held bytes. `close()` with
+  // frames still held reports CLOSING at once and closes for real after the
+  // last held frame is released, the order a native socket keeps. A refused
+  // frame cannot be reported through `send()` (it already returned), so the
+  // socket fires `error` and is closed with WS_BLOCK_CLOSE_CODE and the reason
+  // `blocked by Sonomos`; frames held behind it are dropped with it, as a
+  // native socket drops what it had not sent when it fails. The refusal reason
+  // is stamped on the socket (`sonomosBlockReason` etc.), as on a refused XHR.
+  //
+  // Incoming frames, EventSource and WebTransport are not hooked (HONEST.md).
+  const WS = window.WebSocket;
+  if (typeof WS === 'function' && WS.prototype && typeof WS.prototype.send === 'function') {
+    const wsProto = WS.prototype;
+    const origWsSend = wsProto.send;
+    const origWsClose = typeof wsProto.close === 'function' ? wsProto.close : null;
+    const wsAccessor = (name) => {
+      try {
+        const d = Object.getOwnPropertyDescriptor(wsProto, name);
+        return d && typeof d.get === 'function' ? d : null;
+      } catch { return null; }
+    };
+    const wsUrlDesc = wsAccessor('url');
+    const wsReadyDesc = wsAccessor('readyState');
+    const wsBufferedDesc = wsAccessor('bufferedAmount');
+    const WS_OPEN = 1;
+    const WS_CLOSING = 2;
+    // 4000–4999 is the range RFC 6455 leaves to applications; a client may
+    // only close with 1000 or 3000–4999. 4403 reads as "forbidden".
+    const WS_BLOCK_CLOSE_CODE = 4403;
+    const WS_BLOCK_CLOSE_REASON = 'blocked by Sonomos';
+    const wsStates = new WeakMap();
+
+    const wsReady = (sock) => (wsReadyDesc ? wsReadyDesc.get.call(sock) : sock.readyState);
+    const wsStateOf = (sock) => {
+      let st = wsStates.get(sock);
+      if (!st) {
+        st = { queue: [], queuedBytes: 0, discardedBytes: 0, pumping: false, closeArgs: null, refused: false };
+        wsStates.set(sock, st);
+      }
+      return st;
+    };
+
+    // The socket URL as the http(s) URL the scope helpers understand: the
+    // catalog, the disable set and the allowlists are all keyed on host and
+    // path, and `wss:` is to `https:` what `ws:` is to `http:`.
+    const wsHttpUrl = (sock) => {
+      const raw = wsUrlDesc ? wsUrlDesc.get.call(sock) : sock.url;
+      const u = new URL(String(raw));
+      const scheme = u.protocol === 'wss:' || u.protocol === 'https:' ? 'https:'
+        : (u.protocol === 'ws:' || u.protocol === 'http:' ? 'http:' : null);
+      if (!scheme) return null;
+      return new URL(`${scheme}//${u.host}${u.pathname}${u.search}`);
+    };
+
+    // A synchronous copy of what the page sent: a native socket copies the
+    // bytes at send() time, so a buffer the page reuses afterwards must not
+    // change what we screen or release. A Blob is immutable and is read later.
+    const wsSnapshot = (data) => {
+      const tag = tagOf(data);
+      if (tag === '[object ArrayBuffer]' || tag === '[object SharedArrayBuffer]') {
+        const bytes = new Uint8Array(data.byteLength);
+        bytes.set(new Uint8Array(data));
+        return { text: null, bytes, blob: null, size: bytes.byteLength };
+      }
+      if (ArrayBuffer.isView(data)) {
+        const bytes = new Uint8Array(data.byteLength);
+        bytes.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+        return { text: null, bytes, blob: null, size: bytes.byteLength };
+      }
+      if (isBlobObject(data)) return { text: null, bytes: null, blob: data, size: Number(data.size) || 0 };
+      const text = String(data);
+      const bytes = textEncoder.encode(text);
+      return { text, bytes, blob: null, size: bytes.byteLength };
+    };
+
+    // What an allow releases: the page's own value for text and Blob frames,
+    // the snapshot for buffers (see wsSnapshot).
+    const wsOriginal = (snap) => (snap.text !== null ? snap.text : (snap.blob || snap.bytes.buffer));
+
+    const wsDomError = (name, message) => {
+      try { if (typeof DOMException === 'function') return new DOMException(message, name); } catch { /* fall through */ }
+      const e = new Error(message);
+      e.name = name;
+      return e;
+    };
+
+    function wsRefuse(sock, st, reason, fields) {
+      st.refused = true;
+      try {
+        const own = { enumerable: true, configurable: true, writable: false };
+        Object.defineProperties(sock, {
+          sonomosBlocked: { ...own, value: true },
+          sonomosBlockReason: { ...own, value: reason },
+          sonomosBlockKind: { ...own, value: blockKind(reason) },
+          sonomosBlockMessage: { ...own, value: blockMessage(reason, fields) }
+        });
+      } catch { /* exotic socket — the console line still stands */ }
+      try { sock.dispatchEvent(new Event('error')); } catch { /* no events here */ }
+      try { if (origWsClose) origWsClose.call(sock, WS_BLOCK_CLOSE_CODE, WS_BLOCK_CLOSE_REASON); } catch { /* already closed */ }
+    }
+
+    // Screen one frame. Resolves { action: 'send' | 'block', payload, reason, fields }.
+    // Mirrors the fetch hook branch for branch; see there for the reasoning.
+    async function wsScreen(url, snap, consentGeneration, say) {
+      if (!configArrived) {
+        await waitForFirstConfig();
+        if (!isScreenedHost(url.hostname)) return { action: 'send', payload: wsOriginal(snap) };
+      }
+      const consentGone = () => !dataSharingAllowed || consentGeneration !== dataConsentGeneration;
+      if (consentGone()) {
+        if (coverageFor(url, SCOPE.AI) !== COVERAGE.CAPTURE_PATH) return { action: 'send', payload: wsOriginal(snap) };
+        return { action: 'block', reason: 'data-consent-required' };
+      }
+      let cap;
+      if (snap.blob) {
+        try { cap = capped(new Uint8Array(await snap.blob.arrayBuffer()), null); } catch { cap = uncapturable('uncapturable-unreadable'); }
+      } else {
+        cap = capped(snap.bytes, null);
+      }
+      if (cap.bytes != null && cap.bytes.byteLength === 0) {
+        say('debug', 'no-body', { action: 'send' });
+        return { action: 'send', payload: wsOriginal(snap) };
+      }
+      if (consentGone()) return { action: 'block', reason: 'data-consent-required' };
+      if (cap.bytes == null && failOpenActive()) {
+        noteUncheckedSend(cap.reason);
+        say('warn', 'unchecked-fail-open', { action: 'send', cause: cap.reason, bytes: cap.byteLength ?? null, because: 'user-fail-open-window' });
+        return { action: 'send', payload: wsOriginal(snap) };
+      }
+      if (cap.bytes == null) {
+        sayUncapturable(say, cap);
+        return { action: 'block', reason: cap.reason, fields: { bytes: cap.byteLength ?? null } };
+      }
+      const raw = synthesizeRequest('WS-SEND', url, {}, null, cap.bytes, false);
+      const coverage = coverageFor(url, SCOPE.AI);
+      const res = await enforce(b64FromBytes(raw), providerFor(url, SCOPE.AI), consentGeneration, coverage);
+      const d = decide(consentGone()
+        ? { outcome: 'verdict', verdict: { ok: false, code: 'data-consent-required' } } : res,
+      coverage, SCOPE.AI, url);
+      let { action, reason } = d;
+      let extra = d.fields;
+      let payload = wsOriginal(snap);
+      if (action === 'redact') {
+        const built = rebuildFrom(res.verdict.receipt.requestB64);
+        if (built.rebuilt) {
+          const body = built.rebuilt.body.slice();
+          // A text frame stays a text frame: the page's protocol expects one.
+          payload = snap.text !== null ? textDecoder.decode(body) : body.buffer;
+          extra = { ...extra, rebuiltBytes: body.byteLength };
+          action = 'send';
+        } else {
+          action = 'block';
+          reason = built.reason;
+        }
+      }
+      say(levelFor(d.action, reason), reason, { action: d.action === 'redact' && action === 'send' ? 'redact' : action, ...extra });
+      return action === 'block' ? { action, reason, fields: { bytes: cap.bytes.byteLength, ...extra } } : { action: 'send', payload };
+    }
+
+    // Release the queue head-first, each frame only once its verdict is in.
+    function wsPump(sock, st) {
+      if (st.pumping) return;
+      st.pumping = true;
+      (async () => {
+        while (st.queue.length > 0) {
+          const item = st.queue[0];
+          let d;
+          try { d = await item.decision; } catch { d = { action: 'block', reason: 'internal-error' }; }
+          st.queue.shift();
+          st.queuedBytes -= item.size;
+          if (st.refused) continue;
+          if (d.action === 'block') {
+            wsRefuse(sock, st, d.reason, d.fields);
+            continue;
+          }
+          // A socket the server closed meanwhile discards this, as it would
+          // have discarded the page's own late send.
+          try { origWsSend.call(sock, d.payload); } catch { /* socket gone */ }
+        }
+        st.pumping = false;
+        if (st.closeArgs && !st.refused) {
+          const args = st.closeArgs;
+          st.closeArgs = null;
+          try { if (origWsClose) origWsClose.apply(sock, args); } catch { /* already closed */ }
+        }
+      })();
+    }
+
+    wsProto.send = function send(data) {
+      let st;
+      try { st = wsStates.get(this) || null; } catch { st = null; }
+      let ready;
+      try { ready = wsReady(this); } catch { return origWsSend.apply(this, arguments); }
+      // We already told the page this socket is closing (a deferred close or a
+      // refusal): a native CLOSING socket discards and counts, never throws.
+      if (st && (st.closeArgs || st.refused) && ready <= WS_OPEN) {
+        try { st.discardedBytes += wsSnapshot(data).size; } catch { /* uncountable */ }
+        return undefined;
+      }
+      // CONNECTING throws InvalidStateError and CLOSING/CLOSED discard: the
+      // platform's own answers, untouched.
+      if (ready !== WS_OPEN || arguments.length === 0) return origWsSend.apply(this, arguments);
+      const queued = st !== null && st.queue.length > 0;
+      let decision = null;
+      let snap = null;
+      try {
+        let url = null;
+        try { url = wsHttpUrl(this); } catch { url = null; }
+        snap = wsSnapshot(data);
+        if (!dataSharingAllowed) {
+          // Same as fetch without consent: refuse only where the catalog
+          // already says a prompt travels; everything else passes untouched.
+          if (snap.size > 0 && (!url ? pageIsAiSurface() : isCapturePathUrl(url))) {
+            decision = Promise.resolve({ action: 'block', reason: 'data-consent-required' });
+          }
+        } else if (!url) {
+          if (snap.size > 0) {
+            warn('scope-unresolvable', { via: 'websocket', action: 'block' });
+            decision = Promise.resolve({ action: 'block', reason: 'scope-unresolvable' });
+          }
+        } else if (isScreenedUrl(url) && snap.size > 0) {
+          const shape = newShape('websocket');
+          fillUrl(shape, url);
+          shape.method = 'WS-SEND';
+          shape.bytes = snap.blob ? null : snap.size;
+          const say = reporter(shape, Date.now());
+          const consentGeneration = dataConsentGeneration;
+          decision = wsScreen(url, snap, consentGeneration, say).catch((e) => {
+            say('warn', 'internal-error', { action: 'block', detail: clip(e && e.message) });
+            return { action: 'block', reason: 'internal-error' };
+          });
+        }
+      } catch (e) {
+        debug('internal-error-out-of-scope', { via: 'websocket', action: 'send', detail: clip(e && e.message) });
+        decision = null;
+      }
+      if (decision === null && !queued) return origWsSend.apply(this, arguments);
+      st = st || wsStateOf(this);
+      const item = {
+        size: snap ? snap.size : 0,
+        decision: decision || Promise.resolve({ action: 'send', payload: snap ? wsOriginal(snap) : data })
+      };
+      st.queue.push(item);
+      st.queuedBytes += item.size;
+      wsPump(this, st);
+      return undefined;
+    };
+
+    if (origWsClose) {
+      wsProto.close = function close(code, reason) {
+        let st;
+        try { st = wsStates.get(this) || null; } catch { st = null; }
+        if (!st || st.refused || st.queue.length === 0) return origWsClose.apply(this, arguments);
+        if (st.closeArgs) return undefined; // second close() while closing: a no-op
+        // The checks a native close() makes synchronously, made here because
+        // the real call is deferred until the held frames are released.
+        if (code !== undefined) {
+          const n = Number(code);
+          if (!Number.isInteger(n) || (n !== 1000 && (n < 3000 || n > 4999))) {
+            throw wsDomError('InvalidAccessError', `Failed to execute 'close' on 'WebSocket': The close code must be either 1000, or between 3000 and 4999. ${code} is neither.`);
+          }
+        }
+        if (reason !== undefined && textEncoder.encode(String(reason)).byteLength > 123) {
+          throw wsDomError('SyntaxError', "Failed to execute 'close' on 'WebSocket': The close reason must not be greater than 123 UTF-8 bytes.");
+        }
+        st.closeArgs = Array.prototype.slice.call(arguments);
+        return undefined;
+      };
+    }
+
+    try {
+      if (wsReadyDesc) {
+        Object.defineProperty(wsProto, 'readyState', {
+          ...wsReadyDesc,
+          get: function readyState() {
+            const r = wsReadyDesc.get.call(this);
+            const st = wsStates.get(this);
+            return st && st.closeArgs && r <= WS_OPEN ? WS_CLOSING : r;
+          }
+        });
+      }
+      if (wsBufferedDesc) {
+        Object.defineProperty(wsProto, 'bufferedAmount', {
+          ...wsBufferedDesc,
+          get: function bufferedAmount() {
+            const n = wsBufferedDesc.get.call(this);
+            const st = wsStates.get(this);
+            return st ? n + st.queuedBytes + st.discardedBytes : n;
+          }
+        });
+      }
+    } catch { /* non-configurable accessors — send/close still hold frames */ }
+  }
 })();
