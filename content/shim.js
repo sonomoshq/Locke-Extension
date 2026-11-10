@@ -84,12 +84,14 @@
 // (sendBeacon / fetchLater), which are refused only on capture paths — they
 // cannot be classified, and refusing them on every site would break the web.
 //
-// TRANSPORTS: `fetch` and `XMLHttpRequest` are held and screened.
+// TRANSPORTS: `fetch`, `XMLHttpRequest` and outgoing `WebSocket` frames
+// (`WebSocket.prototype.send`, see the WebSocket hook at the end) are held and
+// screened.
 // `navigator.sendBeacon` and `fetchLater()` cannot be held at all (both answer
 // synchronously and the browser sends on its own schedule), so an in-scope
 // call carrying data is REFUSED rather than let through — the beacon by its
 // own `false`, the deferred fetch by a throw, each being the failure signal
-// that API's callers already handle. `WebSocket`, `EventSource`,
+// that API's callers already handle. Incoming WebSocket frames, `EventSource`,
 // `WebTransport` and Background Fetch are not hooked; see HONEST.md for those
 // residuals and the rest.
 //
