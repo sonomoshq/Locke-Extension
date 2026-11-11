@@ -2427,6 +2427,80 @@
     };
   }
 
+  // ── a prompt carried in the URL ─────────────────────────────────────────
+  //
+  // A bodyless request with a query goes to the guard as it is, empty body
+  // and all; the guard alone decides whether its query is a prompt (it lifts
+  // the query into a form body when the catalog names the path, or a value
+  // reads like prose) and hands back the rebuilt request. This file decides
+  // nothing about it: it applies the guard's rewritten request line, or
+  // passes the request as it always has.
+  //
+  // Failure posture: these requests were never screened before this existed,
+  // and every page's GETs come through here, so a failure of OURS (guard
+  // unreachable, a malformed reply, a throw) sends the request as today. Only
+  // two answers stop it: the guard's own content block, and a redaction this
+  // file cannot apply (PII was found — releasing the original would leak it).
+  async function screenBodylessQuery(method, url, headers, scope, say, consentGeneration) {
+    try {
+      const raw = synthesizeRequest(method, url, headers, null, new Uint8Array(0), false);
+      const coverage = coverageFor(url, scope);
+      const res = await enforce(b64FromBytes(raw), providerFor(url, scope), consentGeneration, coverage);
+      const d = decide(res, coverage, scope, url);
+      if (d.action === 'redact') {
+        const target = rebuiltTarget(res.verdict.receipt.requestB64);
+        const next = target ? sameEndpoint(url, target) : null;
+        if (!next) {
+          say('warn', 'redact-malformed', { action: 'block', scope: 'url-query' });
+          return { block: 'redact-malformed' };
+        }
+        say(levelFor('redact', d.reason), d.reason, { action: 'redact', ...d.fields, scope: 'url-query' });
+        return { url: next };
+      }
+      if (d.action === 'block' && d.reason === 'decision-block') {
+        say(levelFor('block', d.reason), d.reason, { action: 'block', ...d.fields, scope: 'url-query' });
+        return { block: d.reason, fields: d.fields };
+      }
+      say('debug', 'url-query-pass', { action: 'send', guard: d.reason });
+      return {};
+    } catch (e) {
+      say('debug', 'url-query-pass', { action: 'send', detail: clip(e && e.message) });
+      return {};
+    }
+  }
+
+  // The request target of the guard's rebuilt request (`GET <target> HTTP/1.1`).
+  function rebuiltTarget(requestB64) {
+    try {
+      const bytes = bytesFromB64(requestB64);
+      let end = 0;
+      while (end + 1 < bytes.length && !(bytes[end] === 13 && bytes[end + 1] === 10)) end++;
+      const parts = textDecoder.decode(bytes.subarray(0, end)).split(' ');
+      return parts.length === 3 ? parts[1] : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // The rewritten URL, only if it is the SAME endpoint with a new query: a
+  // rebuilt target may change the query and nothing else.
+  function sameEndpoint(url, target) {
+    try {
+      const next = new URL(target, url);
+      if (next.origin !== url.origin || next.pathname !== url.pathname) return null;
+      next.hash = url.hash;
+      return next;
+    } catch {
+      return null;
+    }
+  }
+
+  // releaseFrozenFetch at a different URL: the snapshot's every other field.
+  function releaseFetchAt(frozen, nextUrl) {
+    if (frozen.isRequest) return origFetch.call(window, new Request(nextUrl.href, frozen.input));
+    return origFetch.call(window, nextUrl.href, frozen.init);
+  }
+
   function releaseFrozenFetch(frozen) {
     if (frozen.isRequest) return origFetch.call(window, frozen.input);
     return origFetch.call(window, frozen.input, frozen.init);
@@ -2984,6 +3058,7 @@
       const frozen = freezeFetchCall(input, init);
       let action = 'send';   // out-of-scope / no-body → release the frozen call
       let rebuilt = null;    // redact: { body: Uint8Array, contentType }
+      let requeryUrl = null; // a bodyless request's guard-rewritten URL (screenBodylessQuery)
       let committed = false; // did we enter enforcement scope for this request?
       // Which branch blocked, so the rejection can say so rather than shrug.
       let blockReason = 'internal-error';
@@ -3069,7 +3144,19 @@
           if (!dataSharingAllowed || consentGeneration !== dataConsentGeneration) {
             committed = true; action = 'block'; blockReason = 'data-consent-required';
           } else if (!cap.hadBody) {
-            say('debug', 'no-body', { action: 'send' });
+            if (url && url.search.length > 1) {
+              // Bodyless with a query: the prompt can ride in the URL (Google
+              // AI Mode sends `GET /async/folif?…&q=<prompt>`). The guard
+              // decides; see screenBodylessQuery.
+              const q = await screenBodylessQuery(method, url, headers, scope, say, consentGeneration);
+              if (q.block) {
+                committed = true; action = 'block'; blockReason = q.block; blockFields = q.fields || {};
+              } else if (q.url) {
+                requeryUrl = q.url;
+              }
+            } else {
+              say('debug', 'no-body', { action: 'send' });
+            }
           } else {
             // In scope: this request carries a body, so it must be screened
             // before it can leave. From here we NEVER send the original
@@ -3158,6 +3245,7 @@
         // the thrown sentence and the logged one must be the same sentence.
         throw new TypeError(blockMessage(blockReason, { bytes: shape.bytes, ...blockFields }));
       }
+      if (requeryUrl) return releaseFetchAt(frozen, requeryUrl);
       if (action === 'redact') return releaseFetch(frozen, rebuilt.body, rebuilt.contentType);
       // A screened allow is re-issued from the snapshot, not from `arguments`.
       // Calls that waited only for configuration also use the snapshot: an
