@@ -56,8 +56,11 @@ test('generator: the search hosts users actually hit are narrowed to nothing', (
   // The specific outage: Google Maps / Flights / account XHR POSTs blocked
   // with the desktop app absent. Spelled out rather than derived, so a catalog
   // edit that quietly moved www.google.com out of `none` fails here by name.
+  // www.google.com left `none` with Service-Mesh#111: Google AI Mode's prompt
+  // path is screened, and only that path (pinned below).
   const table = capturePathsFor(surfaces);
-  for (const host of ['www.google.com', 'www.bing.com', 'search.brave.com', 'you.com', 'duckduckgo.com']) {
+  assert.deepEqual(table['www.google.com'], ['/async/folif'], 'www.google.com is narrowed to AI Mode only');
+  for (const host of ['www.bing.com', 'search.brave.com', 'you.com', 'duckduckgo.com']) {
     assert.deepEqual(table[host], [], `${host} must be narrowed to nothing`);
   }
 });
