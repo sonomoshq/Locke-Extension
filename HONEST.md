@@ -166,13 +166,14 @@ verdict means no send. The residuals we accept and document:
   still held. A host **with** an entry is narrowed to exactly the paths
   listed, matched segment-by-segment with `*` as a single-segment
   wildcard (no prefix matching, no trailing-slash tolerance). As of this
-  release three hosts are narrowed:
+  release four hosts are narrowed:
 
   | Host | Paths screened — and nothing else on that host |
   | --- | --- |
   | `chatgpt.com` | `/backend-api/conversation`, `/backend-api/f/conversation`, `/backend-anon/conversation`, `/backend-anon/f/conversation`, `/unauth-mweb/conversation/updates`, `/backend-api/codex/responses`, `/backend-api/files` |
   | `claude.ai` | `/api/organizations/*/chat_conversations/*/completion`, `/api/organizations/*/chat_conversations/*/retry_completion`, `/api/*/upload`, `/api/organizations/*/convert_document`, `/api/organizations/*/conversations/*/wiggle/upload-file` |
-  | `www.perplexity.ai` | `/rest/sse/perplexity_ask` |
+  | `www.google.com` | `/async/folif` (Google AI Mode) |
+| `www.perplexity.ai` | `/rest/sse/perplexity_ask` |
 
   The narrowing applies to subdomains too (most specific entry wins), so
   it cannot be dodged by addressing a subdomain of a narrowed host.
@@ -180,8 +181,7 @@ verdict means no send. The residuals we accept and document:
   A fourth kind of entry is an **empty** list, and it means narrowed to
   *nothing*. The generator emits one for every `web_hosts` entry of a
   provider the catalog declares `web_screening: "none"` — today
-  `www.google.com`, `www.bing.com`, `search.brave.com`, `duckduckgo.com`
-  and `you.com` — because those surfaces have no screened submission
+  `www.bing.com`, `search.brave.com`, `duckduckgo.com` and `you.com` — because those surfaces have no screened submission
   path at all (see "navigation-borne prompts" below). On their own
   pages the extension holds **no** bodied request: not a Maps or
   Flights XHR, not an account POST, not a telemetry beacon. Until this
@@ -194,7 +194,7 @@ verdict means no send. The residuals we accept and document:
   bodied request from a screened page to one of these hosts (Duck.ai's
   chat XHRs target `duckduckgo.com`) is still held.
 
-  **The consequence, stated plainly.** On those three hosts a
+  **The consequence, stated plainly.** On those four hosts a
   same-origin bodied request whose path is not in the list above is
   **not held, not screened, and not blocked** — it goes out exactly as
   the page issued it. Until this release that included **same-origin
