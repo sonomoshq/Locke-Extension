@@ -1,0 +1,40 @@
+{
+  "_comment": [
+    "Five Grok web prompt frames (WebSocket text frames sent on wss://grok.com/ws/mgw/),",
+    "recorded 2026-11-09 from a logged-in session and SCRUBBED: every UUID (session, message,",
+    "file, the uid query value) is replaced by a fake, event ids are renumbered, and the anti-bot",
+    "token is replaced by a placeholder. The prompt text is the recording marker, not user content."
+  ],
+  "frames": [
+    {
+      "scenario": "text",
+      "url": "wss://grok.com/ws/mgw/?uid=00000000-0000-4000-8000-0000000000ff",
+      "opcode": 1,
+      "frame": "{\"session_id\":\"00000000-0000-4000-8000-000000000001\",\"event\":{\"type\":\"response.create\",\"event_id\":\"evt_scrb_0000000000001\",\"item\":{\"type\":\"message\",\"role\":\"user\",\"x_grok\":{\"client_message_id\":\"00000000-0000-4000-8000-000000000002\",\"input_chunks\":[{\"text\":{\"text\":\"the sky is blue\"}}]}}}}"
+    },
+    {
+      "scenario": "followup",
+      "url": "wss://grok.com/ws/mgw/?uid=00000000-0000-4000-8000-0000000000ff",
+      "opcode": 1,
+      "frame": "{\"session_id\":\"00000000-0000-4000-8000-000000000001\",\"event\":{\"type\":\"response.create\",\"event_id\":\"evt_scrb_0000000000002\",\"item\":{\"type\":\"message\",\"role\":\"user\",\"x_grok\":{\"client_message_id\":\"00000000-0000-4000-8000-000000000003\",\"input_chunks\":[{\"text\":{\"text\":\"the sky is blue\"}}]}},\"parent_response_id\":\"00000000-0000-4000-8000-000000000004\",\"castle_request_token\":\"SCRUBBED-ANTI-BOT-TOKEN\"}}"
+    },
+    {
+      "scenario": "file_txt",
+      "url": "wss://grok.com/ws/mgw/?uid=00000000-0000-4000-8000-0000000000ff",
+      "opcode": 1,
+      "frame": "{\"session_id\":\"00000000-0000-4000-8000-000000000005\",\"event\":{\"type\":\"response.create\",\"event_id\":\"evt_scrb_0000000000003\",\"item\":{\"type\":\"message\",\"role\":\"user\",\"x_grok\":{\"client_message_id\":\"00000000-0000-4000-8000-000000000006\",\"input_chunks\":[{\"mention\":{\"file_mention\":{\"file_id\":\"00000000-0000-4000-8000-000000000007\"}}},{\"text\":{\"text\":\"the sky is blue\"}}]}},\"file_attachment_ids\":[\"00000000-0000-4000-8000-000000000007\"],\"castle_request_token\":\"SCRUBBED-ANTI-BOT-TOKEN\"}}"
+    },
+    {
+      "scenario": "file_pdf",
+      "url": "wss://grok.com/ws/mgw/?uid=00000000-0000-4000-8000-0000000000ff",
+      "opcode": 1,
+      "frame": "{\"session_id\":\"00000000-0000-4000-8000-000000000008\",\"event\":{\"type\":\"response.create\",\"event_id\":\"evt_scrb_0000000000004\",\"item\":{\"type\":\"message\",\"role\":\"user\",\"x_grok\":{\"client_message_id\":\"00000000-0000-4000-8000-000000000009\",\"input_chunks\":[{\"mention\":{\"file_mention\":{\"file_id\":\"00000000-0000-4000-8000-000000000010\"}}},{\"text\":{\"text\":\"the sky is blue\"}}]}},\"file_attachment_ids\":[\"00000000-0000-4000-8000-000000000010\"],\"castle_request_token\":\"SCRUBBED-ANTI-BOT-TOKEN\"}}"
+    },
+    {
+      "scenario": "file_png",
+      "url": "wss://grok.com/ws/mgw/?uid=00000000-0000-4000-8000-0000000000ff",
+      "opcode": 1,
+      "frame": "{\"session_id\":\"00000000-0000-4000-8000-000000000011\",\"event\":{\"type\":\"response.create\",\"event_id\":\"evt_scrb_0000000000005\",\"item\":{\"type\":\"message\",\"role\":\"user\",\"x_grok\":{\"client_message_id\":\"00000000-0000-4000-8000-000000000012\",\"input_chunks\":[{\"mention\":{\"file_mention\":{\"file_id\":\"00000000-0000-4000-8000-000000000013\"}}},{\"text\":{\"text\":\"the sky is blue\"}}]}},\"file_attachment_ids\":[\"00000000-0000-4000-8000-000000000013\"],\"castle_request_token\":\"SCRUBBED-ANTI-BOT-TOKEN\"}}"
+    }
+  ]
+}
