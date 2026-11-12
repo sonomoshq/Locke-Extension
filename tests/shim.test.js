@@ -5214,3 +5214,58 @@ test('the user fail-open window keeps its own reason and tally', async () => {
     assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'), code);
   }
 });
+
+// ── a prompt carried in the URL (Google AI Mode) ───────────────────
+
+const FOLIF = 'https://chat.openai.com/async/folif?udm=50&q=My+name+is+Jane+Doe&ei=abc';
+
+test('a bodyless fetch with a query goes to the guard as is, empty body', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; });
+  await sandbox.fetch(FOLIF);
+  assert.equal(captured.length, 1);
+  const { head, body } = splitRaw(rawOf(captured[0]));
+  assert.match(head, /^GET \/async\/folif\?udm=50&q=My\+name\+is\+Jane\+Doe&ei=abc HTTP\/1\.1\r\nHost: chat\.openai\.com/);
+  assert.equal(body.length, 0);
+  // allow → released untouched, at the page's own URL.
+  assert.equal(netCalls.length, 1);
+  assert.equal(netCalls[0][0], FOLIF);
+});
+
+test('a guard redaction of a URL query releases the rewritten URL, same endpoint', async () => {
+  const { sandbox, netCalls } = makeWorld(() => rebuiltVerdict(
+    ['GET /async/folif?udm=50&q=My+name+is+PER_9qpk+Doe&ei=abc HTTP/1.1', 'Host: chat.openai.com'], ''));
+  await sandbox.fetch(FOLIF, { credentials: 'include' });
+  assert.equal(netCalls.length, 1);
+  assert.equal(netCalls[0][0], 'https://chat.openai.com/async/folif?udm=50&q=My+name+is+PER_9qpk+Doe&ei=abc');
+  assert.equal(netCalls[0][1].credentials, 'include', 'the page\'s other fetch fields survive');
+});
+
+test('a URL rewrite that changes the endpoint is refused, never followed', async () => {
+  const { sandbox, netCalls } = makeWorld(() => rebuiltVerdict(
+    ['GET /elsewhere?q=x HTTP/1.1', 'Host: chat.openai.com'], ''));
+  await assert.rejects(sandbox.fetch(FOLIF), blockedError);
+  assert.equal(netCalls.length, 0);
+});
+
+test('a bodyless query passes as today when the guard cannot answer', async () => {
+  const { sandbox, netCalls } = makeWorld(() => ({ ok: false, code: 'native-call-failed', message: 'down' }));
+  await sandbox.fetch(FOLIF);
+  assert.equal(netCalls.length, 1);
+  assert.equal(netCalls[0][0], FOLIF);
+});
+
+test('a bodyless query is stopped by a guard content block', async () => {
+  const { sandbox, netCalls } = makeWorld(() => ({ ok: true, receipt: { decision: 'block', reason: 'policy' } }));
+  await assert.rejects(sandbox.fetch(FOLIF), blockedError);
+  assert.equal(netCalls.length, 0);
+});
+
+test('a bodyless fetch without a query never reaches the guard', async () => {
+  const captured = [];
+  const { sandbox, netCalls } = makeWorld((msg) => { captured.push(msg.requestB64); return allowVerdict; });
+  await sandbox.fetch('https://chat.openai.com/async/folif');
+  await sandbox.fetch('https://chat.openai.com/x?');
+  assert.equal(captured.length, 0);
+  assert.equal(netCalls.length, 2);
+});
