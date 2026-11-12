@@ -317,9 +317,14 @@ verdict means no send. The residuals we accept and document:
   to leak, or put a host we do not ship *into* scope. On a
   cooperative site this is a non-issue; on a hostile one there is
   nothing to gain.
-- **Capture coverage is `fetch` + `XMLHttpRequest` only.** There are no
-  `WebSocket` or `EventSource` hooks. AI traffic a site sends over
-  those transports is not screened or gated. Two APIs cannot be *held*
+- **Capture coverage is `fetch`, `XMLHttpRequest` and outgoing
+  `WebSocket` frames.** Each frame a page passes to `WebSocket.send()` is
+  held and screened like a fetch body (Grok web sends every prompt that
+  way), released per socket in the order it was sent; a frame the guard
+  refuses closes the socket with an `error` event and close code 4403.
+  Frames the *server* sends back are not screened, and there is no
+  `EventSource` hook; traffic a site sends over those is not screened or
+  gated. Two APIs cannot be *held*
   at all — both answer synchronously and the browser then sends on its
   own schedule, so there is no point at which a verdict could be
   applied — and an in-scope call carrying data on either is **refused**
@@ -329,9 +334,8 @@ verdict means no send. The residuals we accept and document:
   quota). Each is refused with its own API's failure signal; neither is
   ever silently dropped.
   **The rest of the outbound sweep, and why each is where it is:**
-  `WebTransport` is a bidirectional stream transport, the same class as
-  `WebSocket` — unhooked, and it would need a design of its own rather
-  than a refusal. **Background Fetch**
+  `WebTransport` is a bidirectional stream transport — unhooked, and its
+  streams would need a design of their own rather than a refusal. **Background Fetch**
   (`registration.backgroundFetch.fetch`) can carry an upload body and is
   **not hooked**: it is a download-oriented API, no catalog surface uses
   it, and the only thing we could do with it is refuse — so this one
@@ -339,12 +343,13 @@ verdict means no send. The residuals we accept and document:
   than by omission. `<a ping>`, `<form method="POST">`, top-level
   navigations and CSP/reporting endpoints are not script calls and are
   out of reach of any hook in this file.
-  **Microsoft Copilot is not screened.** Copilot (copilot.microsoft.com)
-  sends your messages over a WebSocket, which this extension does not hook.
-  Prompts you type into Copilot in the browser are sent to Microsoft
-  unscreened, and Locke records nothing for them. Files and images you attach
-  are uploaded separately and are not screened either. The Copilot app for
+  **Microsoft Copilot in the browser is not verified.** Copilot
+  (copilot.microsoft.com) sends your messages over a WebSocket. Outgoing
+  frames are now held and screened like any other, but this has not been
+  checked against the live site, and files and images you attach there are
+  uploaded separately and are not screened. The Copilot app for
   Windows is not screened by Locke either (its chat is also a WebSocket).
+  We plan to verify browser Copilot end to end in a future release.
   GitHub Copilot in VS Code and Visual Studio is a different product and is
   screened. We plan to add this in a future release.
   **Images are not screened.** Images and screenshots you send to an AI

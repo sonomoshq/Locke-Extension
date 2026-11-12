@@ -101,7 +101,7 @@ facts, because a reachable desktop app does not prove the screener behind it is 
   `navigator.sendBeacon` is also wrapped, but a beacon cannot be held at all, so
   one carrying data to a catalog prompt path is refused rather than let
   through; elsewhere it cannot be classified and is sent. What the
-  extension does **not** cover — `WebSocket`, unrecognised upload shapes,
+  extension does **not** cover — incoming `WebSocket` frames, unrecognised upload shapes,
   prompts carried in a query string — is catalogued in
   [`HONEST.md`](HONEST.md).
 - **Isolated-world relay** (`content/content-script.js`) — receives the held
@@ -343,7 +343,7 @@ the source lets anyone verify the properties that matter:
   verified by CI on every push. The recipe is in
   [`docs/security/RELEASE-POLICY.md`](docs/security/RELEASE-POLICY.md).
 - **Honest limitations, in writing.** [`HONEST.md`](HONEST.md) documents what
-  the extension does *not* cover — WebSocket traffic, address-bar prompts, and
+  the extension does *not* cover — incoming WebSocket frames, address-bar prompts, and
   more — rather than letting silence imply completeness.
 
 The publication is one-way by design: the licence permits reading and
