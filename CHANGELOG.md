@@ -8,6 +8,37 @@ strict SemVer.
 
 ## [Unreleased]
 
+## [2.0.4] — 2026-11-12
+
+**Summary.** 2.0.4 closes four places where a prompt could leave the browser
+without being screened, and stops the extension from blocking sign-in to
+Locke itself. No permission, host permission or popup change: `host_permissions`
+is still loopback-only (`http://127.0.0.1/*`) and request content still goes
+only to the local Locke desktop app over native messaging.
+
+**Changed — what the page shim screens**
+- **WebSocket sends.** `WebSocket.prototype.send` now holds each outgoing frame
+  and screens it on-device the same way as `fetch` bodies, releasing frames per
+  socket in their original order. Grok's web app sends prompts this way and
+  was previously unscreened.
+- **Bodyless requests with a query.** A `fetch` GET that carries a query string
+  is now passed to the local guard (with an empty body); a redaction is applied
+  only to the same origin and path, otherwise the request is blocked. Google AI
+  Mode sends prompts as `GET /async/folif?…&q=<prompt>`. Ordinary page GETs
+  are unaffected if the guard is unavailable.
+- **Firefox `Request` bodies.** Firefox has no `Request.prototype.body`, so
+  `fetch(new Request(url, {method: 'POST', body}))` was read as bodyless and
+  skipped (every Gemini prompt on Firefox). Such requests are now read and
+  screened.
+
+**Fixed**
+- Requests to `sonomos.ai` and its subdomains are never held or screened, so
+  signing in to Locke works while the desktop app is off or starting.
+
+**Data** — `shared/ai-surfaces.json` and `shared/vocab.json` re-vendored from
+upstream (Google AI Mode capture path, Microsoft Copilot, ChatGPT regional
+upload hosts).
+
 <!-- store-notes-end -->
 
 The engineering log for this release follows. Only the summary above the
