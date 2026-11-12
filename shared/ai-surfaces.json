@@ -273,6 +273,12 @@
       "api_hosts": [],
       "web_hosts": ["www.google.com", "www.bing.com", "duckduckgo.com", "kagi.com", "you.com", "search.brave.com"],
       "web_screening": "none",
+      "capture_path_allowlist": {
+        "_comment": "ADDED 2026-11-10: Google AI Mode. Its prompts are NOT navigations: the page sends each one as a bodyless `fetch` GET to `/async/folif?…&udm=50&q=<prompt>` (recorded in Chrome 2026-11-10), and the guard screens a bodyless request's query as a form body when its host and path are named here (Spliicer-Guard `query_carries_prompt`). The classifier alone calls that GET not-AI — it is a form GET on a search host — so this path is what screens it. Search itself is untouched: `/search?q=` stays a top-level navigation, unscreened, exactly as `web_screening: none` says, including an AI Mode prompt typed straight into the address bar.",
+        "hosts": {
+          "www.google.com": ["/async/folif"]
+        }
+      },
       "notes": "NOT A LIST OF SEARCH ENGINES TO BE COMPLETED — see `web_screening_modes.deferred_to_1x` before adding one. These are surfaces the product already injects on whose only submission path is a top-level navigation, so nothing a searcher types on them is screened; the entry exists so no consumer presents them as protected. PRUNED 2026-08-18 after live probing: brave.com (Brave's marketing site — 'The browser that puts you first' — not the engine; search.brave.com is, and the apex bought a `*.brave.com` injection pattern across Brave's entire web estate for zero screening), leo.brave.com (no DNS record at all, and Brave Leo is a browser-native sidebar — structurally unreachable by a content script under ANY permission model, not merely unscreened), phind.com and www.phind.com (Phind shut down 2026-01-16; www.phind.com was in any case already subsumed by phind.com under the subdomain rule). duck.ai and assistant.kagi.com moved OUT to their own entries because they are screened. KEPT DELIBERATELY: duckduckgo.com and kagi.com — their own search boxes are navigations, but those hostnames also carry the chat traffic of the two entries above, and the shim scopes on the request target, so removing either would delete real screening on a different page. you.com is kept and claims nothing: its homepage is now an API pitch ('The Leading Web Search APIs for AI') and the consumer chat is login-gated, so 'we screen nothing you typically type here' is the honest reading, and any bodied chat that does happen is still screened per the `none` mode."
     },
     {
