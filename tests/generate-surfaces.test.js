@@ -59,7 +59,10 @@ test('generator: the search hosts users actually hit are narrowed to nothing', (
   // www.google.com left `none` with Service-Mesh#111: Google AI Mode's prompt
   // path is screened, and only that path (pinned below).
   const table = capturePathsFor(surfaces);
-  assert.deepEqual(table['www.google.com'], ['/async/folif'], 'www.google.com is narrowed to AI Mode only');
+  // AI Mode from the search bar (HAR 2026-11-12) adds /async/folwr and the
+  // query-qualified navigation /search?udm=50; plain /search stays out.
+  assert.deepEqual(table['www.google.com'], ['/async/folif', '/async/folwr', '/search?udm=50'],
+    'www.google.com is narrowed to AI Mode only');
   for (const host of ['www.bing.com', 'search.brave.com', 'you.com', 'duckduckgo.com']) {
     assert.deepEqual(table[host], [], `${host} must be narrowed to nothing`);
   }

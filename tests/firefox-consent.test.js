@@ -226,8 +226,8 @@ test('manifest declares native request data and optional technical information w
   ]);
   assert.deepEqual(gecko.data_collection_permissions.optional, ['technicalAndInteraction']);
   assert.equal(gecko.strict_min_version, '128.0');
-  assert.deepEqual(manifest.permissions, ['storage', 'alarms', 'nativeMessaging']);
-  assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*']);
+  assert.deepEqual(manifest.permissions, ['storage', 'alarms', 'nativeMessaging', 'declarativeNetRequestWithHostAccess']);
+  assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*', 'https://www.google.com/*']);
 });
 
 test('Edge also requires explicit consent while Chrome retains its existing behavior', async () => {

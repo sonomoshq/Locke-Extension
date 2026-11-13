@@ -488,7 +488,10 @@ export const MSG = Object.freeze({
   CAPTURE: 'capture',
   // Content script → service worker: a request left unscreened under the
   // desktop app's fail-open window. Tallied like an `unchecked` receipt.
-  UNCHECKED: 'uncheckedSend'
+  UNCHECKED: 'uncheckedSend',
+  // screen/navigation.html → service worker: a top-level navigation whose URL
+  // carries a prompt (background/navigation-screen.js). Carries `url`.
+  SCREEN_NAVIGATION: 'screenNavigation'
 });
 
 // The catalog's say in a capture decision, carried on every capture as

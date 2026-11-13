@@ -169,6 +169,7 @@
   // precisely the sign-in-breaking behaviour.
   function pathSegments(path) {
     return String(path || '')
+      .split(/[?#]/)[0]
       .split('/')
       .filter((s) => s !== '')
       .map((s) => s.toLowerCase());
@@ -179,7 +180,31 @@
   // 3-segment reads and side-ops beside a 2-segment prompt POST come with it.
   // A partial-segment wildcard (`chat_*`) is malformed and matches nothing —
   // the naive-substring bug through the other door.
-  function patternAdmits(segments, pattern) {
+  // The `key=value` pairs of a target's query, as sent (no decoding).
+  function queryPairs(path) {
+    const s = String(path || '');
+    const i = s.indexOf('?');
+    if (i < 0) return [];
+    return s.slice(i + 1).split('#')[0].split('&').filter((p) => p !== '');
+  }
+
+  // A pattern may carry a `?k=v&…` qualifier naming one mode of a path —
+  // Google serves search and AI Mode both on `/search`, told apart only by
+  // `udm=50`. Every qualifier pair must be in the request's query; a caller
+  // that passes a bare path never matches one. Same rule as sonomos-vocab's
+  // `target_matches_pattern`.
+  function patternAdmits(segments, pattern, query = []) {
+    const [pathPart, qualifier] = String(pattern || '').split('?', 2);
+    if (!pathAdmits(segments, pathPart)) return false;
+    if (qualifier === undefined) return true;
+    const want = qualifier.split('&');
+    return want.length > 0 && want.every((w) => {
+      const eq = w.indexOf('=');
+      return eq > 0 && query.includes(w);
+    });
+  }
+
+  function pathAdmits(segments, pattern) {
     const want = String(pattern || '').split('/').filter((s) => s !== '');
     if (want.length === 0 || want.length !== segments.length) return false;
     return want.every((w, i) => {
@@ -278,7 +303,8 @@
     const allow = allowlistFor(host);
     if (!allow) return null; // not narrowed — capture-everything, as before
     if (allow.length === 0) return isUnscreenedSurface(PAGE_HOST) ? 'unscreened' : null;
-    return allow.some((pattern) => patternAdmits(segments, pattern)) ? null : 'paths';
+    const query = queryPairs(path);
+    return allow.some((pattern) => patternAdmits(segments, pattern, query)) ? null : 'paths';
   }
 
   function isScreenedPath(host, path) {
@@ -402,7 +428,7 @@
     try {
       if (scope === SCOPE.UPLOAD) return COVERAGE.CAPTURE_PATH;
       if (!url || !isAiHost(url.hostname)) return COVERAGE.OPEN_WEB;
-      return isScreenedPath(url.hostname, url.pathname)
+      return isScreenedPath(url.hostname, url.pathname + url.search)
         ? COVERAGE.CAPTURE_PATH : COVERAGE.CATALOG_HOST;
     } catch {
       // Can't tell: claim the most, so the guard screens regardless. A wrong
