@@ -5,6 +5,7 @@ import { consentIsCurrent, DATA_CONSENT_REQUIRED, isFirefox, requiresDataConsent
 import { detectBrowser } from '../shared/browser-info.js';
 import { checkHealth, classifyLastError } from '../shared/health-client.js';
 import { WEB_HOSTS } from '../shared/web-surfaces.generated.js';
+import { installNavigationRules, screenNavigation } from './navigation-screen.js';
 import {
   AUDIT_KEY,
   AUDIT_MAX_ENTRIES,
@@ -996,6 +997,9 @@ onDataConsentChanged(() => {
 // lost to an extension update and a desktop app that says "not installed"
 // until the browser restarts.
 ensurePresenceAlarm();
+// The redirect rules for prompt-carrying navigations. Idempotent and cheap;
+// re-run on every worker evaluation so an update or a cleared rule set heals.
+void installNavigationRules((reason, detail) => relayWarn(reason, { detail: clip(detail) }));
 // Browser alarms can be lost across an update/restart. Re-arm only a missing
 // health alarm, preserving the countdown and backoff on ordinary wakes.
 async function ensureHealthAlarm() {
@@ -1055,6 +1059,20 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
         relayWarn('capture-error', { detail: clip(e?.message) });
         noteScreening(evidenceFromRelayFailure('capture-error'), null);
         sendResponse({ ok: false, code: 'capture-error' });
+      });
+    return true;
+  }
+  // A top-level navigation whose URL carries a prompt (Google AI Mode from
+  // the search bar), from screen/navigation.html. See navigation-screen.js.
+  if (message?.type === MSG.SCREEN_NAVIGATION && typeof message.url === 'string') {
+    screenNavigation(message.url, sender?.tab?.id, captureViaHost)
+      .then((r) => {
+        relayDebug('navigation', { decision: clip(r.decision || r.block) });
+        sendResponse(r);
+      })
+      .catch((e) => {
+        relayWarn('navigation-error', { detail: clip(e?.message) });
+        sendResponse(null);
       });
     return true;
   }
