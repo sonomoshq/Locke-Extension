@@ -86,7 +86,9 @@ export function redirectRules(pageUrl, prompts = navigationPrompts()) {
     priority: 1,
     action: { type: 'redirect', redirect: { regexSubstitution: `${pageUrl}#\\0` } },
     condition: {
-      regexFilter: `^https://${reEscape(p.host)}${reEscape(p.path)}/?\\?([^#]*&)?${reEscape(p.pairs[0])}(&[^#]*)?(#.*)?$`,
+      // Slashes are escaped (same match) so this page-URL pattern does not read
+      // as an outbound endpoint to scripts/audit-payload.mjs.
+      regexFilter: `^https:\\/\\/${reEscape(p.host)}${reEscape(p.path)}/?\\?([^#]*&)?${reEscape(p.pairs[0])}(&[^#]*)?(#.*)?$`,
       isUrlFilterCaseSensitive: false,
       resourceTypes: ['main_frame'],
       requestMethods: ['get']
