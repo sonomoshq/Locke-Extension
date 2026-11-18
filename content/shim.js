@@ -1148,6 +1148,11 @@
   // that went out without a complete screen, and a send whose attachment was
   // dropped on the way. Both are "you need to know this happened", and
   // neither may depend on someone having flipped a flag first.
+  // Exact reason extension-bridge uses for a capture answered during the
+  // user's Locke pause. Keep equal to shared/constants.js PAUSED_REASON
+  // (Bridge src/capture_pause.rs). A paused send is not the fail-open window.
+  const PAUSED_REASON = 'protection paused by the user';
+
   const LOUD = new Set(['unchecked-fail-open', 'allow-unchecked', 'redact-unchecked', 'redact-withheld']);
 
   function levelFor(action, reason) {
@@ -1877,6 +1882,10 @@
       return { action: 'block', reason: 'verdict-malformed', fields: { waitedMs } };
     }
     const r = v.receipt;
+    if (r.decision === 'allow' && r.unchecked === true && r.reason === PAUSED_REASON &&
+        unscreenedList(r).length === 0) {
+      return { action: 'send', reason: 'allow-paused', fields: { waitedMs, guardReason: clip(r.reason), because: 'user-paused' } };
+    }
     if (r.decision === 'allow') {
       const unscreened = unscreenedList(r);
       // An allow can never be a withhold, so unscreened items on an allow

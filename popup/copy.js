@@ -251,6 +251,9 @@ function detailFor(view, screening, recentFailure) {
     // here, correctly: the screener looked and refused.
     return 'Locke screened a recent request, so screening is confirmed active. Open the Locke desktop app to watch it work.';
   }
+  if (recentFailure?.code === 'sent-paused') {
+    return `Protection is paused in Locke, so a recent request to one of ${COVERED_SITES} was sent without being screened. Resume protection in the Locke desktop app.`;
+  }
   if (recentFailure?.code === 'sent-unscreened') {
     // Unconfirmed because a real capture just went out UNEXAMINED. The one
     // case in this function where "held back" would be the wrong direction:
@@ -332,6 +335,7 @@ const wasWere = (n) => (n === 1 ? 'was' : 'were');
 export function noteFor(state) {
   const redacted = Number(state?.redactedItems) || 0;
   const unchecked = Number(state?.uncheckedSends) || 0;
+  const paused = Number(state?.pausedSends) || 0;
   const withheld = Number(state?.withheldItems) || 0;
   const blocked = Number(state?.blockedSends) || 0;
   const parts = [];
@@ -357,6 +361,11 @@ export function noteFor(state) {
   if (unchecked > 0) {
     parts.push(
       `${plural(unchecked, 'request', 'requests')} went out this session without a full screen, under your fail-open setting.`
+    );
+  }
+  if (paused > 0) {
+    parts.push(
+      `Protection is paused in Locke — ${plural(paused, 'request', 'requests')} went out unscreened.`
     );
   }
   if (withheld > 0) {

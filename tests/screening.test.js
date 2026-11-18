@@ -373,6 +373,27 @@ test('allow + unchecked flag: the bytes shipped', () => {
   );
 });
 
+test('paused receipt: tallied as pausedSends, never uncheckedSends, never a screen', () => {
+  const paused = { decision: 'allow', unchecked: true, reason: 'protection paused by the user', unscreened: [] };
+  assert.deepEqual(
+    tallyFromReceipt(paused),
+    { uncheckedSends: 0, withheldItems: 0, redactedItems: 0, blockedSends: 0, pausedSends: 1 }
+  );
+  const ev = evidenceFromReceipt(paused);
+  assert.notEqual(ev.state, SCREENING.AVAILABLE, 'paused is never a green screen');
+  assert.equal(ev.code, 'sent-paused');
+});
+
+test('unchecked allow with another reason, or paused reason plus unscreened items, stays fail-open', () => {
+  assert.equal(
+    tallyFromReceipt({ decision: 'allow', unchecked: true, reason: 'something else', unscreened: [] }).uncheckedSends, 1
+  );
+  const odd = { decision: 'allow', unchecked: true, reason: 'protection paused by the user', unscreened: [pdf] };
+  assert.equal(tallyFromReceipt(odd).uncheckedSends, 1);
+  assert.equal(tallyFromReceipt(odd).pausedSends, undefined);
+  assert.equal(evidenceFromReceipt(odd).code, 'sent-unscreened');
+});
+
 test('allow + items but no flag: still shipped — an allow can never be a withhold', () => {
   // Withholding rebuilds the request, so it is always a `redact`. Reading the
   // items alone keeps this honest against a bridge too old to send the flag.

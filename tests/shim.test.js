@@ -1115,6 +1115,31 @@ test('unchecked allow is inferred from the items alone, without the flag', async
   assertReason(logs, 'allow-unchecked', 'warn');
 });
 
+test('paused-by-user receipt: original is sent, debug level, not the fail-open treatment', async () => {
+  const receipt = { decision: 'allow', unchecked: true, reason: 'protection paused by the user', unscreened: [] };
+  const quiet = makeWorld(() => ({ ok: true, receipt }));
+  await quiet.sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":"hi"}' });
+  assert.equal(quiet.netCalls.length, 1, 'original is sent');
+  assert.equal(quiet.logs.length, 0, 'not LOUD: silent without debug logging');
+  const { sandbox, netCalls, logs } = makeWorld(() => ({ ok: true, receipt }), { SONOMOS_DEBUG: true });
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":"hi"}' });
+  assert.equal(netCalls.length, 1, 'original is sent');
+  const line = assertReason(logs, 'allow-paused', 'debug');
+  assert.match(line, /\bbecause=user-paused\b/);
+  assert.ok(!findLine(logs, 'allow-unchecked'), 'not the fail-open reason');
+});
+
+test('unchecked allow with any other reason keeps the fail-open treatment', async () => {
+  const { sandbox, netCalls, logs } = makeWorld(() => ({
+    ok: true,
+    receipt: { decision: 'allow', unchecked: true, reason: 'fail-open window', unscreened: [] }
+  }));
+  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":"hi"}' });
+  assert.equal(netCalls.length, 1);
+  assert.match(assertReason(logs, 'allow-unchecked', 'warn'), /\bbecause=user-fail-open-window\b/);
+  assert.ok(!findLine(logs, 'allow-paused'));
+});
+
 test('a clean allow stays quiet: unchecked=false is not a warning', async () => {
   const { sandbox, netCalls, logs } = makeWorld(() => ({
     ok: true,
