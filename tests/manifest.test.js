@@ -105,7 +105,10 @@ test('manifest: no host permission was widened to do any of this', () => {
   //
   // What actually bounds the port is the extension-pages CSP, which pins
   // `connect-src` to the exact origin and is asserted by the next test.
-  assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*']);
+  // Plus the one navigation-screen host (Google AI Mode's search-bar
+  // navigation, background/navigation-screen.js) — a redirect grant, not a
+  // fetch grant: the CSP below still pins connect-src to loopback.
+  assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*', 'https://www.google.com/*']);
   for (const host of manifest.host_permissions) {
     assert.doesNotMatch(
       host, /:\d/,

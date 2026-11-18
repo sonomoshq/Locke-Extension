@@ -173,7 +173,7 @@ verdict means no send. The residuals we accept and document:
   | `chatgpt.com` | `/backend-api/conversation`, `/backend-api/f/conversation`, `/backend-anon/conversation`, `/backend-anon/f/conversation`, `/unauth-mweb/conversation/updates`, `/backend-api/codex/responses`, `/backend-api/files` |
   | `claude.ai` | `/api/organizations/*/chat_conversations/*/completion`, `/api/organizations/*/chat_conversations/*/retry_completion`, `/api/*/upload`, `/api/organizations/*/convert_document`, `/api/organizations/*/conversations/*/wiggle/upload-file` |
   | `copilot.microsoft.com` | `/c/api/chat` |
-  | `www.google.com` | `/async/folif` (Google AI Mode) |
+  | `www.google.com` | `/async/folif`, `/async/folwr`, `/search?udm=50` (Google AI Mode; the last is the search-bar navigation, screened before it leaves) |
 | `www.perplexity.ai` | `/rest/sse/perplexity_ask` |
 
   The narrowing applies to subdomains too (most specific entry wins), so

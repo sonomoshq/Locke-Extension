@@ -8,6 +8,19 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Added — Google AI Mode from the search bar is screened.** Typing a prompt
+into Google's search box in AI Mode and pressing enter loads
+`/search?…&udm=50&q=<prompt>` as a page navigation, which left unscreened.
+The extension now redirects exactly those navigations (`udm=50`; plain search
+is untouched) to its own `screen/navigation.html`, has the URL screened by the
+local guard, and continues to the original or redacted URL. The follow-up
+fetch `/async/folwr` is now a catalog prompt path too.
+
+**Permissions.** Adds `declarativeNetRequestWithHostAccess` and the host
+permission `https://www.google.com/*` (redirect-only; the CSP still pins
+every extension context's `connect-src` to loopback). See
+`docs/security/PERMISSIONS.md`, `SECURITY.md` A1 and `RISK-REGISTER.md` R-01.
+
 ## [2.0.4] — 2026-11-12
 
 **Summary.** 2.0.4 closes four places where a prompt could leave the browser

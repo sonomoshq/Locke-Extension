@@ -63,10 +63,18 @@
   "permissions": [
     "storage",
     "alarms",
-    "nativeMessaging"
+    "nativeMessaging",
+    "declarativeNetRequestWithHostAccess"
   ],
   "host_permissions": [
-    "http://127.0.0.1/*"
+    "http://127.0.0.1/*",
+    "https://www.google.com/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["screen/navigation.html"],
+      "matches": ["https://www.google.com/*"]
+    }
   ],
   "storage": {
     "managed_schema": "managed-schema.json"

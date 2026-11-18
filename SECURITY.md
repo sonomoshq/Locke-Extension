@@ -54,6 +54,21 @@ matching nothing (Bugzilla 1362809), so the port-free spelling is
 deliberate. The grant is therefore strictly wider than the single origin the
 extension uses, and anyone auditing this repo should expect to see that.
 
+**One non-loopback host permission, and why it sends nothing.** Since
+2026-11-13 `host_permissions` also holds `https://www.google.com/*`, with
+`declarativeNetRequestWithHostAccess`. Google AI Mode started from the
+search bar puts the prompt in a top-level navigation
+(`/search?…&udm=50&q=<prompt>`), which no page script sees, so the only
+place to hold it is a declarativeNetRequest redirect to the extension's own
+`screen/navigation.html` — and a redirect needs a host permission for the
+URL it redirects. The grant lets the extension *redirect* that navigation;
+it does not let it *send* anything to Google: every extension context is
+still bound by the CSP below, and the prompt reaches the guard over native
+messaging like any held request. `scripts/store-build.mjs` allows exactly
+the hosts in `NAVIGATION_SCREEN_HOSTS`, and
+`tests/navigation-screen.test.js` pins that list to the catalog's
+query-qualified capture paths, so a new host cannot ride in unannounced.
+
 **What actually bounds it** is the extension-pages CSP, which pins
 `connect-src` to `http://127.0.0.1:18795` — the same wording
 `docs/security/PERMISSIONS.md` uses. That, plus the fact that

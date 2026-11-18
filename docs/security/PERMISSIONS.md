@@ -58,7 +58,38 @@ templates, the host, `shared/constants.js`, and
 **Could we do without it?** No — this is the entire point of the
 extension. Removing it would mean the extension has nothing to do.
 
+### `declarativeNetRequestWithHostAccess`
+**Why:** Google AI Mode started from the search bar sends the prompt as a
+top-level navigation (`www.google.com/search?…&udm=50&q=<prompt>`). No page
+script runs before that request leaves, so the shim cannot hold it. One
+dynamic rule per query-qualified capture path in the catalog
+(`background/navigation-screen.js`) redirects exactly those main-frame GETs
+to the extension's own `screen/navigation.html`, which has the URL screened
+by the local guard over native messaging and then continues to the original
+or redacted URL. Plain search (no `udm=50`) never matches.
+
+**Why the `WithHostAccess` variant?** It carries no install warning and acts
+only on hosts the extension also holds a host permission for — here, only
+`https://www.google.com/*`. The plain `declarativeNetRequest` permission
+would add a "block content on any page" warning for no extra capability.
+
+**Could we do without it?** Only by leaving AI Mode's first prompt
+unscreened; MV3 has no other way to hold a navigation.
+
 ## Host permissions
+
+### `https://www.google.com/*`
+**Why:** declarativeNetRequest may redirect a request only on a host the
+extension holds a permission for. This is that host, and nothing else: it
+lets the rule above send AI Mode's search-bar navigation to
+`screen/navigation.html`. It is **not** a send path: the extension-pages CSP
+still pins `connect-src` to `http://127.0.0.1:18795`, so no extension
+context can fetch Google, and the prompt reaches the guard over native
+messaging. Chrome shows no new install warning (the all-sites content
+scripts already imply access to this host). `screen/navigation.html` is
+web-accessible to this host only, because a redirect target must be.
+`scripts/store-build.mjs` refuses any non-loopback entry not in
+`NAVIGATION_SCREEN_HOSTS`.
 
 ### `http://127.0.0.1/*`
 **Why:** the only outbound network endpoint the extension can reach,

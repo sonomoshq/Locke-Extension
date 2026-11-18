@@ -39,7 +39,13 @@ export function readManifest() {
 
 // Runtime payload only — docs/, tests/, scripts/, *.md and package.json
 // never enter a store zip.
-const DIRS = ['background', 'content', 'popup', 'shared'];
+const DIRS = ['background', 'content', 'popup', 'screen', 'shared'];
+
+// The only non-loopback host permissions allowed (see validate, A1/R-01):
+// hosts whose prompt-carrying navigations the extension redirects to
+// screen/navigation.html. Exact match patterns, kept equal to the catalog's
+// query-qualified capture paths by tests/navigation-screen.test.js.
+export const NAVIGATION_SCREEN_HOSTS = Object.freeze(['https://www.google.com/*']);
 
 // Build inputs that live inside a staged directory but have no runtime
 // consumer. `shared/ai-surfaces.json` is the vendored catalog that
@@ -267,7 +273,17 @@ export function validate(target, stagedDir) {
   // app on loopback.
   // Anything other than loopback in host_permissions breaks that promise —
   // and would be invisible in a diff that only added one line.
+  //
+  // ONE named exception, NAVIGATION_SCREEN_HOSTS: a host whose top-level
+  // navigations carry a prompt the catalog names (a query-qualified capture
+  // path — Google AI Mode's `/search?udm=50`). declarativeNetRequest needs a
+  // host permission to REDIRECT such a navigation to screen/navigation.html;
+  // it confers no ability to send anything there, because every extension
+  // context is still bound by the CSP `connect-src http://127.0.0.1:18795`.
+  // The list is exact (no wildcard host, no scheme other than https) and
+  // tests/navigation-screen.test.js pins it to the catalog both ways.
   for (const host of manifest.host_permissions ?? []) {
+    if (NAVIGATION_SCREEN_HOSTS.includes(host)) continue;
     if (!/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(host)) {
       fail(`host_permissions entry '${host}' is not loopback-only — see SECURITY.md A1 and RISK-REGISTER.md R-01`);
     }
