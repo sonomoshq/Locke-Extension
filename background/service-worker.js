@@ -145,6 +145,7 @@ function initialScreening() {
     code: null,         // our own closed-set code for a capture that failed
     at: 0,              // when the evidence was observed
     uncheckedSends: 0,  // requests that left WITHOUT a full screen (fail-open)
+    pausedSends: 0,     // requests that went out unscreened during the user's Locke pause
     withheldItems: 0,   // items held back because they could not be examined
     redactedItems: 0,   // PII spans the screener actually found and removed
     // Requests the desktop app DECIDED to block. Not requests blocked because
@@ -298,7 +299,8 @@ async function applyScreening(evidence, tally) {
     }
 
     if (tally && (tally.uncheckedSends > 0 || tally.withheldItems > 0 ||
-                  tally.redactedItems > 0 || tally.blockedSends > 0)) {
+                  tally.redactedItems > 0 || tally.blockedSends > 0 || tally.pausedSends > 0)) {
+      next.pausedSends = (prev.pausedSends ?? 0) + (tally.pausedSends ?? 0);
       next.uncheckedSends = (prev.uncheckedSends ?? 0) + tally.uncheckedSends;
       next.withheldItems = (prev.withheldItems ?? 0) + tally.withheldItems;
       next.redactedItems = (prev.redactedItems ?? 0) + (tally.redactedItems ?? 0);
@@ -620,6 +622,7 @@ async function performCheck(_reason) {
       // `screeningFor` does, so it can never sit next to an "Active" row.
       lastCaptureFailure: captureFailureToName(screening, result.timestamp),
       uncheckedSends: screening.uncheckedSends ?? 0,
+      pausedSends: screening.pausedSends ?? 0,
       withheldItems: screening.withheldItems ?? 0,
       redactedItems: screening.redactedItems ?? 0,
       // Requests the desktop app decided to block this session. Carried into

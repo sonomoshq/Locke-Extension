@@ -477,6 +477,12 @@ export const SCREENING_CONTRADICTION_WINDOW_MS = 60 * 1000;
 // any wake, computes the window afresh and finds it closed.
 export const BLOCK_BADGE_MS = 10 * 1000;
 
+// The exact receipt reason extension-bridge answers a held capture with while
+// the user's Locke pause is in force (unchecked Allow, nothing screened).
+// MUST match Bridge src/capture_pause.rs PAUSED_REASON. content/shim.js is a
+// classic script and carries its own copy of this literal.
+export const PAUSED_REASON = 'protection paused by the user';
+
 export const MSG = Object.freeze({
   REQUEST_CHECK: 'requestCheck',
   STATE_UPDATE: 'stateUpdate',

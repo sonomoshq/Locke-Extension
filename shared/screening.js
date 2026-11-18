@@ -109,6 +109,7 @@ import {
   SCREENING_CONTRADICTION_WINDOW_MS,
   SCREENING_EVIDENCE_TTL_MS,
   STATUS,
+  PAUSED_REASON,
   infrastructureFragment,
   isInfrastructureBlock
 } from './constants.js';
@@ -210,6 +211,18 @@ export const RELAY_FAILURES_PROVING_NO_VERDICT = Object.freeze([
 // report every request from an old sender as a fail-open leak. The `allow`
 // branch's items fallback is the belt to that braces — the one shape where an
 // old sender can still prove the send went out unexamined.
+// A send answered during the user's Locke pause: unchecked Allow with exactly
+// the bridge's paused reason and no unscreened items (the bridge sends []).
+// It still shipped unscreened, so it must never read as a screen
+// (evidenceFromReceipt keeps it UNCONFIRMED), but it is the pause that let it
+// out, not the fail-open window, so it is tallied apart. Anything else, even
+// with that reason, keeps the fail-open treatment.
+export function isPausedReceipt(receipt) {
+  return !!receipt && receipt.decision === 'allow' && receipt.unchecked === true &&
+    receipt.reason === PAUSED_REASON &&
+    !(Array.isArray(receipt.unscreened) && receipt.unscreened.length > 0);
+}
+
 function shippedUnscreened(receipt) {
   const unchecked = receipt.unchecked === true;
   if (receipt.decision === 'allow') {
@@ -281,6 +294,9 @@ export function evidenceFromReceipt(receipt, now = Date.now()) {
   const cannotTell = { state: SCREENING.UNCONFIRMED, fragment: null, at: now, code: 'verdict-unreadable' };
   if (!receipt || typeof receipt !== 'object') return cannotTell;
   const decision = receipt.decision;
+  if (isPausedReceipt(receipt)) {
+    return { state: SCREENING.UNCONFIRMED, fragment: null, at: now, code: 'sent-paused' };
+  }
   if (decision === 'allow' || decision === 'redact') {
     return shippedUnscreened(receipt)
       ? { state: SCREENING.UNCONFIRMED, fragment: null, at: now, code: 'sent-unscreened' }
@@ -378,6 +394,9 @@ export function tallyFromReceipt(receipt) {
     const decided = typeof receipt.reason === 'string' && receipt.reason !== '';
     return decided ? { ...none, blockedSends: 1 } : none;
   }
+  // Paused sends are counted on their own key (present only when non-zero, so
+  // every other tally keeps its exact shape) and never as uncheckedSends.
+  if (isPausedReceipt(receipt)) return { ...none, pausedSends: 1 };
   const items = Array.isArray(receipt.unscreened) ? receipt.unscreened.length : 0;
   const sentUnscreened = shippedUnscreened(receipt);
   const redactedItems = Number.isInteger(receipt.redactedCount) && receipt.redactedCount > 0
