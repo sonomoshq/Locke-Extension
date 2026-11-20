@@ -6735,3 +6735,85 @@ test('mixed versions: a redact whose rebuilt request cannot be decoded is held a
     assert.match(assertBlocked(bad.w.logs, 'fail-open-file-held', 'unavailable'), /\bcause=unchecked-pass\b/);
   }
 });
+
+// ── round 3 of the zh#370 review: a tool's output text carrying a file ────
+// Port of the Rust `tool_output_text_carrying_a_file_is_held`.
+
+test('releasableUnderFailOpen: tool output text carrying a file is held (tool_output_text_carrying_a_file_is_held)', () => {
+  const blob = 'QUJD'.repeat(MAX_OPAQUE_STRING / 4);
+  const under = 'QUJD'.repeat(MAX_OPAQUE_STRING / 4 - 1);
+  const uri = 'data:application/pdf;base64,JVBERi0x';
+  const prose = `lockfile:\n${'a b '.repeat(5000)}\nsha512-${under}`;
+  const tr = (content) => anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content }] }] });
+  for (const [ok, c] of [
+    [true, prose], [true, under], [true, `see ${uri}`], [false, blob], [false, uri],
+    [true, [{ type: 'text', text: under }]], [false, [{ type: 'text', text: blob }]],
+    [false, [{ type: 'text', text: 'x' }, { type: 'text', text: uri }]],
+    [true, [{ type: 'tool_reference', tool_name: 'x' }]], [false, 1]
+  ]) {
+    assert.equal(releasable(tr(c)), ok, `tool_result ${JSON.stringify(c).slice(0, 60)}`);
+  }
+  assert.ok(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't' }] }] })));
+  assert.ok(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'text', text: blob }] }] })), 'a prompt is not tool text');
+  const fr = (t) => jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent',
+    { contents: [{ parts: [{ functionResponse: { name: 'f', response: {}, parts: [{ text: t }] } }] }] });
+  assert.ok(releasable(fr(under)));
+  assert.ok(!releasable(fr(blob)));
+  assert.ok(!releasable(fr(uri)));
+  const out = (o) => jreq('POST', 'api.openai.com', '/v1/responses', { input: [{ type: 'custom_tool_call_output', call_id: 'c', output: o }] });
+  assert.ok(releasable(out(under)));
+  assert.ok(!releasable(out(blob)));
+  assert.ok(!releasable(out(uri)));
+  assert.ok(releasable(out([{ type: 'input_text', text: under }])));
+  assert.ok(!releasable(out([{ type: 'input_text', text: 'x' }, { type: 'input_text', text: blob }])));
+  assert.ok(!releasable(out([{ type: 'input_image', text: 'x' }])), 'output parts keep their shape check');
+  assert.ok(!releasable(out(1)));
+  assert.ok(!releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [{ type: 'function_call_output', call_id: 'c', output: blob }] })));
+  assert.ok(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [{ role: 'user', content: blob }] })));
+  const tool = (role, c) => jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [{ role, tool_call_id: '1', content: c }] });
+  assert.ok(releasable(tool('tool', under)));
+  assert.ok(!releasable(tool('tool', blob)));
+  assert.ok(!releasable(tool('function', uri)));
+  assert.ok(!releasable(tool('tool', [{ type: 'text', text: blob }])));
+  assert.ok(releasable(tool('tool', [{ type: 'text', text: under }])));
+  assert.ok(releasable(tool('tool', null)));
+  assert.ok(releasable(tool('user', blob)));
+  assert.ok(releasable(tool('assistant', [{ type: 'refusal', refusal: blob }])));
+});
+
+const R3_HELD = {
+  'Anthropic tool_result of pure base64 (800 KB)': [CC_URL, jsonInit({ messages: [{ role: 'user', content: [
+    { type: 'tool_result', tool_use_id: 't', content: 'UEsDBBQAAAAIAA'.repeat(800000 / 14) }] }] })],
+  'Anthropic tool_result text part of pure base64': [CC_URL, jsonInit({ messages: [{ role: 'user', content: [
+    { type: 'tool_result', tool_use_id: 't', content: [{ type: 'text', text: 'UEsDBBQAAAAIAA'.repeat(1000) }] }] }] })],
+  'Gemini functionResponse.parts text of pure base64 (500 KB)': [G3_URL, g3Call({ functionResponse: { name: 'read', response: {},
+    parts: [{ text: 'JVBERi0xLjcK'.repeat(500000 / 12) }] } })],
+  'Codex custom_tool_call_output of pure base64': [CODEX_URL, jsonInit({ type: 'response.create', input: [
+    { type: 'custom_tool_call_output', call_id: 'c', output: 'JVBERi0xLjcK'.repeat(1000) }] })],
+  'Codex function_call_output of pure base64': [CODEX_URL, jsonInit({ type: 'response.create', input: [
+    { type: 'function_call_output', call_id: 'c', output: 'JVBERi0xLjcK'.repeat(1000) }] })],
+  'OpenAI tool-role message of a data URI': ['https://api.openai.com/v1/chat/completions', jsonInit({ messages: [
+    { role: 'tool', tool_call_id: '1', content: 'data:application/pdf;base64,JVBERi0xLjcK' }] })]
+};
+
+test('fail-open round 3: tool output text carrying a file is HELD, on a verdict timeout and on a relay outage', async () => {
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    for (const [name, [url, init]] of Object.entries(R3_HELD)) {
+      const r = await foRun(outage, url, init);
+      assert.equal(r.outcome, 'BLOCKED', `${oname}: ${name}`);
+      assert.equal(r.w.netCalls.length, 0, `${oname}: ${name}`);
+      assert.equal(r.w.unchecked.length, 0, `${oname}: ${name}`);
+      assertBlocked(r.w.logs, 'fail-open-file-held', 'unavailable');
+    }
+  }
+});
+
+test('fail-open round 3: ordinary tool text (a lockfile with hashes) is still SENT', async () => {
+  const lockfile = `integrity sha512-${'QUJD'.repeat(20)} resolved https://x\n`.repeat(200);
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    const r = await foRun(outage, CC_URL, jsonInit({ messages: [{ role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 't', content: lockfile }] }] }));
+    assert.equal(r.outcome, 'SENT', oname);
+    assert.deepEqual(r.w.unchecked, [outage.cause], oname);
+  }
+});
