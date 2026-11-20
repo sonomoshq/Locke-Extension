@@ -8,6 +8,27 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Fixed — fail-open is default deny (zh#370).** With the desktop app's
+fail-open window on, a request that could not be screened (the screener timed
+out, the channel failed, the relay errored, the body could not be read) was
+sent as-is, including requests carrying an attached file. Now only a known,
+prompt-only chat turn fails open: a catalogued host and route whose body
+parses into that surface's chat schema with no attachment anywhere
+(`releasableUnderFailOpen`, the same rule as the Proxy and the Bridge).
+Everything else (an unknown host or route, an upload, multipart, a body that
+does not parse, anything with an attachment-looking field, a WebSocket frame
+that is not a known chat frame, a body over 6 MiB, and every body we cannot
+read, beacons, deferred fetches and synchronous XHR) is held with the reason
+`fail-open-file-held`. The extension also no longer trusts an unchecked
+pass: an `allow` or `redact` receipt marked `unchecked` is re-checked against
+the same rule and held when it is not a known chat turn, with the window on or
+off (the user's pause is not re-judged).
+The rule also refuses a duplicate JSON key anywhere, an attachment-looking or
+base64 query string, non-ASCII keys, inline-data and `{mimeType, data}` blobs
+inside tool inputs, tool definitions and Gemini function calls, and bounds
+each message's settings separately; Codex tool outputs carrying
+`internal_chat_message_metadata_passthrough` are no longer held.
+
 **Added — Google AI Mode from the search bar is screened.** Typing a prompt
 into Google's search box in AI Mode and pressing enter loads
 `/search?…&udm=50&q=<prompt>` as a page navigation, which left unscreened.

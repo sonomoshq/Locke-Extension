@@ -22,6 +22,9 @@ import {
 const SHIM_SRC = await readFile(new URL('../content/shim.js', import.meta.url), 'utf8');
 
 const AI_URL = 'https://chat.openai.com/backend-api/conversation';
+// A ChatGPT-web turn the fail-open rule recognises (zh#370: default deny).
+const CHAT_JSON = JSON.stringify({ messages: [{ content: { content_type: 'text', parts: ['hi'] } }] });
+const CHAT_INIT = { method: 'POST', headers: { 'content-type': 'application/json' }, body: CHAT_JSON };
 
 // `settleConfig` (default on) delivers a benign SONOMOS_CONFIG as soon as the
 // shim is installed, which is what a real page gets: content-script.js pushes
@@ -1087,7 +1090,7 @@ test('unchecked allow: the send goes out, and says so out loud', async () => {
     }
   }));
 
-  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":"hi"}' });
+  await sandbox.fetch(AI_URL, CHAT_INIT);
 
   // The user opened their fail-open window, so this is allowed to ship — but
   // it is the ONE case where content leaves unscreened, and it must never be
@@ -1110,7 +1113,7 @@ test('unchecked allow is inferred from the items alone, without the flag', async
     receipt: { decision: 'allow', redactedCount: 0, unscreened: [pdfUnscreened] }
   }));
 
-  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":"hi"}' });
+  await sandbox.fetch(AI_URL, CHAT_INIT);
   assert.equal(netCalls.length, 1);
   assertReason(logs, 'allow-unchecked', 'warn');
 });
@@ -1134,7 +1137,7 @@ test('unchecked allow with any other reason keeps the fail-open treatment', asyn
     ok: true,
     receipt: { decision: 'allow', unchecked: true, reason: 'fail-open window', unscreened: [] }
   }));
-  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":"hi"}' });
+  await sandbox.fetch(AI_URL, CHAT_INIT);
   assert.equal(netCalls.length, 1);
   assert.match(assertReason(logs, 'allow-unchecked', 'warn'), /\bbecause=user-fail-open-window\b/);
   assert.ok(!findLine(logs, 'allow-paused'));
@@ -1187,7 +1190,7 @@ test('unchecked redact: a partial screen under the fail-open window names itself
   const { sandbox, netCalls, logs } = makeWorld(() => {
     const v = rebuiltVerdict(
       ['POST /backend-api/conversation HTTP/1.1', 'Host: chat.openai.com', 'content-type: application/json'],
-      Buffer.from('{"q":"[REDACTED]"}'),
+      Buffer.from(CHAT_JSON.replace('hi', '[REDACTED]')),
       2
     );
     v.receipt.unchecked = true;
@@ -1195,7 +1198,7 @@ test('unchecked redact: a partial screen under the fail-open window names itself
     return v;
   });
 
-  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":"secret"}' });
+  await sandbox.fetch(AI_URL, CHAT_INIT);
   assert.equal(netCalls.length, 1);
   const line = assertReason(logs, 'redact-unchecked', 'warn');
   assert.match(line, /\bredactedCount=2\b/);
@@ -1217,7 +1220,7 @@ test('the unscreened summary reads kinds and media types and nothing else', asyn
     }
   }));
 
-  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":"hi"}' });
+  await sandbox.fetch(AI_URL, CHAT_INIT);
   assert.ok(logs.length > 0);
   for (const { line } of logs) {
     assert.ok(!line.includes(SECRET), `an unscreened entry leaked a field into a log line:\n${line}`);
@@ -2437,18 +2440,16 @@ test('upload: a redacted file with no integrity commitment is uploaded screened'
   assert.match(assertReason(logs, 'redact', 'debug'), /\bscope=upload\b.*\bredactedCount=3\b/);
 });
 
-test('upload: the user’s fail-open window still applies, and still says so out loud', async () => {
-  // The one sanctioned way content leaves unscreened is not the extension's
-  // decision to make, on this path or any other.
+test('upload: an unchecked allow is HELD, never sent (zh#370 default deny: an upload is not a chat turn)', async () => {
   const { sandbox, netCalls, logs } = makeWorld(() => ({
     ok: true,
     receipt: { decision: 'allow', redactedCount: 0, unchecked: true, unscreened: [pdfUnscreened] }
   }));
-  await sandbox.fetch(STORAGE_PUT, { method: 'PUT', body: 'file bytes' });
-  assert.equal(netCalls.length, 1);
-  const line = assertReason(logs, 'allow-unchecked', 'warn');
+  await assert.rejects(sandbox.fetch(STORAGE_PUT, { method: 'PUT', body: 'file bytes' }), blockedError);
+  assert.equal(netCalls.length, 0);
+  const line = assertBlocked(logs, 'fail-open-file-held', 'unavailable');
   assert.match(line, /\bscope=upload\b/);
-  assert.match(line, /\bbecause=user-fail-open-window\b/);
+  assert.match(line, /\bcause=unchecked-pass\b/);
 });
 
 test('upload: an XHR PUT is held and screened too', async () => {
@@ -4621,7 +4622,7 @@ async function timeoutWorld(window) {
 
 test('fail-open: verdict timeout sends the original and tallies it when the window is active', async () => {
   const { sandbox, netCalls, unchecked } = await timeoutWorld(openWindow());
-  await sandbox.fetch(AI_URL, { method: 'POST', body: '{"q":"hi"}' });
+  await sandbox.fetch(AI_URL, CHAT_INIT);
   assert.equal(netCalls.length, 1);
   assert.deepEqual(unchecked, ['verdict-timeout']);
 });
@@ -4639,7 +4640,7 @@ test('fail-open: verdict timeout still blocks when closed, absent, or expired', 
 test('fail-open: a window that lapses after the push closes by itself', async () => {
   const { sandbox, netCalls, deliver } = makeWorld(() => null);
   deliver({ type: 'SONOMOS_CONFIG', config: { failOpenActive: true, failOpenUntilMs: Date.now() + 50 } });
-  await sandbox.fetch(AI_URL, { method: 'POST', body: 'x' });
+  await sandbox.fetch(AI_URL, CHAT_INIT);
   assert.equal(netCalls.length, 1);
   await new Promise((r) => setTimeout(r, 80));
   await assert.rejects(sandbox.fetch(AI_URL, { method: 'POST', body: 'x' }), blockedError);
@@ -4649,13 +4650,13 @@ test('fail-open: a window that lapses after the push closes by itself', async ()
 test('fail-open: dead channel and unavailability relay codes follow the window', async () => {
   const dead = makeWorld(() => allowVerdict, { postMessage: () => { throw new Error('channel gone'); } });
   dead.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
-  await dead.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' });
+  await dead.sandbox.fetch(AI_URL, CHAT_INIT);
   assert.equal(dead.netCalls.length, 1);
 
   for (const code of ['bridge-unreachable', 'no-bridge', 'screening-timeout', 'extension-reloaded', 'native-timeout']) {
     const open = makeWorld(() => ({ ok: false, code }));
     open.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
-    await open.sandbox.fetch(AI_URL, { method: 'POST', body: 'x' });
+    await open.sandbox.fetch(AI_URL, CHAT_INIT);
     assert.equal(open.netCalls.length, 1, code);
     assert.deepEqual(open.unchecked, [`relay-${code}`]);
     const closed = makeWorld(() => ({ ok: false, code }));
@@ -4684,26 +4685,603 @@ test('fail-open: NOT governed - consent, malformed verdicts and guard decisions 
   }
 });
 
-test('fail-open: oversize, stream and unreadable bodies send unscreened in an open window, block otherwise', async () => {
+test('fail-open: oversize, stream and unreadable bodies are HELD in an open window (zh#370), and block as before otherwise', async () => {
   const bodies = [
     BIG,
     new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1])); c.close(); } }),
     { toString() { throw new Error('nope'); } }
   ];
   for (const body of bodies) {
+    // Unreadable, so it cannot be proven file-free: held even under fail-open.
     const open = makeWorld(() => allowVerdict);
     open.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
-    await open.sandbox.fetch(AI_URL, { method: 'POST', body, duplex: 'half' });
-    assert.equal(open.netCalls.length, 1);
-    assert.equal(open.unchecked.length, 1);
-    assert.match(open.unchecked[0], /^uncapturable-/);
+    await assert.rejects(open.sandbox.fetch(AI_URL, { method: 'POST', body, duplex: 'half' }), blockedError);
+    assert.equal(open.netCalls.length, 0);
+    assert.equal(open.unchecked.length, 0, 'nothing was sent unchecked');
+    const line = assertBlocked(open.logs, 'fail-open-file-held', 'unavailable');
+    assert.match(line, /\bcause=uncapturable-/);
 
     const expired = makeWorld(() => allowVerdict);
     expired.deliver({ type: 'SONOMOS_CONFIG', config: expiredWindow() });
     await assert.rejects(expired.sandbox.fetch(AI_URL, { method: 'POST', body, duplex: 'half' }), blockedError);
     assert.equal(expired.netCalls.length, 0);
     assert.equal(expired.unchecked.length, 0);
+    assert.ok(!findLine(expired.logs, 'fail-open-file-held'), 'window closed: the old reason, not the new one');
   }
+});
+
+// ── fail-open never sends a possible file (zh#370) ──────────────────────
+
+const multipartFile = () => imageForm();
+const dataUrlJson = () => JSON.stringify({ q: 'look', image: 'data:image/png;base64,iVBORw0KGgo=' });
+const FILE_BODIES = { multipart: multipartFile, 'json data-url': dataUrlJson };
+const TEXT_BODY = () => CHAT_JSON;
+
+// Each outage, as the world options that produce it.
+const OUTAGES = {
+  'verdict timeout': { onCapture: () => new Promise(() => {}), cause: 'verdict-timeout', closedReason: 'verdict-timeout', config: { enforceTimeoutMs: 1000 } },
+  'channel failed': { onCapture: () => allowVerdict, globals: { postMessage: () => { throw new Error('channel gone'); } }, cause: 'verdict-channel-failed', closedReason: 'verdict-channel-failed', tallyUnobservable: true },
+  'verdict missing': { onCapture: () => null, cause: 'verdict-missing', closedReason: 'verdict-missing' },
+  'relay no-bridge': { onCapture: () => ({ ok: false, code: 'no-bridge' }), cause: 'relay-no-bridge', closedReason: 'connector-not-started' },
+  'relay bridge-error': { onCapture: () => ({ ok: false, code: 'bridge-error' }), cause: 'relay-bridge-error', closedReason: 'native-call-failed' }
+};
+
+function outageWorld(outage, window) {
+  const w = makeWorld(outage.onCapture, outage.globals || {});
+  w.deliver({ type: 'SONOMOS_CONFIG', config: { ...(outage.config || {}), ...(window || {}) } });
+  return w;
+}
+
+test('fail-open: a request that may carry a file is HELD on every outage, with the file reason', async () => {
+  for (const [outName, outage] of Object.entries(OUTAGES)) {
+    for (const [bodyName, mk] of Object.entries(FILE_BODIES)) {
+      const w = outageWorld(outage, openWindow());
+      await assert.rejects(w.sandbox.fetch(AI_URL, { method: 'POST', body: mk() }), blockedError, `${outName} / ${bodyName}`);
+      assert.equal(w.netCalls.length, 0, `${outName} / ${bodyName}: nothing sent`);
+      assert.equal(w.unchecked.length, 0, `${outName} / ${bodyName}: not an unchecked send`);
+      const line = assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
+      assert.match(line, new RegExp(`\\bcause=${outage.cause}\\b`), outName);
+      assert.ok(!findLine(w.logs, 'unchecked-fail-open'), outName);
+    }
+  }
+});
+
+test('fail-open: a recognised chat turn still fails open exactly as before, tallied', async () => {
+  for (const [outName, outage] of Object.entries(OUTAGES)) {
+    const w = outageWorld(outage, openWindow());
+    await w.sandbox.fetch(AI_URL, CHAT_INIT);
+    assert.equal(w.netCalls.length, 1, outName);
+    // A dead channel cannot carry the tally message either; the log line proves it.
+    if (!outage.tallyUnobservable) assert.deepEqual(w.unchecked, [outage.cause], outName);
+    assertReason(w.logs, 'unchecked-fail-open', 'warn');
+    assert.ok(!findLine(w.logs, 'fail-open-file-held'), outName);
+  }
+});
+
+test('fail-open OFF: file and text requests block on every outage with the same reasons as before', async () => {
+  for (const [outName, outage] of Object.entries(OUTAGES)) {
+    for (const mk of [multipartFile, dataUrlJson, TEXT_BODY]) {
+      const w = outageWorld(outage, null);
+      await assert.rejects(w.sandbox.fetch(AI_URL, { method: 'POST', body: mk() }), blockedError, outName);
+      assert.equal(w.netCalls.length, 0, outName);
+      assert.equal(w.unchecked.length, 0, outName);
+      assertBlocked(w.logs, outage.closedReason, 'unavailable');
+      assert.ok(!findLine(w.logs, 'fail-open-file-held'), outName);
+    }
+  }
+});
+
+test('fail-open: the host\'s file-held receipt gets the file sentence; an old host\'s infrastructure block still blocks', async () => {
+  const held = 'Locke could not screen this request and it is not a plain chat message — held back (fail-open only sends recognised prompt-only chat messages unchecked)';
+  const w = makeWorld(() => ({ ok: true, receipt: { decision: 'block', blockCause: 'infrastructure', reason: held, redactedCount: 0, unchecked: false } }));
+  w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  await assert.rejects(w.sandbox.fetch(AI_URL, { method: 'POST', body: multipartFile() }),
+    (e) => blockedError(e) && /only sends plain chat messages/.test(e.message));
+  assert.equal(w.netCalls.length, 0);
+  assert.equal(w.unchecked.length, 0);
+  assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
+
+  // An older host answers a generic infrastructure block: still a block.
+  const old = makeWorld(() => ({ ok: true, receipt: { decision: 'block', blockCause: 'infrastructure', reason: 'screening unavailable' } }));
+  old.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  await assert.rejects(old.sandbox.fetch(AI_URL, { method: 'POST', body: multipartFile() }), blockedError);
+  assert.equal(old.netCalls.length, 0);
+  assertBlocked(old.logs, 'screening-unavailable', 'unavailable');
+
+  // And a host that sends the reason as a relay error code never opens the window.
+  const code = makeWorld(() => ({ ok: false, code: 'fail-open-file-held' }));
+  code.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  await assert.rejects(code.sandbox.fetch(AI_URL, CHAT_INIT), blockedError);
+  assert.equal(code.netCalls.length, 0);
+  assert.equal(code.unchecked.length, 0);
+});
+
+test('fail-open: an uncapturable async XHR body is held; a sync XHR is held; closed window keeps the old reasons', async () => {
+  for (const open of [true, false]) {
+    const w = makeXhrWorld(() => allowVerdict);
+    if (open) w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+    const a = new w.sandbox.XMLHttpRequest();
+    a.open('POST', 'https://chat.openai.com/api/chat', true);
+    a.send(BIG);
+    await waitFor(() => a.aborted);
+    assert.deepEqual(a.sent, []);
+    assert.equal(a.sonomosBlockReason, open ? 'fail-open-file-held' : 'uncapturable-oversize');
+    const s = new w.sandbox.XMLHttpRequest();
+    s.open('POST', 'https://chat.openai.com/api/chat', false);
+    s.send('{"q":"hi"}');
+    assert.deepEqual(s.sent, []);
+    assert.equal(s.sonomosBlockReason, open ? 'fail-open-file-held' : 'uncapturable-sync-xhr');
+    assert.equal(w.unchecked.length, 0);
+  }
+});
+
+test('fail-open: a beacon and a deferred fetch are held, not sent', async () => {
+  const b = makeBeaconWorld();
+  b.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  assert.equal(b.sandbox.navigator.sendBeacon('https://chat.openai.com/ces/v1/t', '{"prompt":"x"}'), false);
+  assert.deepEqual(b.beacons, []);
+  assert.equal(b.unchecked.length, 0);
+  assertBlocked(b.logs, 'fail-open-file-held');
+
+  const f = makeFetchLaterWorld();
+  f.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  assert.throws(() => f.sandbox.fetchLater(AI_URL, { method: 'POST', body: '{"q":1}' }), blockedError);
+  assert.equal(f.laterCalls.length, 0);
+  assert.equal(f.unchecked.length, 0);
+  assertBlocked(f.logs, 'fail-open-file-held');
+});
+
+// ── releasableUnderFailOpen: the cross-repo contract (zh#370, default deny) ─
+// A port of Proxy src/fail_open_shape.rs; the cases below are that file's Rust
+// tests, same inputs and same expectations. The shim is a classic script, so
+// the function is lifted out of its source between the markers.
+const releasable = (() => {
+  const m = /\/\/ <releasableUnderFailOpen>\n([\s\S]*?)\/\/ <\/releasableUnderFailOpen>/.exec(SHIM_SRC);
+  assert.ok(m, 'markers present');
+  return new Function(m[1] + '; return releasableUnderFailOpen;')();
+})();
+
+const MAX_RELEASABLE_BODY = 6 * 1024 * 1024;
+const MAX_OPAQUE_STRING = 4096;
+const MAX_OPAQUE_ARRAY = 64;
+
+function req(method, host, path, ct, body) {
+  const b = Buffer.isBuffer(body) ? body : Buffer.from(body);
+  const head = `${method} ${path} HTTP/1.1\r\nHost: ${host}\r\n` +
+    (ct != null ? `content-type: ${ct}\r\n` : '') + `Content-Length: ${b.length}\r\n\r\n`;
+  return Buffer.concat([Buffer.from(head), b]);
+}
+const jreq = (method, host, path, body) => req(method, host, path, 'application/json', JSON.stringify(body));
+const anth = (body) => jreq('POST', 'api.anthropic.com', '/v1/messages?beta=true', body);
+const b64n = (n) => 'QUJD'.repeat(Math.floor(n / 4) + 1).slice(0, n);
+const CLAUDE_AI = '/api/organizations/o-1/chat_conversations/c-1/completion';
+const GEMINI = '/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate';
+const formEnc = (s) => [...Buffer.from(s)].map((b) =>
+  (/[A-Za-z0-9\-_.]/.test(String.fromCharCode(b)) ? String.fromCharCode(b) : b === 32 ? '+' : '%' + b.toString(16).toUpperCase().padStart(2, '0'))).join('');
+function geminiBody(turn) {
+  const inner = [turn, ['en'], null, ...Array(90).fill(null)];
+  return `f.req=${formEnc(JSON.stringify([null, JSON.stringify(inner)]))}&at=AJvLN6M`;
+}
+const repeat = (s, n) => s.repeat(n);
+
+test('releasableUnderFailOpen: every surface\'s prompt-only turn is released (known_prompt_only_turns_are_released)', () => {
+  const cases = [
+    anth({ model: 'm', max_tokens: 1, stream: true,
+      system: [{ type: 'text', text: 'sys', cache_control: { type: 'ephemeral' } }],
+      tools: [{ name: 'Read', input_schema: { properties: { file_path: { type: 'string' } } } }],
+      metadata: { user_id: 'u' },
+      messages: [
+        { role: 'user', content: 'hi, my SSN is 123-45-6789' },
+        { role: 'assistant', content: [
+          { type: 'thinking', thinking: 'hm', signature: b64n(2000) },
+          { type: 'redacted_thinking', data: b64n(1200) },
+          { type: 'tool_use', id: 't', name: 'Read', input: { file_path: '/a.pdf' } }] },
+        { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: 't', content: 'ssh-rsa AAAA data:image/png;base64, ...' },
+          { type: 'tool_result', tool_use_id: 't', content: [{ type: 'text', text: 'x' }, { type: 'tool_reference', tool_name: 'WebSearch' }] },
+          { type: 'text', text: 'go on' }] }] }),
+    jreq('POST', 'api.anthropic.com', '/v1/messages/count_tokens',
+      { model: 'm', messages: [{ role: 'user', content: 'foo' }] }),
+    jreq('POST', 'claude.ai', CLAUDE_AI, { prompt: 'the sky is blue', timezone: 'UTC',
+      attachments: [], files: [], sync_sources: [],
+      tools: [{ name: 'x', input_schema: { properties: { file: { enum: ['file'] } } } }],
+      create_conversation_params: { name: '', is_temporary: false } }),
+    jreq('POST', 'claude.ai', '/api/organizations/o/chat_conversations/c/title',
+      { message_content: 'the sky is blue', recent_titles: ['a'] }),
+    jreq('POST', 'chatgpt.com', '/backend-api/f/conversation', {
+      action: 'next', model: 'auto', parent_message_id: 'client-created-root',
+      client_contextual_info: { app_name: 'chatgpt.com' },
+      messages: [{ author: { role: 'user', metadata: {} }, content: { content_type: 'text', parts: ['the sky is blue'] },
+        id: '8e07', metadata: { automation_creation_attribution: { origin: 'conversation' } } }],
+      supported_encodings: ['v1'] }),
+    jreq('POST', 'chatgpt.com', '/backend-api/f/conversation/prepare',
+      { action: 'next', model: 'auto', attachment_mime_types: [] }),
+    req('POST', 'gemini.google.com', `${GEMINI}?bl=x&_reqid=1`, 'application/x-www-form-urlencoded;charset=UTF-8',
+      geminiBody(['the sky is blue', 0, null, null, null, null, 0])),
+    jreq('POST', 'duck.ai', '/duckchat/v1/chat', { model: 'gpt',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'the sky is blue' }] }, { role: 'assistant', content: 'ok' }],
+      durableStream: { publicKey: { n: b64n(342) } } }),
+    jreq('POST', 'api.openai.com', '/v1/chat/completions', { model: 'g',
+      messages: [{ role: 'system', content: 's' }, { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+        { role: 'assistant', content: null, tool_calls: [{ id: '1', type: 'function', function: { name: 'f', arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: '1', content: 'out' }] }),
+    jreq('POST', 'api.openai.com', '/v1/responses', { model: 'g', input: 'the sky is blue' }),
+    req('WS-SEND', 'chatgpt.com', '/backend-api/codex/responses', null, JSON.stringify({
+      type: 'response.create', model: 'g', instructions: 'i',
+      tools: [{ type: 'function', name: 'read_file' }], include: ['reasoning.encrypted_content'],
+      input: [
+        { type: 'additional_tools', role: 'developer', tools: [{ name: 'x' }] },
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+        { type: 'reasoning', id: 'r', summary: [{ type: 'summary_text', text: 's' }], encrypted_content: 'gAAAA' + b64n(1200) },
+        { type: 'function_call', call_id: 'c', name: 'exec', arguments: '{}' },
+        { type: 'function_call_output', call_id: 'c', output: 'done' }] })),
+    jreq('POST', 'generativelanguage.googleapis.com', '/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse',
+      { contents: [{ role: 'user', parts: [{ text: 'hi' }] }, { role: 'model', parts: [{ text: 'ok', thoughtSignature: b64n(900) }] }],
+        systemInstruction: { parts: [{ text: 's' }] } })
+  ];
+  cases.forEach((raw, i) => assert.equal(releasable(raw), true, `case ${i}: ${raw.toString('utf8').slice(0, 200)}`));
+});
+
+test('releasableUnderFailOpen: attachments and unknown shapes are all held (attachments_and_unknown_shapes_are_held)', () => {
+  const pdf = b64n(4000);
+  const small = b64n(64);
+  const bare = (head, body = '{"messages":[]}') => Buffer.from(head + '\r\n\r\n' + body);
+  const cases = [
+    ['unknown host', jreq('POST', 'api.example', '/v1/messages', { messages: [] })],
+    ['unknown route', jreq('POST', 'api.anthropic.com', '/v1/files', {})],
+    ['GET', req('GET', 'api.anthropic.com', '/v1/messages', null, '')],
+    ['PUT text upload', req('PUT', 'api.anthropic.com', '/v1/messages', 'text/plain', 'Jane Doe 123-45-6789')],
+    ['docx', req('POST', 'api.anthropic.com', '/v1/messages', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'PK')],
+    ['svg', req('POST', 'api.anthropic.com', '/v1/messages', 'image/svg+xml', '<svg/>')],
+    ['xml', req('POST', 'api.anthropic.com', '/v1/messages', 'application/xml', '<a/>')],
+    ['multipart boundary holding json', req('POST', 'api.anthropic.com', '/v1/messages', 'multipart/form-data; boundary=json-xml-1', '--json-xml-1--')],
+    ['json with a foreign parameter', req('POST', 'api.anthropic.com', '/v1/messages', 'application/json; boundary=x', '{"messages":[]}')],
+    ['no content-type (Guard drift)', req('POST', 'api.anthropic.com', '/v1/messages', null, '{"messages":[{"role":"user","content":"hi"}]}')],
+    ['gzip', bare('POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\ncontent-encoding: gzip', '{}')],
+    ['bare LF head', Buffer.from('POST /v1/messages HTTP/1.1\nHost: api.anthropic.com\r\ncontent-type: application/json\r\n\r\n{"messages":[]}')],
+    ['space before colon', bare('POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type : application/json')],
+    ['two content-types', bare('POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type: application/json\r\nContent-Type: application/pdf')],
+    ['two hosts', bare('POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nHost: evil\r\ncontent-type: application/json')],
+    ['other port', jreq('POST', 'api.anthropic.com:8443', '/v1/messages', { messages: [] })],
+    ['not json', req('POST', 'api.anthropic.com', '/v1/messages', 'application/json', '{nope')],
+    ['anthropic image', anth({ messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: small } }] }] })],
+    ['anthropic document', anth({ messages: [{ role: 'user', content: [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdf } }] }] })],
+    ['anthropic file id', anth({ messages: [{ role: 'user', content: [{ type: 'document', source: { type: 'file', file_id: 'file_1' } }] }] })],
+    ['tool reference with content', anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: [{ type: 'tool_reference', tool_name: 'x', data: 'y' }] }] }] })],
+    ['tool reference name too long', anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: [{ type: 'tool_reference', tool_name: 'x'.repeat(257) }] }] }] })],
+    ['image inside a tool result', anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: [{ type: 'image', source: { data: small } }] }] }] })],
+    ['signature key abuse', anth({ signature: pdf, messages: [{ role: 'user', content: 'hi' }] })],
+    ['signature on a text block', anth({ messages: [{ role: 'user', content: [{ type: 'text', text: 'hi', signature: pdf }] }] })],
+    ['split base64 runs', anth({ x: Array.from({ length: 20 }, () => b64n(500)), messages: [{ role: 'user', content: 'hi' }] })],
+    ['number array', anth({ x: Array.from({ length: 400 }, (_, i) => i), messages: [{ role: 'user', content: 'hi' }] })],
+    ['unknown message key', anth({ messages: [{ role: 'user', content: 'hi', file: pdf }] })],
+    ['unknown anthropic parameter', anth({ container: 'c', messages: [{ role: 'user', content: 'hi' }] })],
+    ['anthropic mcp servers', anth({ mcp_servers: [], messages: [{ role: 'user', content: 'hi' }] })],
+    ['anthropic unknown role', anth({ messages: [{ role: 'tool', content: 'hi' }] })],
+    ['openai prediction', jreq('POST', 'api.openai.com', '/v1/chat/completions', { prediction: { type: 'content', content: 'x' }, messages: [{ role: 'user', content: 'hi' }] })],
+    ['responses unknown parameter', jreq('POST', 'api.openai.com', '/v1/responses', { input: 'hi', attachments_blob: 'x' })],
+    ['gemini api cachedContent', jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent', { cachedContent: 'cachedContents/1', contents: [{ parts: [{ text: 'hi' }] }] })],
+    ['claude.ai extracted_content', jreq('POST', 'claude.ai', CLAUDE_AI, { prompt: 'summarize', attachments: [{ file_name: 'p.csv', extracted_content: 'Jane Doe 123-45-6789' }] })],
+    ['claude.ai file ids', jreq('POST', 'claude.ai', CLAUDE_AI, { prompt: 'x', files: ['84aa'] })],
+    ['claude.ai upload route', req('POST', 'claude.ai', '/api/organizations/o/conversations/c/wiggle/upload-file', 'multipart/form-data; boundary=x', '--x--')],
+    ['claude.ai attachment under another key', jreq('POST', 'claude.ai', CLAUDE_AI, { prompt: 'x', pasted_attachment: { content: 'Jane' } })],
+    ['chatgpt multimodal', jreq('POST', 'chatgpt.com', '/backend-api/f/conversation', { messages: [{ content: { content_type: 'multimodal_text', parts: [{ asset_pointer: 'file-service://x' }, 'hi'] } }] })],
+    ['chatgpt metadata attachments', jreq('POST', 'chatgpt.com', '/backend-api/f/conversation', { messages: [{ content: { content_type: 'text', parts: ['hi'] }, metadata: { attachments: [{ id: 'file-1', name: 'a.pdf' }] } }] })],
+    ['chatgpt prepare with files picked', jreq('POST', 'chatgpt.com', '/backend-api/f/conversation/prepare', { attachment_mime_types: ['application/pdf'] })],
+    ['chatgpt files route', jreq('POST', 'chatgpt.com', '/backend-api/files', { file_name: 'a.pdf' })],
+    ['gemini attachment', req('POST', 'gemini.google.com', GEMINI, 'application/x-www-form-urlencoded;charset=UTF-8',
+      geminiBody(['the sky is blue', 0, null, [[['/upload/x', 3, null, 'text/plain', 'id'], 'the sky is blue.txt']], null, null, 0]))],
+    ['gemini extra form field', req('POST', 'gemini.google.com', GEMINI, 'application/x-www-form-urlencoded', `${geminiBody(['hi'])}&file=${pdf}`)],
+    ['gemini processSession', req('POST', 'geminiweb-pa.clients6.google.com', '/v1/processSession', 'application/x-www-form-urlencoded', 'req0___data__=x')],
+    ['duck inline small file', jreq('POST', 'duck.ai', '/duckchat/v1/chat', { messages: [{ role: 'user', content: 'see file', parts: [{ type: 'file', content: small, mimeType: 'text/plain' }] }] })],
+    ['duck image part', jreq('POST', 'duck.ai', '/duckchat/v1/chat', { messages: [{ role: 'user', content: [{ type: 'image', image: `data:image/png;base64,${small}` }] }] })],
+    ['openai image_url', jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }] }] })],
+    ['openai file part', jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [{ role: 'user', content: [{ type: 'file', file: { filename: 'a.pdf', file_data: small } }] }] })],
+    ['responses input_file', jreq('POST', 'api.openai.com', '/v1/responses', { input: [{ role: 'user', content: [{ type: 'input_file', filename: 'a.pdf', file_data: 'data:application/pdf;base64,AA' }] }] })],
+    ['responses input_image', req('WS-SEND', 'chatgpt.com', '/backend-api/codex/responses', null, JSON.stringify({ type: 'response.create', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }, { type: 'input_image', image_url: 'data:image/png;base64,AA' }] }] }))],
+    ['ws not response.create', req('WS-SEND', 'chatgpt.com', '/backend-api/codex/responses', null, JSON.stringify({ type: 'session.update', input: 'hi' }))],
+    ['ws binary', Buffer.concat([Buffer.from('WS-SEND /backend-api/codex/responses HTTP/1.1\r\nHost: chatgpt.com\r\n\r\n'), Buffer.from([0xff, 0xfe, 0, 1])])],
+    ['ws over the cap', req('WS-SEND', 'chatgpt.com', '/backend-api/codex/responses', null, JSON.stringify({ type: 'response.create', input: 'x'.repeat(MAX_RELEASABLE_BODY) }))],
+    ['gemini api inlineData', jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent', { contents: [{ parts: [{ inlineData: { mimeType: 'application/pdf', data: small } }, { text: 'hi' }] }] })],
+    ['gemini api fileData', jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent', { contents: [{ parts: [{ fileData: { fileUri: 'https://x/files/1' } }] }] })],
+    ['gemini api upload', jreq('POST', 'generativelanguage.googleapis.com', '/upload/v1/files', { file: { display_name: 'a.pdf' } })]
+  ];
+  assert.equal(cases.length, 57, 'every Rust case is ported');
+  for (const [name, raw] of cases) assert.equal(releasable(raw), false, `${name} must be held`);
+});
+
+test('releasableUnderFailOpen: framing edges, 6 MiB cap +/- 1 (framing_edges)', () => {
+  const ok = { messages: [{ role: 'user', content: 'hi' }] };
+  assert.equal(releasable(jreq('POST', 'api.anthropic.com:443', '/v1/messages?beta=true', ok)), true);
+  assert.equal(releasable(req('POST', 'api.anthropic.com', '/v1/messages', 'Application/JSON; charset=UTF-8', JSON.stringify(ok))), true);
+  assert.equal(releasable(Buffer.from('POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\ncontent-encoding: identity\r\n\r\n{"messages":[]}')), true);
+  const bad = [
+    'POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n',
+    'POST /v1/messages HTTP/1.0\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\n\r\n{"messages":[]}',
+    'POST http://api.anthropic.com/v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\n\r\n{"messages":[]}',
+    'POST /v1/messages HTTP/1.1\r\ncontent-type: application/json\r\n\r\n{"messages":[]}',
+    'POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n{"messages":[]}',
+    'POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nno colon here\r\ncontent-type: application/json\r\n\r\n{"messages":[]}',
+    'POST /v1/messages HTTP/1.1 extra\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\n\r\n{"messages":[]}'
+  ].map((s) => Buffer.from(s));
+  bad.push(Buffer.concat([Buffer.from('POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\n\r\n'), Buffer.from([0xff])]));
+  for (const b of bad) assert.equal(releasable(b), false, b.toString('latin1'));
+  const base = '{"messages":[{"role":"user","content":""}]}';
+  const pad = (n) => `{"messages":[{"role":"user","content":"${'a'.repeat(n - base.length)}"}]}`;
+  assert.equal(releasable(req('POST', 'api.anthropic.com', '/v1/messages', 'application/json', pad(MAX_RELEASABLE_BODY))), true);
+  assert.equal(releasable(req('POST', 'api.anthropic.com', '/v1/messages', 'application/json', pad(MAX_RELEASABLE_BODY + 1))), false);
+});
+
+test('releasableUnderFailOpen: opaque limits, deny keys, the per-request budget (opaque_limits_and_deny_keys)', () => {
+  const chat = (extra) => releasable(jreq('POST', 'chatgpt.com', '/backend-api/f/conversation',
+    { messages: [{ content: { content_type: 'text', parts: ['hi'] } }], x: extra }));
+  assert.equal(chat('a '.repeat(MAX_OPAQUE_STRING / 2)), true);
+  assert.equal(chat(`${'a '.repeat(MAX_OPAQUE_STRING / 2)} `), false);
+  // A bare base64 run is a file's bytes from 512 on; any other character and it is not a run.
+  assert.equal(chat('Q'.repeat(511)), true);
+  assert.equal(chat('Q'.repeat(512)), false);
+  assert.equal(chat('Q'.repeat(512) + '+/-_='), false);
+  assert.equal(chat('Q'.repeat(512) + '!'), true);
+  assert.equal(chat(' data:text/plain;base64,QQ=='), false);
+  assert.equal(chat('DATA:x;BASE64,QQ'), false);
+  assert.equal(chat('data: not a uri'), true);
+  assert.equal(chat('see ;base64, in the docs'), true);
+  assert.equal(chat(Array(MAX_OPAQUE_ARRAY).fill(1)), true);
+  assert.equal(chat(Array(MAX_OPAQUE_ARRAY + 1).fill(1)), false);
+  assert.equal(chat({ deep: { image_url: 'x' } }), false);
+  // An empty attachment-ish setting is not an attachment.
+  assert.equal(chat({ files: [], image: null, upload: false, blob: '' }), true);
+  // Non-empty ones are, whatever the value type (0 and true are not empty).
+  for (const v of [0, true, 'x', [0], { a: 1 }]) assert.equal(chat({ files: v }), false, JSON.stringify(v));
+  // deny_key, by what it does to a request: each of these names an attachment.
+  for (const k of ['Attachments', 'FILE_ids', 'inlineData', 'extracted_x', 'audio', 'video', 'media_type',
+    'base64', 'dataUrl', 'data_url', 'documents', 'blob', 'upload', 'images']) {
+    assert.equal(chat({ [k]: 'v' }), false, k);
+  }
+  for (const k of ['signature', 'prompt', 'metadata', 'kind', 'data']) assert.equal(chat({ [k]: 'v' }), true, k);
+  // Many short strings, each under every per-item limit, past the total.
+  const chunks = Array.from({ length: 10 }, () => 'a '.repeat(1000));
+  assert.equal(chat(chunks.slice(0, 3)), true);
+  assert.equal(chat(chunks.slice(0, 5)), false);
+  assert.equal(chat({ a: chunks.slice(0, 2), b: chunks.slice(0, 3) }), false);
+  assert.equal(chat(Array.from({ length: 40 }, () => Array(60).fill(255))), false);
+  // The budget is per request, not per call history.
+  assert.equal(chat(chunks.slice(0, 3)), true);
+  // Object keys spend their length; scalars spend 8 (8192 / 8 = 1024 numbers fit, spread under the array cap).
+  const keys = Object.fromEntries(Array.from({ length: 90 }, (_, i) => ['k'.repeat(200) + i, 1]));
+  assert.equal(chat(keys), false, 'keys count against the budget');
+  const nums = Array.from({ length: 15 }, () => Array(64).fill(1)); // 960 numbers = 7680 + nothing else
+  assert.equal(chat(nums), true);
+  const nums2 = Array.from({ length: 20 }, () => Array(64).fill(1)); // 1280 numbers = 10240 > budget
+  assert.equal(chat(nums2), false);
+});
+
+test('releasableUnderFailOpen: form decoding of the Gemini token, as the Rust decoder does', () => {
+  const g = (at) => releasable(req('POST', 'gemini.google.com', GEMINI, 'application/x-www-form-urlencoded',
+    geminiBody(['hi']).replace('at=AJvLN6M', `at=${at}`)));
+  assert.equal(g('a%2Bb+c'), true);
+  assert.equal(g('%zz'), false);
+  assert.equal(g('%4'), false);
+  assert.equal(g('%ff'), false, 'decodes to non UTF-8');
+  assert.equal(g('%C3%A9'), true, 'a valid multi-byte escape');
+  assert.equal(g('%+f'), true, 'u8::from_str_radix takes one leading +');
+  assert.equal(g('%-1'), false);
+  assert.equal(g('x'.repeat(MAX_OPAQUE_STRING)), true);
+  assert.equal(g('x'.repeat(MAX_OPAQUE_STRING + 1)), false);
+  // Two f.req fields, or no f.req, or an empty body.
+  const one = geminiBody(['hi']);
+  assert.equal(releasable(req('POST', 'gemini.google.com', GEMINI, 'application/x-www-form-urlencoded', `${one}&${one.split('&')[0]}`)), false);
+  assert.equal(releasable(req('POST', 'gemini.google.com', GEMINI, 'application/x-www-form-urlencoded', 'at=x')), false);
+  assert.equal(releasable(req('POST', 'gemini.google.com', GEMINI, 'application/x-www-form-urlencoded', '')), false);
+  // The turn: a string then scalars; the outer first member null; the form media type exact.
+  const raw = (outer) => req('POST', 'gemini.google.com', GEMINI, 'application/x-www-form-urlencoded', `f.req=${formEnc(JSON.stringify(outer))}`);
+  const inner = (turn, ...o) => JSON.stringify([turn, ...o]);
+  assert.equal(releasable(raw([null, inner(['hi', 1, null, true])])), true);
+  assert.equal(releasable(raw([1, inner(['hi'])])), false, 'first member must be null');
+  assert.equal(releasable(raw([null])), false);
+  assert.equal(releasable(raw([null, 5])), false, 'inner must be a string');
+  assert.equal(releasable(raw([null, inner(['hi', []])])), false);
+  assert.equal(releasable(raw([null, inner(['hi', 'two'])])), false);
+  assert.equal(releasable(raw([null, inner([1, 'hi'])])), false);
+  assert.equal(releasable(raw([null, inner([])])), false);
+  assert.equal(releasable(raw([null, '[]'])), false);
+  assert.equal(releasable(raw([null, inner(['hi'], { image: 'x' })])), false, 'others are opaque');
+  assert.equal(releasable(raw([null, inner(['hi']), { file: 'x' }])), false, 'outer rest is opaque');
+  assert.equal(releasable(req('POST', 'gemini.google.com', GEMINI, 'application/json', geminiBody(['hi']))), false);
+});
+
+test('releasableUnderFailOpen: routes (routes)', () => {
+  const gem = (p) => releasable(jreq('POST', 'generativelanguage.googleapis.com', p, { contents: [{ parts: [{ text: 'hi' }] }] }));
+  assert.equal(gem('/v1beta/models/gemini-2.5-flash:generateContent'), true);
+  assert.equal(gem('/v1/models/g:countTokens'), true);
+  assert.equal(gem('/v1/models/g:streamGenerateContent'), true);
+  assert.equal(gem('/v1/models/g:embedContent'), false);
+  assert.equal(gem('/v1/models/:generateContent'), false);
+  assert.equal(gem('/v1/tunedModels/g:generateContent'), false);
+  assert.equal(gem('/v1/models/g:generateContent/x'), false);
+  assert.equal(gem('/upload/v1/models/g:generateContent'), false);
+  assert.equal(gem('/x1/models/g:generateContent'), false, 'version must start with v');
+  assert.equal(gem('/v1/models/g'), false);
+  const cl = (p) => [{ prompt: 'x' }, { message_content: 'x' }].some((b) => releasable(jreq('POST', 'claude.ai', p, b)));
+  assert.equal(cl('/api/organizations/o/chat_conversations/c/completion'), true);
+  assert.equal(cl('/api/organizations/o/chat_conversations/c/retry_completion'), true);
+  assert.equal(cl('/api/organizations/o/chat_conversations/c/title'), true);
+  assert.equal(cl('/api/organizations/o/chat_conversations/c/completion/x'), false);
+  assert.equal(cl('/api/organizations/o/conversations/c/completion'), false);
+  assert.equal(cl('/api/organizations//chat_conversations/c/completion'), false);
+  assert.equal(cl('/api/organizations/o/chat_conversations//completion'), false);
+  assert.equal(cl('/api/organizations/o/chat_conversations/c/upload'), false);
+  assert.equal(cl('/api/organizations/o/chat_conversations/c'), false);
+  // Per-route body rules: retry may omit the prompt, completion may not; title has its own keys.
+  const c = (leaf, b) => releasable(jreq('POST', 'claude.ai', `/api/organizations/o/chat_conversations/c/${leaf}`, b));
+  assert.equal(c('retry_completion', {}), true);
+  assert.equal(c('completion', {}), false);
+  assert.equal(c('retry_completion', { prompt: null }), true);
+  assert.equal(c('title', { message_content: 'x', recent_titles: [1] }), false);
+  assert.equal(c('title', { message_content: 'x', recent_titles: Array(65).fill('a') }), false);
+  assert.equal(c('title', { message_content: 'x', extra: 1 }), false);
+  // chatgpt's prepare may not carry messages; the codex WS route is WS-SEND only on chatgpt.com.
+  assert.equal(releasable(jreq('POST', 'chatgpt.com', '/backend-api/conversation/prepare', { messages: [] })), false);
+  assert.equal(releasable(jreq('POST', 'chatgpt.com', '/backend-api/conversation', { messages: [] })), false, 'empty messages');
+  assert.equal(releasable(jreq('POST', 'chat.openai.com', '/backend-api/codex/responses', { input: 'hi' })), true);
+  assert.equal(releasable(req('WS-SEND', 'chat.openai.com', '/backend-api/codex/responses', null, '{"type":"response.create","input":"hi"}')), false);
+  assert.equal(releasable(req('WS-SEND', 'chatgpt.com', '/backend-api/codex/responses', null, '{"type":"response.create","input":"hi"}')), true);
+  assert.equal(releasable(req('WS-SEND', 'chatgpt.com', '/backend-api/codex/responses', 'text/plain', '{"type":"response.create","input":"hi"}')), false);
+  assert.equal(releasable(jreq('POST', 'duckduckgo.com', '/duckchat/v1/chat', { messages: [{ role: 'user', content: 'hi' }] })), true);
+});
+
+test('releasableUnderFailOpen: per-surface params and block edges that Rust pins', () => {
+  const M = [{ role: 'user', content: 'hi' }];
+  const oa = (extra) => releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: M, ...extra }));
+  assert.equal(oa({ temperature: 1 }), true);
+  assert.equal(oa({ modalities: ['audio'] }), false);
+  assert.equal(oa({ audio: { voice: 'x' } }), false);
+  const rs = (extra) => releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: 'hi', ...extra }));
+  assert.equal(rs({ reasoning: { effort: 'low' }, store: false }), true);
+  assert.equal(rs({ container: 'x' }), false);
+  const ge = (extra) => releasable(jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent', { contents: [{ parts: [{ text: 'hi' }] }], ...extra }));
+  assert.equal(ge({ generationConfig: { temperature: 1 } }), true);
+  assert.equal(ge({ cachedContent: 'x' }), false);
+  assert.equal(ge({ contents: [{ parts: [{}] }] }), false, 'an empty part');
+  assert.equal(ge({ contents: [{ role: 'user', extra: 1, parts: [{ text: 'a' }] }] }), false);
+  const an = (extra) => releasable(anth({ messages: M, ...extra }));
+  assert.equal(an({ thinking: { type: 'enabled', budget_tokens: 5 }, thread: { id: 't' } }), true);
+  assert.equal(an({ system: 'text' }), true);
+  assert.equal(an({ system: [{ type: 'text', text: 'a' }] }), true);
+  assert.equal(an({ system: [{ type: 'image' }] }), false);
+  assert.equal(an({ system: 5 }), false);
+  assert.equal(an({ tools: [{ name: 't', input_schema: { image: 'a '.repeat(4500) } }] }), true, 'tool definitions are authored JSON: free text and keys');
+  assert.equal(an({ tool_choice: { type: 'auto', file: 'x' } }), true, 'tool_choice is skipped');
+  assert.equal(an({ stop_sequences: ['a'.repeat(5000)] }), false);
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'tool_use', name: 'x', input: [] }] }] })), false);
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'tool_use', name: 'x', input: { a: 'a '.repeat(4500) } }] }] })), true, 'what the model wrote');
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'thinking', thinking: 't', signature: 5 }] }] })), false);
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'thinking', thinking: 't', extra: 1 }] }] })), false);
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'redacted_thinking', data: 5 }] }] })), false);
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'text', text: 'a', cache_control: { type: 'ephemeral', image: 'x' } }] }] })), false);
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'text', text: 'a', citations: [] }] }] })), true);
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'text', text: 5 }] }] })), false);
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: null }] }] })), false);
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', is_error: true }] }] })), true);
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', extra: 1 }] }] })), false);
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: 5 }] })), false);
+  assert.equal(releasable(anth({ messages: 'x' })), false);
+  assert.equal(releasable(anth([])), false);
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: 'hi', cache: { image: 'x' } }] })), false);
+  // chat completions
+  const cc = (m) => releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [m] }));
+  assert.equal(cc({ role: 'assistant', refusal: 'no', content: [{ type: 'refusal', refusal: 'no' }] }), true);
+  assert.equal(cc({ role: 'user', content: [{ type: 'text', text: 'a', extra: 1 }] }), false);
+  assert.equal(cc({ role: 1, content: 'a' }), false);
+  assert.equal(cc({ role: 'user', content: 5 }), false);
+  assert.equal(cc({ role: 'assistant', tool_calls: 'x' }), false);
+  assert.equal(cc({ role: 'assistant', tool_calls: [{ id: '1', function: { name: 'f', arguments: 5 } }] }), false);
+  assert.equal(cc({ role: 'assistant', tool_calls: [{ id: '1', function: null }] }), false);
+  assert.equal(cc({ role: 'assistant', tool_calls: [{ id: '1', custom: { input: 'x' } }] }), true);
+  assert.equal(cc({ role: 'assistant', tool_calls: [{ id: '1', bad: 1 }] }), false);
+  assert.equal(cc({ role: 'assistant', tool_calls: [{ id: '1', function: { name: 'f', file: 'x' } }] }), false);
+  // responses
+  const ri = (item) => releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [item] }));
+  assert.equal(ri({ role: 'user', content: 'hi' }), true, 'easy message (no type)');
+  assert.equal(ri({ type: 7, role: 'user', content: 'hi' }), true, 'a non-string type reads as untyped');
+  assert.equal(ri({ type: 'message', role: 1, content: 'hi' }), false);
+  assert.equal(ri({ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'a', annotations: [{ file: 'x' }] }] }), false);
+  assert.equal(ri({ type: 'message', role: 'user', content: [{ type: 'input_image', text: 'a' }] }), false);
+  assert.equal(ri({ type: 'message', role: 'user' }), false);
+  assert.equal(ri({ type: 'configuration_update', reasoning: { effort: 'low' } }), true);
+  assert.equal(ri({ type: 'configuration_update', reasoning: { file: 'x' } }), false);
+  assert.equal(ri({ type: 'configuration_update', other: 1 }), false);
+  assert.equal(ri({ type: 'reasoning', summary: [], content: null, encrypted_content: null }), true);
+  assert.equal(ri({ type: 'reasoning', summary: 5 }), false);
+  assert.equal(ri({ type: 'reasoning', encrypted_content: 5 }), false);
+  assert.equal(ri({ type: 'function_call', name: 'a', arguments: null }), true);
+  assert.equal(ri({ type: 'function_call', name: 5 }), false);
+  assert.equal(ri({ type: 'local_shell_call', action: { command: ['ls'] } }), true);
+  assert.equal(ri({ type: 'local_shell_call', action: { blob: 'x' } }), false);
+  assert.equal(ri({ type: 'function_call_output', call_id: 'c', output: [{ type: 'input_text', text: 'x' }] }), true);
+  assert.equal(ri({ type: 'function_call_output', call_id: 'c', output: 5 }), false);
+  assert.equal(ri({ type: 'additional_tools', tools: [{ big: 'a '.repeat(4500) }] }), true);
+  assert.equal(ri({ type: 'additional_tools', extra: 1 }), false);
+  assert.equal(ri({ type: 'input_file' }), false);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: 5 })), false);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: 'a', instructions: 5 })), false);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: 'a', instructions: null })), true);
+  // duck
+  const dk = (m, extra) => releasable(jreq('POST', 'duck.ai', '/duckchat/v1/chat', { messages: [m], ...extra }));
+  assert.equal(dk({ role: 'system', content: 'a' }), false);
+  assert.equal(dk({ role: 'user', content: 'a', extra: 1 }), false);
+  assert.equal(dk({ role: 'user', content: [{ type: 'text', text: 'a', extra: 1 }] }), false);
+  assert.equal(dk({ role: 'user', content: 5 }), false);
+  assert.equal(dk({ role: 'user', content: 'a' }, { attachment: 'x' }), false);
+  // chatgpt message edges
+  const cg = (m) => releasable(jreq('POST', 'chatgpt.com', '/backend-api/conversation', { messages: [m] }));
+  assert.equal(cg({ content: { content_type: 'text', parts: ['a'], extra: 1 } }), false);
+  assert.equal(cg({ content: { content_type: 'text', parts: [1] } }), false);
+  assert.equal(cg({ content: { content_type: 'text', parts: 'a' } }), false);
+  assert.equal(cg({ content: 'a' }), false);
+  assert.equal(cg(5), false);
+  assert.equal(cg({ content: { content_type: 'text', parts: ['a'] }, id: 'a'.repeat(5000) }), false);
+});
+
+test('releasableUnderFailOpen: header and body parsing the way Rust reads them', () => {
+  const head = (extra) => Buffer.from(`POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n${extra}\r\n\r\n{"messages":[{"role":"user","content":"hi"}]}`);
+  const ct = 'content-type: application/json';
+  assert.equal(releasable(head(ct)), true);
+  assert.equal(releasable(head(`${ct}; charset="utf-8"`)), true);
+  assert.equal(releasable(head(`${ct};`)), true, 'an empty parameter');
+  assert.equal(releasable(head(`${ct}; charset=latin1`)), false);
+  assert.equal(releasable(head(`${ct}\r\nContent-Encoding: `)), true, 'an empty encoding is none');
+  assert.equal(releasable(head(`${ct}\r\nContent-Encoding: br`)), false);
+  assert.equal(releasable(head(`${ct}\r\nTransfer-Encoding: identity`)), false);
+  assert.equal(releasable(head(`${ct}\r\nX-Odd: a\rb`)), false, 'a bare CR inside a line');
+  assert.equal(releasable(head(`${ct}\r\n: nameless`)), false);
+  assert.equal(releasable(head(`${ct}\r\nX_Under: 1`)), false, 'underscore is not in a header name');
+  assert.equal(releasable(head(`${ct}\r\nX-Ok: a:b:c`)), true);
+  assert.equal(releasable(head(`${ct}\r\nHOST: api.anthropic.com`)), false, 'Host twice, any case');
+  assert.equal(releasable(head('CONTENT-TYPE:   APPLICATION/JSON  ')), true, 'values trim and fold');
+  assert.equal(releasable(Buffer.from('POST /v1/messages#frag HTTP/1.1\r\nHost: API.Anthropic.COM:443\r\ncontent-type: application/json\r\n\r\n{"messages":[]}')), true);
+  assert.equal(releasable(Buffer.from('POST /v1/messages?x#y HTTP/1.1\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\n\r\n{"messages":[]}')), true);
+  assert.equal(releasable(Buffer.from('POST /v1/messages/ HTTP/1.1\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\n\r\n{"messages":[]}')), false);
+  assert.equal(releasable(Buffer.from('POST  /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\n\r\n{"messages":[]}')), false, 'two spaces make four parts');
+  assert.equal(releasable(Buffer.from('POST /v1/messages HTTP/1.1\r\nHost: :443\r\ncontent-type: application/json\r\n\r\n{"messages":[]}')), false, 'an empty host');
+  assert.equal(releasable(Buffer.from('POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com:80\r\ncontent-type: application/json\r\n\r\n{"messages":[]}')), false);
+  assert.equal(releasable(Buffer.from('POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\ncontent-type: application/json\r\n{"messages":[]}')), false, 'no blank line');
+  // The body is UTF-8 only, BOM included; the head too.
+  const body = '{"messages":[{"role":"user","content":"hi"}]}';
+  assert.equal(releasable(req('POST', 'api.anthropic.com', '/v1/messages', 'application/json', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(body)]))), false, 'BOM');
+  assert.equal(releasable(Buffer.concat([Buffer.from('POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nX: '), Buffer.from([0xff]), Buffer.from('\r\ncontent-type: application/json\r\n\r\n' + body)])), false, 'non UTF-8 head');
+  // Not Uint8Array-like at all.
+  assert.equal(releasable(null), false);
+  assert.equal(releasable('POST / HTTP/1.1'), false);
+  // serde_json parity: what serde would refuse, we refuse.
+  const chat = (b) => releasable(req('POST', 'chatgpt.com', '/backend-api/f/conversation', 'application/json', b));
+  const msg = '"messages":[{"content":{"content_type":"text","parts":["hi"]}}]';
+  assert.equal(chat(`{${msg}}`), true);
+  assert.equal(chat(`{${msg},"x":1e999}`), false, 'a number that overflows a double');
+  assert.equal(chat(`{${msg},"x":"\\ud800"}`), false, 'a lone surrogate escape');
+  assert.equal(chat(`{${msg},"x":"\\ud83d\\ude00"}`), true, 'a surrogate pair');
+  assert.equal(chat(`{${msg},"\\udc00":1}`), false, 'in a key');
+  assert.equal(chat(`{${msg},"x":${'['.repeat(127)}${']'.repeat(127)}}`), false, 'array 127 deep + the object is 128 levels');
+  assert.equal(chat(`{${msg},"x":${'['.repeat(126)}${']'.repeat(126)}}`), true, '127 levels is the most serde reads');
+  assert.equal(chat(`{${msg},${msg}}`), false, 'duplicate keys hold, whatever the values');
+  assert.equal(chat(`{${msg},"messages":[{"content":{"content_type":"multimodal_text","parts":[]}}]}`), false, 'duplicate keys hold');
+  assert.equal(chat(`{${msg},"__proto__":{"image":"x"}}`), false, '__proto__ is an ordinary key');
+  assert.equal(chat(`{${msg},"__proto__":"a"}`), true);
+  assert.equal(chat(`${'  \n'}{${msg}}  `), true);
+  assert.equal(chat(`{${msg}} x`), false);
+  assert.equal(chat(`{${msg},}`), false);
+  // Byte length, not UTF-16 length, against MAX_OPAQUE_STRING: a 3-byte char x1365 = 4095, x1366 = 4098.
+  const euro = String.fromCharCode(0x20ac);
+  assert.equal(chat(`{${msg},"x":"${euro.repeat(1365)}"}`), true);
+  assert.equal(chat(`{${msg},"x":"${euro.repeat(1366)}"}`), false);
+  assert.equal(chat(`{${msg},"x":"${'😀'.repeat(1024)}"}`), true, '4 bytes each = 4096');
+  assert.equal(chat(`{${msg},"x":"${'😀'.repeat(1025)}"}`), false);
+  // Budget is in bytes: key x (1) + 2 x 4095 + 1 = 8192 passes, one more byte holds (2730 chars would not).
+  const e = euro.repeat(1365);
+  assert.equal(chat(`{${msg},"x":["${e}","${e}","a"]}`), true);
+  assert.equal(chat(`{${msg},"x":["${e}","${e}","a","a"]}`), false);
+  // A non-ASCII key is held as an attachment key.
+  assert.equal(chat(`{${msg},"${euro}":1}`), false);
 });
 
 // ── Locke signed out: only a request nobody called AI may pass ─────────────
@@ -5232,11 +5810,14 @@ test('the user fail-open window keeps its own reason and tally', async () => {
   for (const code of [SIGNED_OUT, 'no-bridge', 'bridge-unreachable', 'bridge-dropped']) {
     const w = makeWorld(() => ({ ok: false, code, message: 'down' }));
     w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
-    await w.sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' });
+    await w.sandbox.fetch(AI_URL, CHAT_INIT);
     assert.equal(w.netCalls.length, 1, code);
     assert.deepEqual(w.unchecked, [`relay-${code}`], code);
     assertReason(w.logs, 'unchecked-fail-open', 'warn');
     assert.ok(!findLine(w.logs, 'locke-unreachable-unclassified'), code);
+    // Default deny: an unrecognised destination is held even in the window.
+    await assert.rejects(w.sandbox.fetch(OPEN_WEB_URL, { method: 'POST', body: 'x' }), blockedError);
+    assert.equal(w.netCalls.length, 1, code);
   }
 });
 
@@ -5294,3 +5875,1152 @@ test('a bodyless fetch without a query never reaches the guard', async () => {
   assert.equal(captured.length, 0);
   assert.equal(netCalls.length, 2);
 });
+
+// ── zh#370 default deny, through the real hooks ────────────────────────────
+//
+// Every case below is driven through the shim's fetch / WebSocket hook with a
+// real SONOMOS_CONFIG window; the screener is down (timeout or relay outage).
+
+const CC_URL = 'https://api.anthropic.com/v1/messages';
+const CLAUDE_COMPLETION = 'https://claude.ai/api/organizations/o/chat_conversations/c/completion';
+const JSON_CT = { 'content-type': 'application/json' };
+const FO_OUTAGES = {
+  'verdict timeout': { onCapture: () => new Promise(() => {}), config: { enforceTimeoutMs: 1000 }, cause: 'verdict-timeout', closed: 'verdict-timeout' },
+  'relay no-bridge': { onCapture: () => ({ ok: false, code: 'no-bridge' }), cause: 'relay-no-bridge', closed: 'connector-not-started' }
+};
+function foWorld(outage, window = openWindow(), page = 'https://chat.openai.com/') {
+  const w = makeWorld(outage.onCapture, realCatalogGlobals(page));
+  w.deliver({ type: 'SONOMOS_CONFIG', config: { ...(outage.config || {}), ...(window || {}) } });
+  return w;
+}
+// One request, one outage, window open or closed; resolves what happened.
+async function foRun(outage, url, init, window = openWindow()) {
+  const w = foWorld(outage, window);
+  let outcome = 'SENT';
+  try { await w.sandbox.fetch(url, init); } catch (e) { outcome = blockedError(e) ? 'BLOCKED' : `ERR ${e.message}`; }
+  return { w, outcome };
+}
+const jsonInit = (body, extra = {}) => ({ method: 'POST', headers: JSON_CT, body: JSON.stringify(body), ...extra });
+const small64 = b64n(64);
+
+// The review's leak list: each shipped under the byte heuristic.
+const LEAKS = {
+  'svg content-type': [CC_URL, { method: 'POST', headers: { 'content-type': 'image/svg+xml' }, body: '<svg xmlns="http://www.w3.org/2000/svg"><text>Jane Doe 123-45-6789</text></svg>' }],
+  'xml content-type': [CC_URL, { method: 'POST', headers: { 'content-type': 'application/xml' }, body: '<a>Jane Doe 123-45-6789</a>' }],
+  'text/plain PUT upload': [STORAGE_PUT, { method: 'PUT', headers: { 'content-type': 'text/plain' }, body: 'Jane Doe 123-45-6789' }],
+  'base64 split into <512 chunks in a JSON array': [CC_URL, jsonInit({ x: Array.from({ length: 20 }, () => b64n(500)), messages: [{ role: 'user', content: 'hi' }] })],
+  'number array': [CC_URL, jsonInit({ x: Array.from({ length: 400 }, (_, i) => i % 256), messages: [{ role: 'user', content: 'hi' }] })],
+  'small duck.ai inline file': ['https://duckduckgo.com/duckchat/v1/chat', jsonInit({ messages: [{ role: 'user', content: 'see file', parts: [{ type: 'file', content: small64, mimeType: 'text/plain' }] }] })],
+  'small Anthropic inline image': [CC_URL, jsonInit({ messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: small64 } }] }] })],
+  'claude.ai attachments extracted_content': [CLAUDE_COMPLETION, jsonInit({ prompt: 'summarize', attachments: [{ file_name: 'p.csv', extracted_content: 'Jane Doe 123-45-6789' }] })],
+  'signature-key abuse': [CC_URL, jsonInit({ signature: b64n(4000), messages: [{ role: 'user', content: 'hi' }] })],
+  'no Content-Type UTF-8 body': [CC_URL, { method: 'POST', body: new TextEncoder().encode(JSON.stringify({ messages: [{ role: 'user', content: 'Jane Doe' }] })) }],
+  'multipart boundary containing xml/json': [CC_URL, { method: 'POST', headers: { 'content-type': 'multipart/form-data; boundary=json-xml-1' }, body: '--json-xml-1\r\nContent-Disposition: form-data; name="f"; filename="a.txt"\r\n\r\nJane Doe 123-45-6789\r\n--json-xml-1--' }]
+};
+
+test('fail-open default deny: every leak on the review list is HELD, on a verdict timeout and on a relay outage', async () => {
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    await Promise.all(Object.entries(LEAKS).map(async ([name, [url, init]]) => {
+      const { w, outcome } = await foRun(outage, url, init);
+      const label = `${oname} / ${name}`;
+      assert.equal(outcome, 'BLOCKED', label);
+      assert.equal(w.netCalls.length, 0, `${label}: nothing sent`);
+      assert.equal(w.unchecked.length, 0, `${label}: not tallied as an unchecked send`);
+      const line = assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
+      assert.match(line, new RegExp(`\\bcause=${outage.cause}\\b`), label);
+      assert.ok(!findLine(w.logs, 'unchecked-fail-open'), label);
+    }));
+  }
+});
+
+test('fail-open OFF: the leak list blocks exactly as on main (the outage\'s own reason, never the held one)', async () => {
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    await Promise.all(Object.entries(LEAKS).map(async ([name, [url, init]]) => {
+      for (const window of [null, expiredWindow()]) {
+        const { w, outcome } = await foRun(outage, url, init, window);
+        assert.equal(outcome, 'BLOCKED', `${oname} / ${name}`);
+        assert.equal(w.netCalls.length, 0);
+        assertBlocked(w.logs, outage.closed, 'unavailable');
+        assert.ok(!findLine(w.logs, 'fail-open-file-held'), `${oname} / ${name}`);
+      }
+    }));
+  }
+});
+
+// What the user actually types into an agent: Claude Code carries data: URLs,
+// JWTs and ssh keys in tool results, thinking signatures and so on.
+const JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
+const CLAUDE_CODE_TURN = {
+  model: 'claude-x', max_tokens: 64000, stream: true,
+  system: [{ type: 'text', text: 'You are Claude Code', cache_control: { type: 'ephemeral' } }],
+  tools: [{ name: 'Read', description: 'reads a file', input_schema: { type: 'object', properties: { file_path: { type: 'string' } } } }],
+  metadata: { user_id: 'user_abc' },
+  messages: [
+    { role: 'user', content: 'look at the logo' },
+    { role: 'assistant', content: [{ type: 'thinking', thinking: 'ok', signature: b64n(1800) }, { type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/a.png' } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'text', text: `<img src="data:image/png;base64,iVBORw0KGgo="> token ${JWT} key ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl user@host` }] }] }
+  ]
+};
+const FO_TURNS = {
+  'Claude Code turn (api.anthropic.com)': [CC_URL, jsonInit(CLAUDE_CODE_TURN)],
+  'ChatGPT web text turn': ['https://chatgpt.com/backend-api/f/conversation', jsonInit({
+    action: 'next', model: 'auto', messages: [{ author: { role: 'user' }, content: { content_type: 'text', parts: [`data:image/png;base64,AAAA ${JWT}`] }, id: 'm1', metadata: {} }] })],
+  'Gemini StreamGenerate form turn': ['https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=x&_reqid=1',
+    { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8' }, body: geminiBody(['the sky is blue', 0, null, null, null, null, 0]) }],
+  'claude.ai completion': [CLAUDE_COMPLETION, jsonInit({ prompt: 'hello', timezone: 'UTC', attachments: [], files: [], sync_sources: [] })]
+};
+
+test('fail-open default deny: recognised chat turns are still SENT unchecked and tallied (no over-blocking)', async () => {
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    await Promise.all(Object.entries(FO_TURNS).map(async ([name, [url, init]]) => {
+      const { w, outcome } = await foRun(outage, url, init);
+      const label = `${oname} / ${name}`;
+      assert.equal(outcome, 'SENT', label);
+      assert.equal(w.netCalls.length, 1, label);
+      assert.deepEqual(w.unchecked, [outage.cause], label);
+      assertReason(w.logs, 'unchecked-fail-open', 'warn');
+      assert.ok(!findLine(w.logs, 'fail-open-file-held'), label);
+    }));
+  }
+});
+
+test('fail-open OFF: the same chat turns block with the outage\'s own reason', async () => {
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    await Promise.all(Object.entries(FO_TURNS).map(async ([name, [url, init]]) => {
+      const { w, outcome } = await foRun(outage, url, init, null);
+      assert.equal(outcome, 'BLOCKED', `${oname} / ${name}`);
+      assert.equal(w.unchecked.length, 0);
+      assertBlocked(w.logs, outage.closed, 'unavailable');
+    }));
+  }
+});
+
+// A fake WebSocket the shim can patch, as tests/shim-websocket.test.js does.
+function fakeWebSocketClass() {
+  return class FakeWebSocket {
+    constructor(url) { this._url = url; this.wire = []; this.closes = []; }
+    get url() { return this._url; }
+    get readyState() { return 1; }
+    get bufferedAmount() { return 0; }
+    send(data) { this.wire.push(data); }
+    close(code, reason) { this.closes.push({ code, reason }); }
+    dispatchEvent() { return true; }
+  };
+}
+const CODEX_WS = 'wss://chatgpt.com/backend-api/codex/responses';
+const wsFrame = (extra = '') => JSON.stringify({ type: 'response.create', model: 'g', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: `hi${extra}` }] }] });
+
+test('fail-open default deny: a WebSocket frame is released only if it is a known chat frame under 6 MiB', async () => {
+  const sendOne = async (outage, payload, window = openWindow()) => {
+    const WebSocket = fakeWebSocketClass();
+    const w = makeWorld(outage.onCapture, { ...realCatalogGlobals('https://chatgpt.com/'), WebSocket });
+    w.deliver({ type: 'SONOMOS_CONFIG', config: { ...(outage.config || {}), ...(window || {}) } });
+    const ws = new w.sandbox.WebSocket(CODEX_WS);
+    try { ws.send(payload); } catch { /* a refused send may throw */ }
+    await new Promise((r) => setTimeout(r, 1500));
+    return { w, ws };
+  };
+  const outage = FO_OUTAGES['verdict timeout'];
+  const okFrame = await sendOne(outage, wsFrame());
+  assert.equal(okFrame.ws.wire.length, 1, 'a known chat frame fails open');
+  assert.deepEqual(okFrame.w.unchecked, ['verdict-timeout']);
+  const big = await sendOne(outage, wsFrame('x'.repeat(MAX_RELEASABLE_BODY)));
+  assert.equal(big.ws.wire.length, 0, 'a frame over 6 MiB never leaves');
+  assert.equal(big.w.unchecked.length, 0);
+  assertBlocked(big.w.logs, 'fail-open-file-held', 'unavailable');
+  const unknown = await sendOne(outage, JSON.stringify({ type: 'session.update', input: 'hi' }));
+  assert.equal(unknown.ws.wire.length, 0, 'not a chat frame');
+  assertBlocked(unknown.w.logs, 'fail-open-file-held', 'unavailable');
+  const closed = await sendOne(outage, wsFrame(), null);
+  assert.equal(closed.ws.wire.length, 0, 'window closed: blocks as on main');
+  assert.ok(!findLine(closed.w.logs, 'fail-open-file-held'));
+});
+
+// ── never trust an unchecked pass (mixed versions) ─────────────────────────
+
+const CLAUDE_TURN_JSON = JSON.stringify({ prompt: 'hi', attachments: [], files: [] });
+const uncheckedAllow = { ok: true, receipt: { decision: 'allow', redactedCount: 0, unchecked: true, reason: 'passed unchecked', unscreened: [pdfUnscreened] } };
+const PAUSED = 'protection paused by the user';
+
+async function recv(verdict, url, init, window) {
+  const w = makeWorld(() => verdict, realCatalogGlobals('https://chat.openai.com/'));
+  if (window) w.deliver({ type: 'SONOMOS_CONFIG', config: window });
+  let outcome = 'SENT';
+  try { await w.sandbox.fetch(url, init); } catch (e) { outcome = blockedError(e) ? 'BLOCKED' : `ERR ${e.message}`; }
+  return { w, outcome };
+}
+
+test('mixed versions: an unchecked allow for a non-chat request is HELD, with fail-open on or off', async () => {
+  const uploads = [
+    [AI_URL, { method: 'POST', body: imageForm() }],
+    [CC_URL, { method: 'POST', headers: { 'content-type': 'multipart/form-data; boundary=b' }, body: '--b\r\nContent-Disposition: form-data; name="f"; filename="a.pdf"\r\n\r\n%PDF\r\n--b--' }],
+    [STORAGE_PUT, { method: 'PUT', headers: { 'content-type': 'application/pdf' }, body: 'file bytes' }],
+    [CC_URL, jsonInit({ messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', data: small64 } }] }] })],
+    ['https://chat.openai.com/backend-api/files', jsonInit({ file_name: 'a.pdf' })]
+  ];
+  for (const window of [openWindow(), null, expiredWindow()]) {
+    for (const [url, init] of uploads) {
+      const { w, outcome } = await recv(uncheckedAllow, url, init, window);
+      assert.equal(outcome, 'BLOCKED', `${url} window=${!!window}`);
+      assert.equal(w.netCalls.length, 0, `${url}: nothing sent`);
+      const line = assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
+      assert.match(line, /\bcause=unchecked-pass\b/);
+      assert.ok(!findLine(w.logs, 'allow-unchecked'));
+      assert.equal(w.unchecked.length, 0);
+    }
+  }
+  // Inferred from the items alone, with no flag: the same.
+  const inferred = { ok: true, receipt: { decision: 'allow', redactedCount: 0, unscreened: [pdfUnscreened] } };
+  const { w, outcome } = await recv(inferred, AI_URL, { method: 'POST', body: imageForm() }, openWindow());
+  assert.equal(outcome, 'BLOCKED');
+  assert.equal(w.netCalls.length, 0);
+  assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
+});
+
+test('mixed versions: an unchecked allow for a known chat turn is sent with allow-unchecked', async () => {
+  for (const window of [openWindow(), null]) {
+    const { w, outcome } = await recv(uncheckedAllow, CLAUDE_COMPLETION, { method: 'POST', headers: JSON_CT, body: CLAUDE_TURN_JSON }, window);
+    assert.equal(outcome, 'SENT');
+    assert.equal(w.netCalls.length, 1);
+    assertReason(w.logs, 'allow-unchecked', 'warn');
+    assert.ok(!findLine(w.logs, 'fail-open-file-held'));
+  }
+});
+
+test('mixed versions: an unchecked redact is judged on the REBUILT bytes', async () => {
+  const rebuilt = (url, ct, body) => {
+    const u = new URL(url);
+    const v = rebuiltVerdict([`POST ${u.pathname} HTTP/1.1`, `Host: ${u.host}`, `content-type: ${ct}`], Buffer.from(body), 1);
+    v.receipt.unchecked = true;
+    v.receipt.unscreened = [pdfUnscreened];
+    return v;
+  };
+  for (const window of [openWindow(), null]) {
+    // A rebuilt upload: held, nothing sent, the original is not sent either.
+    const up = await recv(rebuilt(AI_URL, 'multipart/form-data; boundary=x', '--x\r\nfilename="a.pdf"\r\n\r\nPDF\r\n--x--'),
+      AI_URL, { method: 'POST', headers: JSON_CT, body: CHAT_JSON }, window);
+    assert.equal(up.outcome, 'BLOCKED', `window=${!!window}`);
+    assert.equal(up.w.netCalls.length, 0);
+    assert.match(assertBlocked(up.w.logs, 'fail-open-file-held', 'unavailable'), /\bcause=unchecked-pass\b/);
+    assert.ok(!findLine(up.w.logs, 'redact-unchecked'));
+    // A rebuilt known chat turn: the redaction is applied.
+    const body = CHAT_JSON.replace('hi', '[REDACTED]');
+    const ok = await recv(rebuilt(AI_URL, 'application/json', body), AI_URL, { method: 'POST', headers: JSON_CT, body: CHAT_JSON }, window);
+    assert.equal(ok.outcome, 'SENT');
+    assert.equal(ok.w.netCalls.length, 1);
+    assert.deepEqual(Buffer.from(ok.w.netCalls[0][1].body), Buffer.from(body));
+    assertReason(ok.w.logs, 'redact-unchecked', 'warn');
+    // Undecodable rebuilt bytes: held.
+    const bad = await recv({ ok: true, receipt: { decision: 'redact', unchecked: true, redactedCount: 1, requestB64: '!!!not base64!!!' } },
+      AI_URL, { method: 'POST', headers: JSON_CT, body: CHAT_JSON }, window);
+    assert.equal(bad.outcome, 'BLOCKED');
+    assert.equal(bad.w.netCalls.length, 0);
+  }
+  // A redact that is NOT marked unchecked is a screened result: applied, never re-judged.
+  const screened = rebuiltVerdict(['POST /backend-api/conversation HTTP/1.1', 'Host: chat.openai.com', 'content-type: multipart/form-data; boundary=x'], Buffer.from('--x--'), 1);
+  const s = await recv(screened, AI_URL, { method: 'POST', headers: JSON_CT, body: CHAT_JSON }, openWindow());
+  assert.equal(s.w.netCalls.length, 1, 'a fully screened redaction is applied');
+});
+
+test('mixed versions: the user\'s pause is never re-judged', async () => {
+  const paused = { ok: true, receipt: { decision: 'allow', unchecked: true, reason: PAUSED, unscreened: [] } };
+  for (const window of [openWindow(), null]) {
+    const { w, outcome } = await recv(paused, AI_URL, { method: 'POST', body: imageForm() }, window);
+    assert.equal(outcome, 'SENT', `window=${!!window}`);
+    assert.equal(w.netCalls.length, 1);
+    assert.ok(!findLine(w.logs, 'fail-open-file-held'));
+  }
+  const up = await recv(paused, STORAGE_PUT, { method: 'PUT', headers: { 'content-type': 'application/pdf' }, body: 'file bytes' }, null);
+  assert.equal(up.outcome, 'SENT');
+  // Paused, but with unscreened items on it: not the pause exemption.
+  const odd = { ok: true, receipt: { decision: 'allow', unchecked: true, reason: PAUSED, unscreened: [pdfUnscreened] } };
+  const held = await recv(odd, AI_URL, { method: 'POST', body: imageForm() }, null);
+  assert.equal(held.outcome, 'BLOCKED');
+});
+
+test('fail-open: the bridge\'s hold receipt maps to fail-open-file-held; the retired wording no longer does', async () => {
+  const reason = 'Locke could not screen this request and it is not a plain chat message — held back (fail-open only sends recognised prompt-only chat messages unchecked)';
+  const receipt = (r) => ({ ok: true, receipt: { decision: 'block', blockCause: 'infrastructure', reason: r, redactedCount: 0, unchecked: false } });
+  const a = await recv(receipt(reason), AI_URL, { method: 'POST', headers: JSON_CT, body: CHAT_JSON }, null);
+  assert.equal(a.outcome, 'BLOCKED');
+  assertBlocked(a.w.logs, 'fail-open-file-held', 'unavailable');
+  const old = await recv(receipt('Locke could not screen this request and it may carry a file — held back (files are never sent unchecked, even under fail-open)'),
+    AI_URL, { method: 'POST', headers: JSON_CT, body: CHAT_JSON }, null);
+  assert.equal(old.outcome, 'BLOCKED');
+  assertBlocked(old.w.logs, 'screening-unavailable', 'unavailable');
+});
+
+test('fail-open: the held copy says default deny in plain words', async () => {
+  const { w } = await foRun(FO_OUTAGES['relay no-bridge'], CC_URL, { method: 'POST', headers: { 'content-type': 'image/svg+xml' }, body: '<svg/>' });
+  let msg = '';
+  try { await w.sandbox.fetch(CC_URL, { method: 'POST', headers: { 'content-type': 'image/svg+xml' }, body: '<svg/>' }); } catch (e) { msg = e.message; }
+  assert.match(msg, /With fail-open on, Locke only sends plain chat messages to AI sites it recognises, so this one was held\. Remove any attachment to send now, or wait until screening is back\./);
+  assert.ok(!/may include a file/.test(msg));
+});
+
+test('fail-open: a bodyless URL-query send still fails open on our own failure, tallied (unchanged)', async () => {
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    const w = foWorld(outage, openWindow());
+    await w.sandbox.fetch(FOLIF);
+    assert.equal(w.netCalls.length, 1, oname);
+    assert.deepEqual(w.unchecked, [outage.cause], oname);
+  }
+  // An unchecked redact of a query is its rewritten request line: applied, as before.
+  const rewritten = rebuiltVerdict(['GET /async/folif?udm=50&q=My+name+is+%5BNAME%5D&ei=abc HTTP/1.1', 'Host: chat.openai.com'], Buffer.alloc(0), 1);
+  rewritten.receipt.unchecked = true;
+  const w = makeWorld(() => rewritten);
+  await w.sandbox.fetch(FOLIF);
+  assert.equal(w.netCalls.length, 1);
+  assert.match(String(w.netCalls[0][0]), /%5BNAME%5D/);
+});
+
+test('releasableUnderFailOpen: the settings budget is exact (8192 passes, 8193 holds)', () => {
+  const chat = (extra) => releasable(jreq('POST', 'chatgpt.com', '/backend-api/f/conversation',
+    { messages: [{ content: { content_type: 'text', parts: ['hi'] } }], x: extra }));
+  // key "x" costs 1; strings cost their bytes (spaced, so not a base64 run).
+  const full = 'a '.repeat(2048); // 4096 bytes
+  assert.equal(chat([full, 'a '.repeat(2047) + 'a']), true, '1 + 4096 + 4095 = 8192');
+  assert.equal(chat([full, full]), false, '8193');
+  // Scalars cost 8: 1023 numbers + key "x" (1) = 8185; 1024 numbers = 8193.
+  const nums = (n) => Array.from({ length: Math.ceil(n / 64) }, (_, i) => Array(Math.min(64, n - i * 64)).fill(7));
+  assert.equal(chat(nums(1023)), true);
+  assert.equal(chat(nums(1024)), false);
+});
+
+test('releasableUnderFailOpen: more edges the first mutation pass left alive', () => {
+  const OK = { messages: [{ role: 'user', content: 'hi' }] };
+  // Duplicate content-types, whichever order, are held (last-wins would read JSON).
+  const two = (a, b) => Buffer.from(`POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type: ${a}\r\nContent-Type: ${b}\r\n\r\n${JSON.stringify(OK)}`);
+  assert.equal(releasable(two('application/json', 'application/json')), false);
+  assert.equal(releasable(two('text/plain', 'application/json')), false);
+  // Media type is exactly application/json.
+  for (const m of ['application/vnd.api+json', 'text/json', 'application/ld+json', 'application/jsonl']) {
+    assert.equal(releasable(req('POST', 'api.anthropic.com', '/v1/messages', m, JSON.stringify(OK))), false, m);
+  }
+  // An unparseable body is held even where an empty object would pass (retry may omit the prompt).
+  assert.equal(releasable(req('POST', 'claude.ai', '/api/organizations/o/chat_conversations/c/retry_completion', 'application/json', '{nope')), false);
+  assert.equal(releasable(req('POST', 'claude.ai', '/api/organizations/o/chat_conversations/c/retry_completion', 'application/json', '{}')), true);
+  // Methods: only POST (and WS-SEND on the Codex route).
+  for (const method of ['PUT', 'PATCH', 'GET', 'DELETE', 'post']) {
+    assert.equal(releasable(req(method, 'api.anthropic.com', '/v1/messages', 'application/json', JSON.stringify(OK))), false, method);
+    assert.equal(releasable(req(method, 'api.openai.com', '/v1/chat/completions', 'application/json', JSON.stringify(OK))), false, method);
+    assert.equal(releasable(req(method, 'claude.ai', CLAUDE_AI, 'application/json', '{"prompt":"x"}')), false, method);
+    assert.equal(releasable(req(method, 'chatgpt.com', '/backend-api/f/conversation', 'application/json', '{"messages":[{"content":{"content_type":"text","parts":["a"]}}]}')), false, method);
+  }
+  // Paths: the right host with another route is held, on every host.
+  assert.equal(releasable(req('POST', 'gemini.google.com', '/_/BardChatUi/data/batchexecute', 'application/x-www-form-urlencoded', geminiBody(['hi']))), false);
+  assert.equal(releasable(jreq('POST', 'duck.ai', '/duckchat/v1/status', { messages: [{ role: 'user', content: 'hi' }] })), false);
+  assert.equal(releasable(jreq('POST', 'duckduckgo.com', '/anything', { messages: [{ role: 'user', content: 'hi' }] })), false);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/files', { purpose: 'x' })), false);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/images/generations', {})), false);
+  // Allowlists are decisive on their own: an unknown, innocent-looking parameter holds.
+  assert.equal(releasable(anth({ ...OK, mystery: 'x' })), false);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { ...OK, mystery: 'x' })), false);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: 'hi', mystery: 'x' })), false);
+  assert.equal(releasable(jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent', { contents: [{ parts: [{ text: 'hi' }] }], mystery: 'x' })), false);
+  // ...and the parameters real clients send are known.
+  assert.equal(releasable(anth({ ...OK, safeguards: { a: 1 }, thread: { id: 't' }, diagnostics: { x: 1 }, context_management: { edits: [] }, output_config: { effort: 'high' }, service_tier: 'auto' })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: 'hi', generate: false, client_metadata: { a: 'b' }, access_programs: ['x'], prompt_cache_key: 'k', previous_response_id: 'r', text: { verbosity: 'low' } })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { ...OK, stream_options: { include_usage: true }, response_format: { type: 'text' }, store: false })), true);
+  assert.equal(releasable(jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent', { contents: [{ parts: [{ text: 'hi' }] }], toolConfig: { a: 1 }, safetySettings: [{ category: 'x' }], labels: { a: 'b' } })), true);
+  // claude.ai sync_sources is not an attachment-named key, so it needs its own check.
+  assert.equal(releasable(jreq('POST', 'claude.ai', CLAUDE_AI, { prompt: 'x', sync_sources: [{ type: 'gdrive', id: '1' }] })), false);
+  // Gemini web: a '+' is a space (structural spaces make '+' in the JSON otherwise).
+  const spaced = `f.req=${formEnc(`[null, ${JSON.stringify(JSON.stringify([['hi', 0]]))}]`)}`;
+  assert.equal(releasable(req('POST', 'gemini.google.com', GEMINI, 'application/x-www-form-urlencoded', spaced)), true);
+  assert.equal(releasable(req('POST', 'gemini.google.com', GEMINI, 'application/x-www-form-urlencoded', spaced.replace(/\+/g, '%2B'))), false, '%2B stays a plus sign');
+  // Nested part types.
+  const dk = (p) => releasable(jreq('POST', 'duck.ai', '/duckchat/v1/chat', { messages: [{ role: 'user', content: [p] }] }));
+  assert.equal(dk({ type: 'text', text: 'a' }), true);
+  assert.equal(dk({ type: 'file', text: 'a' }), false);
+  const cc = (m) => releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [m] }));
+  assert.equal(cc({ role: 'user', content: [{ type: 'input_audio' }] }), false);
+  assert.equal(cc({ role: 'user', content: [{ type: 'text', text: 'x' }] }), true);
+  assert.equal(cc({ role: 'user', content: [{ type: 'text' }] }), false, 'a part must carry a string text');
+  assert.equal(cc({ role: 'user', content: 'a', weird: 'x' }), false);
+  // Responses: ids and unknown keys are settings; reasoning content must be text parts or null.
+  const ri = (item) => releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [item] }));
+  assert.equal(ri({ type: 'message', role: 'user', content: 'a', id: 'a'.repeat(5000) }), false);
+  assert.equal(ri({ type: 'function_call_output', call_id: 'c', output: 'a', id: 'a'.repeat(5000) }), false);
+  assert.equal(ri({ type: 'function_call_output', call_id: 'c', output: 'a', id: 'ok' }), true);
+  assert.equal(ri({ type: 'reasoning', content: [{ type: 'x', file: 'y' }] }), false);
+  assert.equal(ri({ type: 'reasoning', content: [{ type: 'text', text: 'y' }] }), true);
+  // Gemini API: systemInstruction is a content, the other params are settings.
+  const ge = (extra) => releasable(jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent', { contents: [{ parts: [{ text: 'hi' }] }], ...extra }));
+  assert.equal(ge({ systemInstruction: { parts: [{ inlineData: { data: 'x' } }] } }), false);
+  assert.equal(ge({ systemInstruction: 'text' }), false);
+  assert.equal(ge({ generationConfig: { stopSequences: ['a'.repeat(5000)] } }), false);
+  // U+0085 is trimmed by Rust's trim(); U+FEFF is not.
+  const hv = (v) => releasable(Buffer.from(`POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nContent-Type:${v}\r\n\r\n${JSON.stringify(OK)}`));
+  assert.equal(hv('\u0085application/json\u0085'), true);
+  assert.equal(hv(' application/json　'), true);
+  assert.equal(hv('﻿application/json'), false);
+  assert.equal(hv('application/json​'), false);
+});
+
+// ── round 2 of the zh#370 review: the Rust `round_two_review` and the changed
+// `opaque_limits_and_deny_keys` lines, same inputs, same expectations ───────
+const MAX_MODEL_TOKEN = 256 * 1024;
+const MAX_AUTHORED = 1024 * 1024;
+const MAX_ITEM_OPAQUE = 4 * 1024;
+const MAX_QUERY = 2048;
+const MAX_OPAQUE_BASE64 = 512;
+const FORM = 'application/x-www-form-urlencoded';
+
+test('releasableUnderFailOpen: round_two_review (Rust) - Gemini function calls and responses', () => {
+  const pdf = b64n(4000);
+  const g3 = (b) => jreq('POST', 'generativelanguage.googleapis.com',
+    '/v1beta/models/gemini-3-pro-preview:streamGenerateContent?alt=sse', b);
+  const call = (part) => g3({ contents: [{ role: 'model', parts: [part] }] });
+  assert.equal(releasable(call({ functionCall: { name: 'weather', args: { city: 'Oslo' } } })), true);
+  assert.equal(releasable(call({ functionResponse: { name: 'weather', response: { temp: 3, text: 'cold' }, parts: [{ text: 'ok' }] } })), true);
+  const held = {
+    'functionResponse.parts inlineData': { functionResponse: { name: 'f', response: {}, parts: [{ inlineData: { mimeType: 'application/pdf', data: pdf } }] } },
+    'functionResponse.response inlineData': { functionResponse: { name: 'f', response: { inlineData: { mimeType: 'application/pdf', data: pdf } } } },
+    'functionResponse.response nested blob': { functionResponse: { name: 'f', response: { result: { mime_type: 'image/png', data: b64n(64) } } } },
+    'functionCall.args file': { functionCall: { name: 'f', args: { file: b64n(MAX_OPAQUE_STRING) } } },
+    'functionCall.args data uri': { functionCall: { name: 'f', args: { x: 'data:application/pdf;base64,QQ==' } } },
+    'functionCall args not object': { functionCall: { name: 'f', args: 'x' } },
+    'functionCall extra key': { functionCall: { name: 'f', args: {}, blob: 'x' } },
+    'functionCall no name': { functionCall: { args: {} } },
+    'functionCall not object': { functionCall: 'f' },
+    'functionResponse extra key': { functionResponse: { name: 'f', response: {}, x: 1 } },
+    'functionResponse part extra key': { functionResponse: { name: 'f', parts: [{ text: 'x', y: 1 }] } },
+    'functionResponse part not text': { functionResponse: { name: 'f', parts: [{ text: 1 }] } },
+    'functionResponse parts not array': { functionResponse: { name: 'f', parts: { text: 'x' } } },
+    'functionResponse response string': { functionResponse: { name: 'f', response: 'x' } },
+    'functionResponse no name': { functionResponse: { response: {} } },
+    'thought not a bool': { text: 'x', thought: 'x' },
+    'thoughtSignature too long': { text: 'x', thoughtSignature: 'Q'.repeat(MAX_MODEL_TOKEN + 1) }
+  };
+  for (const [name, part] of Object.entries(held)) assert.equal(releasable(call(part)), false, `${name} must be held`);
+  assert.equal(releasable(call({ text: 'x', thoughtSignature: 'Q'.repeat(MAX_MODEL_TOKEN) })), true);
+  assert.equal(releasable(g3({ contents: [], tools: [{ x: { inlineData: { data: 'QQ' } } }] })), false);
+  assert.equal(releasable(g3({ contents: [], tools: [{ functionDeclarations: [{ name: 'f',
+    parameters: { properties: { mimeType: { type: 'string' }, data: { type: 'string' } } } }] }] })), true);
+  // Function call id and response settings.
+  assert.equal(releasable(call({ functionCall: { name: 'f', args: {}, id: 1 } })), false);
+  assert.equal(releasable(call({ functionCall: { name: 'f', args: {}, id: 'c1' } })), true);
+  assert.equal(releasable(call({ functionResponse: { name: 'f', response: {}, willContinue: { file: 'x' } } })), false);
+  assert.equal(releasable(call({ functionResponse: { name: 'f', response: {}, willContinue: true } })), true);
+});
+
+test('releasableUnderFailOpen: round_two_review (Rust) - Codex outputs, per-item budgets, long histories', () => {
+  const codex = (items) => req('WS-SEND', 'chatgpt.com', '/backend-api/codex/responses', null,
+    JSON.stringify({ type: 'response.create', input: items }));
+  const md = { turn_id: 't', create_time: 1.5, content_item_kinds: ['tool.output'] };
+  assert.equal(releasable(codex([{ type: 'custom_tool_call_output', call_id: 'c', output: 'done', internal_chat_message_metadata_passthrough: md }])), true);
+  assert.equal(releasable(codex([{ type: 'custom_tool_call_output', call_id: 'c', output: 'done',
+    internal_chat_message_metadata_passthrough: { x: 'a '.repeat(MAX_ITEM_OPAQUE) } }])), false);
+  const long = Array.from({ length: 300 }, (_, i) => ({ type: 'message', id: `msg_${String(i).padStart(40, '0')}`, role: 'user',
+    content: [{ type: 'input_text', text: 'x' }], internal_chat_message_metadata_passthrough: md }));
+  assert.equal(releasable(codex(long)), true, '300 items are not one budget');
+  const cc = Array.from({ length: 300 }, (_, i) => ({ role: 'assistant', content: [{ type: 'tool_use', id: `toolu_${String(i).padStart(40, '0')}`,
+    name: 'Bash', input: { command: 'ls' }, cache_control: { type: 'ephemeral' } }] }));
+  assert.equal(releasable(anth({ messages: cc })), true);
+  const am = (m) => anth({ messages: [m] });
+  const half = 'a '.repeat(1100);
+  assert.equal(releasable(codex([{ type: 'reasoning', id: half, status: half }])), false);
+  assert.equal(releasable(codex([{ type: 'message', role: 'user', content: 'x', internal_chat_message_metadata_passthrough: { x: half, y: half } }])), false);
+  assert.equal(releasable(am({ role: 'user', content: 'hi', output_config: { x: half, y: half } })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: half, name: 'n', input: {}, cache_control: { x: half } }] })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: 'a '.repeat(1900), name: 'n', input: {} }] })), true);
+  const blocks = Array.from({ length: 10 }, () => ({ type: 'tool_use', id: 'a '.repeat(400), name: 'n', input: {} }));
+  assert.equal(releasable(am({ role: 'assistant', content: blocks })), true, 'each block has its own budget');
+  assert.equal(releasable(codex([{ type: 'additional_tools', tools: [{ x: 'data:x;base64,QQ' }] }])), false);
+  assert.equal(releasable(codex([{ type: 'additional_tools', tools: [], id: 'a '.repeat(MAX_ITEM_OPAQUE) }])), false);
+  const enc = (n) => codex([{ type: 'reasoning', encrypted_content: 'Q'.repeat(n) }]);
+  assert.equal(releasable(enc(MAX_MODEL_TOKEN)), true);
+  assert.equal(releasable(enc(MAX_MODEL_TOKEN + 1)), false);
+  assert.equal(releasable(codex([{ type: 'reasoning', x: 1 }])), false);
+});
+
+test('releasableUnderFailOpen: round_two_review (Rust) - authored JSON, tool defs, model tokens', () => {
+  const am = (m) => anth({ messages: [m] });
+  const use = (input) => am({ role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'n', input }] });
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'Write',
+    input: { file_path: '/a.txt', content: 'a '.repeat(100000) } }] })), true);
+  const heldInputs = {
+    'data uri': { x: 'data:image/png;base64,iVBOR' },
+    'inline image': { image_url: { url: 'https://x/y.png' } },
+    'bare base64': { x: b64n(MAX_OPAQUE_STRING) },
+    'source blob': { source: { type: 'base64', media_type: 'application/pdf', data: 'QQ' } },
+    'non-ascii key': { 'fıle': 'x' },
+    'over the cap': { x: 'a '.repeat(MAX_AUTHORED / 2 + 1) },
+    'many keys over the cap': Object.fromEntries(Array.from({ length: 20000 }, (_, i) => [String(i).padStart(60, '0'), null]))
+  };
+  for (const [name, input] of Object.entries(heldInputs)) assert.equal(releasable(use(input)), false, `tool_use.input ${name} must be held`);
+  assert.equal(releasable(use({ x: b64n(MAX_OPAQUE_STRING - 1), image_url: '', inlineData: null })), true);
+  // tools / tool_choice walked on every surface.
+  assert.equal(releasable(anth({ messages: [], tools: [{ name: 'x', input_schema: {}, x: 'data:a;base64,QQ' }] })), false);
+  assert.equal(releasable(anth({ messages: [], tool_choice: { type: 'tool', name: b64n(MAX_OPAQUE_STRING) } })), false);
+  assert.equal(releasable(jreq('POST', 'claude.ai', CLAUDE_AI, { prompt: 'x', tools: [{ input_file: 'x' }] })), false);
+  const cc = (b) => releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', b));
+  assert.equal(cc({ messages: [], tools: [{ function: { name: 'f', description: 'data:x;base64,QQ' } }] }), false);
+  assert.equal(cc({ messages: [], tool_choice: { x: 'data:x;base64,QQ' } }), false);
+  assert.equal(cc({ messages: [], functions: [{ input_image: 'x' }] }), false);
+  const rs = (b) => releasable(jreq('POST', 'api.openai.com', '/v1/responses', b));
+  assert.equal(rs({ input: 'hi', tools: [{ x: 'data:x;base64,QQ' }] }), false);
+  assert.equal(rs({ input: 'hi', tool_choice: { x: 'data:x;base64,QQ' } }), false);
+  // Numbers spend, blobs need a MIME string and a non-empty data string.
+  assert.equal(releasable(use({ x: Array(MAX_AUTHORED / 8 + 1).fill(1) })), false);
+  assert.equal(releasable(use({ x: Array(1000).fill(1) })), true);
+  assert.equal(releasable(use({ mimeType: { type: 'string' }, data: 'x' })), true);
+  assert.equal(releasable(use({ mimeType: 'image/png', data: '' })), true);
+  assert.equal(releasable(use({ mimeType: 'application/json', data: { x: 1 } })), true);
+  assert.equal(releasable(use({ MimeType: 'image/png', data: 'x' })), false);
+  // Signatures and redacted thinking.
+  const sig = (n) => am({ role: 'assistant', content: [{ type: 'thinking', thinking: 't', signature: 'Q'.repeat(n) }] });
+  assert.equal(releasable(sig(MAX_MODEL_TOKEN)), true);
+  assert.equal(releasable(sig(MAX_MODEL_TOKEN + 1)), false);
+  const red = (n) => am({ role: 'assistant', content: [{ type: 'redacted_thinking', data: 'Q'.repeat(n) }] });
+  assert.equal(releasable(red(MAX_MODEL_TOKEN)), true);
+  assert.equal(releasable(red(MAX_MODEL_TOKEN + 1)), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'redacted_thinking', data: 5 }] })), false);
+  const big = { x: 'a '.repeat(MAX_ITEM_OPAQUE) };
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'thinking', thinking: 't', cache_control: big }] })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'redacted_thinking', data: 'd', cache_control: big }] })), false);
+  assert.equal(releasable(am({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'a '.repeat(MAX_ITEM_OPAQUE), content: 'x' }] })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: 'a '.repeat(MAX_ITEM_OPAQUE), name: 'n', input: {} }] })), false);
+});
+
+test('releasableUnderFailOpen: round_two_review (Rust) - query, chat parts, duplicate keys, unicode keys, ChatGPT pointers, Gemini upload refs', () => {
+  const hi = { messages: [{ role: 'user', content: 'hi' }] };
+  const q = (query) => jreq('POST', 'api.anthropic.com', `/v1/messages?${query}`, hi);
+  assert.equal(releasable(q('beta=true&x=&&y')), true);
+  assert.equal(releasable(q(`x=${'a'.repeat(MAX_QUERY)}`)), false);
+  assert.equal(releasable(q(`x=${b64n(MAX_OPAQUE_BASE64)}`)), false);
+  assert.equal(releasable(q('file=cv.pdf')), false);
+  assert.equal(releasable(q('file=')), true);
+  assert.equal(releasable(q('x=%zz')), false);
+  assert.equal(releasable(q('%zz=1')), false);
+  assert.equal(releasable(q('x=data:a;base64,QQ')), false);
+  assert.equal(releasable(jreq('POST', 'api.anthropic.com', '/v1/messages#frag', hi)), true);
+  // Query cap and the fragment cut.
+  assert.equal(releasable(q(`x=${'a+'.repeat(1000)}`)), true);
+  assert.equal(releasable(q(`x=${'a+'.repeat(1100)}`)), false);
+  assert.equal(releasable(jreq('POST', 'api.anthropic.com', `/v1/messages?x=1#${'a'.repeat(3000)}`, hi)), true);
+  // A non-string chat-completions part.
+  const cc1 = (part) => releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [{ role: 'user', content: [part] }] }));
+  assert.equal(cc1({ type: 'text', text: 'x' }), true);
+  assert.equal(cc1({ type: 'text', text: { image_url: 'x' } }), false);
+  assert.equal(cc1({ type: 'text', text: ['x'] }), false);
+  assert.equal(cc1({ type: 'refusal', refusal: { x: 1 } }), false);
+  assert.equal(cc1({ type: 'text', text: 'x', refusal: 'y' }), false);
+  assert.equal(cc1({ type: 'refusal', refusal: 'y', text: 'x' }), false);
+  // Duplicate keys, anywhere.
+  const dup = (body) => req('POST', 'api.anthropic.com', '/v1/messages', 'application/json', body);
+  assert.equal(releasable(dup('{"messages":[{"role":"user","content":"hi"}]}')), true);
+  assert.equal(releasable(dup('{"messages":[{"role":"user","content":"hi"}],"messages":[]}')), false);
+  assert.equal(releasable(dup('{"messages":[{"role":"user","content":"hi","content":[{"type":"image"}]}]}')), false);
+  assert.equal(releasable(dup('{"messages":[{"role":"user","content":[{"type":"tool_use","id":"t","name":"n","input":{"a":1,"a":2}}]}]}')), false);
+  assert.equal(releasable(dup('{"messages":[],"x":1e999}')), false);
+  const gw = (outer) => releasable(req('POST', 'gemini.google.com', GEMINI, FORM, `f.req=${formEnc(outer)}&at=x`));
+  assert.equal(gw(JSON.stringify([null, '[["hi"],{"a":1,"a":2}]'])), false, 'inner f.req');
+  assert.equal(gw('[null,"[[\\"hi\\"]]",{"a":1,"a":2}]'), false, 'outer f.req');
+  assert.equal(gw('[null,"[[\\"hi\\"]]",{"a":1,"b":2}]'), true);
+  // Unicode keys fold to attachment keys somewhere: held.
+  const web = (extra) => releasable(jreq('POST', 'chatgpt.com', '/backend-api/f/conversation',
+    { messages: [{ content: { content_type: 'text', parts: ['hi'] } }], x: extra }));
+  assert.equal(web({ 'FİLE': 'x' }), false);
+  assert.equal(web({ 'ｆｉｌｅ': 'x' }), false);
+  assert.equal(web({ ok_key: 'x' }), true);
+  // ChatGPT asset pointers and selected sources.
+  const cg = (meta) => releasable(jreq('POST', 'chatgpt.com', '/backend-api/conversation',
+    { messages: [{ content: { content_type: 'text', parts: ['hi'] }, metadata: meta }] }));
+  assert.equal(cg({ selected_sources: [], asset_pointer: '' }), true);
+  assert.equal(cg({ selected_sources: ['drive'] }), false);
+  assert.equal(cg({ x: { asset_pointer: 'file-service://file-1' } }), false);
+  // Gemini web: an upload reference in a non-turn slot.
+  const slot = (other) => releasable(req('POST', 'gemini.google.com', GEMINI, FORM,
+    `f.req=${formEnc(JSON.stringify([null, JSON.stringify([['hi'], other])]))}`));
+  assert.equal(slot(['c_9cf48bd306a5cf08', null, 1]), true);
+  assert.equal(slot([[['/contrib_service/ttl_1d/abc', 3]]]), false);
+  assert.equal(slot(['x', 'application/pdf']), false);
+  assert.equal(slot({ k: 'Image/PNG' }), false);
+  for (const t of ['image/', 'text/', 'audio/', 'video/', 'font/', 'model/', 'application/']) assert.equal(slot([`${t}x`]), false, t);
+  assert.equal(slot(['imag/x', 'applications/x', 'x/image/']), true, 'prefixes are exact');
+});
+
+test('releasableUnderFailOpen: round 2 boundaries - budgets, authored JSON, tokens, data URIs, base64 runs', () => {
+  const chat = (extra) => releasable(jreq('POST', 'chatgpt.com', '/backend-api/f/conversation',
+    { messages: [{ content: { content_type: 'text', parts: ['hi'] } }], x: extra }));
+  const cmsg = (extra) => releasable(jreq('POST', 'chatgpt.com', '/backend-api/f/conversation',
+    { messages: [{ content: { content_type: 'text', parts: ['hi'] }, ...extra }] }));
+  const am = (m) => anth({ messages: [m] });
+  const use = (input) => am({ role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'n', input }] });
+  // The per-item budget is exactly 4096: key a (1) + 4094 + key b (1) + 0 passes, one more byte holds.
+  const s4094 = 'a '.repeat(2047);
+  assert.equal(cmsg({ a: s4094, b: '' }), true);
+  assert.equal(cmsg({ a: s4094, b: 'x' }), false);
+  // ...and a nested item restores the enclosing item's budget, not a fresh one.
+  const big = (n) => 'a '.repeat(n / 2);
+  assert.equal(releasable(am({ role: 'user', content: [{ type: 'tool_result', tool_use_id: big(4000), content: [{ type: 'text', text: 'x' }],
+    cache_control: { x: big(2000) } }] })), false, 'tool_result: 4000 + 2000 in one item');
+  // Each text block of a tool result has its own budget.
+  const parts = Array.from({ length: 10 }, () => ({ type: 'text', text: 'x', cache_control: { x: big(800) } }));
+  assert.equal(releasable(am({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: parts }] })), true);
+  // Each chatgpt / chat-completions message and Gemini function response has its own budget.
+  const many = (mk) => Array.from({ length: 20 }, mk);
+  assert.equal(releasable(jreq('POST', 'chatgpt.com', '/backend-api/f/conversation',
+    { messages: many(() => ({ content: { content_type: 'text', parts: ['hi'] }, id: big(600) })) })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions',
+    { messages: many(() => ({ role: 'user', content: 'hi', name: big(600) })) })), true);
+  assert.equal(releasable(jreq('POST', 'generativelanguage.googleapis.com', '/v1beta/models/g:generateContent',
+    { contents: [{ role: 'user', parts: many(() => ({ functionResponse: { name: 'f', response: {}, id: big(600) } })) }] })), true);
+  // The authored budget is exactly MAX_AUTHORED: key k (1) + the string.
+  assert.equal(releasable(use({ k: 'a '.repeat(MAX_AUTHORED / 2 - 1) + 'a' })), true, '1 + (MAX - 1)');
+  assert.equal(releasable(use({ k: 'a '.repeat(MAX_AUTHORED / 2) })), false, '1 + MAX');
+  // Every inline-data container is held with a value, in any case; empty is fine.
+  for (const k of ['inlinedata', 'inline_data', 'filedata', 'file_data', 'image_url', 'imageurl', 'input_image', 'input_file', 'input_audio', 'b64_json']) {
+    for (const key of [k, k.toUpperCase(), k[0].toUpperCase() + k.slice(1)]) {
+      assert.equal(releasable(use({ x: { [key]: 'v' } })), false, key);
+      assert.equal(releasable(use({ x: { [key]: { a: 1 } } })), false, key);
+      assert.equal(releasable(use({ x: { [key]: '' } })), true, `${key} empty`);
+    }
+  }
+  // A blob: any MIME key beside a non-empty data string; neither alone.
+  for (const k of ['mimetype', 'mime_type', 'media_type', 'mediatype', 'MimeType', 'MEDIA_TYPE']) {
+    assert.equal(releasable(use({ [k]: 'image/png', data: 'QQ' })), false, k);
+    assert.equal(releasable(use({ [k]: 'image/png' })), true, `${k} alone`);
+    assert.equal(releasable(use({ [k]: 5, data: 'QQ' })), true, `${k} not a string`);
+    assert.equal(releasable(use({ [k]: null, data: 'QQ' })), true, `${k} null`);
+  }
+  assert.equal(releasable(use({ data: 'QQ' })), true);
+  assert.equal(releasable(use({ mimeType: 'image/png', Data: 'QQ' })), true, 'data is an exact key');
+  assert.equal(releasable(use({ mimeType: 'image/png', data: ['QQ'] })), true);
+  assert.equal(releasable(use({ x: [{ mimeType: 'image/png', data: 'QQ' }] })), false, 'a blob inside an array');
+  assert.equal(releasable(use({ x: [b64n(4095)] })), true);
+  assert.equal(releasable(use({ x: [b64n(4096)] })), false);
+  assert.equal(releasable(use({ x: ['é'] })), true);
+  assert.equal(releasable(use({ 'é': 'x' })), false, 'latin-1 key');
+  assert.equal(releasable(use({ '': 'x', '\u0080': 1 })), false, 'U+0080 key');
+  // Model tokens count bytes, not characters; null and absent are fine, a number is not.
+  const sig = (v) => am({ role: 'assistant', content: [{ type: 'thinking', thinking: 't', signature: v }] });
+  assert.equal(releasable(sig('é'.repeat(MAX_MODEL_TOKEN / 2))), true);
+  assert.equal(releasable(sig('é'.repeat(MAX_MODEL_TOKEN / 2 + 1))), false);
+  assert.equal(releasable(sig(null)), true);
+  assert.equal(releasable(sig(5)), false);
+  const red = (b) => am({ role: 'assistant', content: [{ type: 'redacted_thinking', ...b }] });
+  assert.equal(releasable(red({ data: 'x' })), true);
+  assert.equal(releasable(red({ data: null })), false, 'redacted data must be a string');
+  assert.equal(releasable(red({})), false);
+  const gsig = (v) => jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent', { contents: [{ parts: [{ text: 'x', thoughtSignature: v }] }] });
+  assert.equal(releasable(gsig(null)), true);
+  assert.equal(releasable(gsig(5)), false);
+  assert.equal(releasable(gsig('é'.repeat(MAX_MODEL_TOKEN / 2 + 1))), false);
+  // data URIs: a prefix then ;base64, - JS and Rust trim differently (U+0085 yes, U+FEFF no).
+  assert.equal(chat('data;base64,QQ'), true, 'no colon');
+  assert.equal(chat('database;base64,QQ'), true);
+  assert.equal(chat('data:x base64,QQ'), true, 'no semicolon');
+  assert.equal(chat('data:x;base64'), true, 'no comma');
+  assert.equal(chat('data:x;BASE64,QQ'), false);
+  assert.equal(chat('\u0085data:x;base64,QQ'), false, 'U+0085 is trimmed');
+  assert.equal(chat('﻿data:x;base64,QQ'), true, 'U+FEFF is not');
+  assert.equal(chat('\t\n data:x;base64,QQ'), false);
+  assert.equal(chat('x data:x;base64,QQ'), true, 'the prefix is at the start');
+  // Base64 runs: every alphabet member, from 512 on.
+  for (const run of ['0123456789'.repeat(52), 'q'.repeat(512), 'Q'.repeat(512), '+'.repeat(512), '/'.repeat(512), '-'.repeat(512), '_'.repeat(512), '='.repeat(512)]) {
+    assert.equal(chat(run), false, run.slice(0, 12));
+    assert.equal(chat(run.slice(0, 511)), true, `${run.slice(0, 12)} one short`);
+    assert.equal(chat(`${run} `), true);
+    assert.equal(chat(`${run}é`), true);
+  }
+});
+
+test('releasableUnderFailOpen: round 2 boundaries - query, duplicate keys, parts, upload refs', () => {
+  const hi = { messages: [{ role: 'user', content: 'hi' }] };
+  const q = (query) => jreq('POST', 'api.anthropic.com', `/v1/messages?${query}`, hi);
+  assert.equal(releasable(q(`x=${'a+'.repeat(1023)}`)), true, '2048 bytes');
+  assert.equal(releasable(q(`x=${'a+'.repeat(1023)}a`)), false, '2049 bytes');
+  assert.equal(releasable(q(`x=${'é'.repeat(1024)}`)), false, 'bytes, not characters');
+  assert.equal(releasable(q(`x=${'é'.repeat(1023)}`)), true);
+  assert.equal(releasable(q('file')), true, 'no = is an empty value');
+  assert.equal(releasable(q('x')), true);
+  assert.equal(releasable(q('x=1?file=cv')), true, 'the first ? starts the query');
+  assert.equal(releasable(q('x=1#file=cv')), true, 'a fragment is cut');
+  assert.equal(releasable(q('FILE=')), true);
+  assert.equal(releasable(q('a=1&file=%63v')), false, 'values are decoded');
+  assert.equal(releasable(q('f%69le=cv')), false, 'keys are decoded');
+  assert.equal(releasable(q('x=1&&&')), true);
+  assert.equal(releasable(q('x=%zz&file=')), false, 'a bad escape in any pair');
+  assert.equal(releasable(q('x=1;file=cv')), true, '; is not a separator');
+  // The path is cut at ? then #: a ? after the # is in the fragment.
+  assert.equal(releasable(jreq('POST', 'api.anthropic.com', '/v1/messages#a?b', hi)), true);
+  assert.equal(releasable(jreq('POST', 'api.anthropic.com', '/v1/messages#a?file=cv', hi)), false, 'the query still reads what follows the first ?');
+  // Duplicate keys: escapes, strings holding quotes, arrays of equal strings, nesting.
+  const dup = (body) => releasable(req('POST', 'api.anthropic.com', '/v1/messages', 'application/json', body));
+  assert.equal(dup('{"messages":[],"\\u006dessages":[]}'), false, 'an escaped spelling of the same key');
+  assert.equal(dup('{"messages":[],"model":"x\\"y","model":"z"}'), false, 'after a string holding an escaped quote');
+  assert.equal(dup('{"messages":[],"a":"x\\"y","b":1,"b":2}'), false);
+  assert.equal(dup('{"messages":[],"stop_sequences":["a","a"],"model":"m"}'), true, 'equal strings in an array are not keys');
+  assert.equal(dup('{"messages":[],"metadata":{"a":1},"thread":{"a":2}}'), true, 'the same key in two objects');
+  assert.equal(dup('{"messages":[],"metadata":{"a":{"a":1}}}'), true, 'a key inside its own value');
+  assert.equal(dup('{"messages":[],"metadata":{"a":1,"b":{"x":1},"a":2}}'), false, 'a repeat after a nested object');
+  assert.equal(dup('{"messages":[],"metadata":{"a":[1,{"b":1}],"a":2}}'), false, 'a repeat after a nested array');
+  assert.equal(dup('{"messages":[],"metadata":{"a":"x","a":"x"}}'), false, 'equal values');
+  assert.equal(dup('{"messages":[],"metadata":{"a":1,"A":2}}'), true, 'case-sensitive');
+  // Chat-completions parts and function-call settings.
+  const cc = (m) => releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [m] }));
+  assert.equal(cc({ role: 'user', content: ['x'] }), false, 'a part that is not an object');
+  assert.equal(cc({ role: 'user', content: [null] }), false);
+  assert.equal(cc({ role: 'user', content: [{ type: 'text', text: 'x' }, 5] }), false);
+  assert.equal(cc({ role: 'user', content: [{ type: 'text' }] }), false);
+  assert.equal(cc({ role: 'user', content: [{ type: 'refusal' }] }), false);
+  assert.equal(cc({ role: 'user', content: [{ type: 'refusal', refusal: 'x' }] }), true);
+  assert.equal(cc({ role: 'user', content: [{ type: 'text', text: 'x', extra: 1 }] }), false);
+  assert.equal(cc({ role: 'user', content: [{ type: 'other', text: 'x' }] }), false);
+  const call = (calls) => cc({ role: 'assistant', content: null, tool_calls: calls });
+  assert.equal(call([{ id: 'c', type: 'function', function: { name: 'f', arguments: big4k() } }]), true, 'arguments are not settings');
+  assert.equal(call(Array.from({ length: 100 }, (_, i) => ({ id: `c${i}`, type: 'function', function: { name: 'f', arguments: '{}' } }))), true);
+  assert.equal(call([{ id: 'c', type: 'function', function: { name: 'f', arguments: 5 } }]), false);
+  const gc = (part) => releasable(jreq('POST', 'generativelanguage.googleapis.com', '/v1beta/models/g:generateContent', { contents: [{ role: 'model', parts: [part] }] }));
+  assert.equal(gc({ functionCall: { name: 'f', args: {}, id: null } }), true, 'a null id');
+  assert.equal(gc({ functionCall: { name: 'f' } }), true, 'absent args');
+  assert.equal(gc({ functionCall: { name: 'f', args: null } }), false);
+  assert.equal(gc({ functionResponse: { name: 'f', response: {}, scheduling: 'SILENT' } }), true);
+  assert.equal(gc({ functionResponse: { name: 'f', response: {}, id: 'x' } }), true);
+  assert.equal(gc({ functionResponse: { name: 'f' } }), true, 'absent response');
+  assert.equal(gc({ functionResponse: { name: 'f', response: null } }), false);
+  assert.equal(gc({ functionResponse: { name: 'f', parts: [] } }), true);
+  assert.equal(gc({ functionResponse: { name: 'f', parts: [5] } }), false);
+  assert.equal(gc({ functionResponse: { name: 'f', parts: [null] } }), false);
+  assert.equal(gc({ functionResponse: { name: 'f', parts: ['x'] } }), false);
+  assert.equal(gc({ functionResponse: { name: 'f', id: 'a '.repeat(MAX_ITEM_OPAQUE) } }), false, 'the id is a setting');
+  assert.equal(gc({ functionResponse: { name: 'f', willContinue: 'a '.repeat(MAX_ITEM_OPAQUE) } }), false);
+  assert.equal(gc({ thought: true, text: 'x' }), true);
+  assert.equal(gc({ thought: null, text: 'x' }), false);
+  // Chat-completions tool_choice and Responses tool definitions are authored JSON, not settings.
+  const big5000 = 'a '.repeat(2500);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [], tool_choice: { type: 'function', function: { name: 'f' }, note: big5000 } })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [], tools: [{ type: 'function', function: { name: 'f', description: big5000 } }] })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [], functions: [{ name: 'f', description: big5000 }] })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: 'x', tool_choice: { type: 'function', note: big5000 } })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: 'x', tools: [{ type: 'function', description: big5000 }] })), true);
+  assert.equal(releasable(anth({ ...hi, tool_choice: { type: 'auto', note: big5000 } })), true);
+  assert.equal(releasable(jreq('POST', 'claude.ai', CLAUDE_AI, { prompt: 'x', tools: [{ d: big5000 }] })), true);
+  assert.equal(releasable(jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent', { contents: [], tools: [{ d: big5000 }] })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [{ type: 'additional_tools', tools: [{ d: big5000 }] }] })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [{ type: 'additional_tools', tools: [], extra: 1 }] })), false, 'additional_tools settings are held to the settings rule');
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [{ type: 'additional_tools', tools: [], id: big5000 }] })), false);
+  // Responses items: reasoning, outputs.
+  const ri = (item) => releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [item] }));
+  assert.equal(ri({ type: 'reasoning', encrypted_content: null }), true);
+  assert.equal(ri({ type: 'reasoning', encrypted_content: 5 }), false);
+  assert.equal(ri({ type: 'reasoning', id: 'x', status: 'completed' }), true);
+  assert.equal(ri({ type: 'reasoning', id: big5000 }), false);
+  assert.equal(ri({ type: 'reasoning', status: { file: 'x' } }), false);
+  assert.equal(ri({ type: 'function_call_output', call_id: 'c', output: 'x', internal_chat_message_metadata_passthrough: { a: 'b' } }), true);
+  assert.equal(ri({ type: 'function_call_output', call_id: 'c', output: 'x', internal_chat_message_metadata_passthrough: big5000 }), false);
+  assert.equal(ri({ type: 'local_shell_call_output', call_id: 'c', output: 'x', other: 1 }), false);
+  // tool_use / tool_result settings are settings.
+  const am = (m) => anth({ messages: [m] });
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: big5000, name: 'n', input: {} }] })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'n', input: {}, caller: { file: 'x' } }] })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'n', input: {}, cache_control: { x: big5000 } }] })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'n' }] })), false, 'input is required');
+  assert.equal(releasable(am({ role: 'user', content: [{ type: 'tool_result', tool_use_id: big5000, content: 'x' }] })), false);
+  assert.equal(releasable(am({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'x', is_error: { file: 'x' } }] })), false);
+  assert.equal(releasable(am({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'x', is_error: true }] })), true);
+  // Gemini web: a prompt may look like a path or a MIME type; only the other slots are searched.
+  const gw = (turn, other) => releasable(req('POST', 'gemini.google.com', GEMINI, FORM,
+    `f.req=${formEnc(JSON.stringify([null, JSON.stringify([turn, other])]))}`));
+  assert.equal(gw(['/start the day'], ['en']), true);
+  assert.equal(gw(['text/plain is a type'], ['en']), true);
+  assert.equal(gw(['hi'], ['en', { a: ['x', ['application/pdf']] }]), false, 'nested in an object in an array');
+  assert.equal(gw(['hi'], ['en', { a: 'IMAGE/x' }]), false);
+  assert.equal(gw(['hi'], ['applications/x', 'images/x', 'texts/x', 'audios/x', 'videos/x', 'fonts/x', 'models/x', 'x/image/', 'application', 'image']), true, 'exact prefixes');
+  assert.equal(gw(['hi'], ['İmage/x']), true, 'an unrelated unicode letter is not a prefix');
+  assert.equal(gw(['hi'], { k: { j: '/up' } }), false);
+});
+
+function big4k() { return 'a '.repeat(2500); }
+
+// ── round 2 through the real fetch hook (verdict timeout + relay outage) ────
+const G3_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent';
+const CODEX_URL = 'https://chatgpt.com/backend-api/codex/responses';
+const CHATGPT_URL = 'https://chatgpt.com/backend-api/conversation';
+const HI = { messages: [{ role: 'user', content: 'hi' }] };
+const g3Call = (part) => jsonInit({ contents: [{ role: 'model', parts: [part] }] });
+const R2_HELD = {
+  'Gemini 3 functionResponse.parts inlineData PDF': [G3_URL, g3Call({ functionResponse: { name: 'f', response: {}, parts: [{ inlineData: { mimeType: 'application/pdf', data: b64n(4000) } }] } })],
+  'Gemini functionResponse.response.inlineData': [G3_URL, g3Call({ functionResponse: { name: 'f', response: { inlineData: { mimeType: 'application/pdf', data: b64n(4000) } } } })],
+  'Gemini functionCall.args.file b64': [G3_URL, g3Call({ functionCall: { name: 'f', args: { file: b64n(4096) } } })],
+  'duplicate key, LAST value benign': [CC_URL, { method: 'POST', headers: JSON_CT, body: '{"messages":[{"role":"user","content":[{"type":"image","source":{}}]}],"messages":[{"role":"user","content":"hi"}]}' }],
+  'FİLE key': [CHATGPT_URL, jsonInit({ messages: [{ content: { content_type: 'text', parts: ['hi'] } }], 'FİLE': 'Jane Doe 123-45-6789' })],
+  'ChatGPT asset_pointer': [CHATGPT_URL, jsonInit({ messages: [{ content: { content_type: 'text', parts: ['hi'] }, metadata: { x: { asset_pointer: 'file-service://file-1' } } }] })],
+  'ChatGPT selected_sources': [CHATGPT_URL, jsonInit({ messages: [{ content: { content_type: 'text', parts: ['hi'] }, metadata: { selected_sources: ['drive'] } }] })],
+  'query string carrying base64': [`${CC_URL}?x=${b64n(600)}`, jsonInit(HI)],
+  'non-string chat part': ['https://api.openai.com/v1/chat/completions', jsonInit({ messages: [{ role: 'user', content: [{ type: 'text', text: { file: 'x' } }] }] })]
+};
+
+test('fail-open round 2: the review\'s new leaks are HELD, on a verdict timeout and on a relay outage', async () => {
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    for (const [name, [url, init]] of Object.entries(R2_HELD)) {
+      const r = await foRun(outage, url, init);
+      assert.equal(r.outcome, 'BLOCKED', `${oname}: ${name}`);
+      assert.equal(r.w.netCalls.length, 0, `${oname}: ${name}`);
+      assert.equal(r.w.unchecked.length, 0, `${oname}: ${name}`);
+      assertBlocked(r.w.logs, 'fail-open-file-held', 'unavailable');
+    }
+  }
+});
+
+test('fail-open round 2: a Codex tool output carrying internal_chat_message_metadata_passthrough is SENT', async () => {
+  const body = { type: 'response.create', input: [{ type: 'custom_tool_call_output', call_id: 'c', output: 'done',
+    internal_chat_message_metadata_passthrough: { turn_id: 't', create_time: 1.5, content_item_kinds: ['tool.output'] } }] };
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    const r = await foRun(outage, CODEX_URL, jsonInit(body));
+    assert.equal(r.outcome, 'SENT', oname);
+    assert.equal(r.w.netCalls.length, 1, oname);
+    assert.deepEqual(r.w.unchecked, [outage.cause], oname);
+  }
+  // Control: the same frame with a file-ish key in the metadata is held.
+  const bad = structuredClone(body);
+  bad.input[0].internal_chat_message_metadata_passthrough.asset_pointer = 'file-service://f';
+  assert.equal((await foRun(FO_OUTAGES['verdict timeout'], CODEX_URL, jsonInit(bad))).outcome, 'BLOCKED');
+});
+
+test('decide() holds by default: a caller that forgets the releasable argument gets a hold', () => {
+  assert.match(SHIM_SRC, /function decide\(res, coverage, scope, url, releasable = false, bodyless = false\)/);
+  assert.ok(!/releasable = true/.test(SHIM_SRC.replace('if (bodyless) releasable = true;', '')), 'no other default or override');
+});
+
+test('fail-open: an upload-scope request is held even when its bytes look like a chat turn (fetch and XHR)', async () => {
+  const TITLE = 'https://claude.ai/api/organizations/o/chat_conversations/c/title';
+  const body = JSON.stringify({ message_content: 'hi' });
+  const marked = { 'content-type': 'application/json', 'x-goog-upload-protocol': 'resumable' };
+  // Sanity: unmarked, the same bytes are a known turn and fail open.
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    const plain = await foRun(outage, TITLE, { method: 'POST', headers: JSON_CT, body });
+    assert.equal(plain.outcome, 'SENT', `${oname} unmarked`);
+    const up = await foRun(outage, TITLE, { method: 'POST', headers: marked, body });
+    assert.equal(up.outcome, 'BLOCKED', `${oname} upload-marked`);
+    assert.equal(up.w.netCalls.length, 0);
+    assert.equal(up.w.unchecked.length, 0);
+    const line = assertBlocked(up.w.logs, 'fail-open-file-held', 'unavailable');
+    assert.match(line, /\bscope=upload\b/);
+  }
+  // XHR: same rule, same caller shape.
+  const xhrRun = async (method, url, headers, payload) => {
+    const w = makeXhrWorld(() => ({ ok: false, code: 'no-bridge' }), { extraGlobals: realCatalogGlobals('https://chat.openai.com/') });
+    w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+    const x = new w.sandbox.XMLHttpRequest();
+    x.open(method, url, true);
+    for (const [k, v] of Object.entries(headers)) x.setRequestHeader(k, v);
+    x.send(payload);
+    await waitFor(() => x.aborted || x.sent.length === 1);
+    return { x, w };
+  };
+  const sent = await xhrRun('POST', CC_URL, JSON_CT, JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }));
+  assert.equal(sent.x.sent.length, 1, 'a known turn fails open over XHR');
+  assert.deepEqual(sent.w.unchecked, ['relay-no-bridge']);
+  const svg = await xhrRun('POST', CC_URL, { 'content-type': 'image/svg+xml' }, '<svg/>');
+  assert.deepEqual(svg.x.sent, []);
+  assert.equal(svg.x.sonomosBlockReason, 'fail-open-file-held');
+  const put = await xhrRun('PUT', STORAGE_PUT, { 'content-type': 'application/pdf' }, 'file bytes');
+  assert.deepEqual(put.x.sent, []);
+  assert.equal(put.x.sonomosBlockReason, 'fail-open-file-held');
+  const upMarked = await xhrRun('POST', TITLE, marked, body);
+  assert.deepEqual(upMarked.x.sent, [], 'upload scope, though the bytes read as a chat turn');
+  assert.equal(upMarked.x.sonomosBlockReason, 'fail-open-file-held');
+  assert.equal(upMarked.w.unchecked.length, 0);
+});
+
+test('mixed versions: a redact whose rebuilt request cannot be decoded is held as an unchecked pass, not a malformed redact', async () => {
+  for (const window of [openWindow(), null]) {
+    const bad = await recv({ ok: true, receipt: { decision: 'redact', unchecked: true, redactedCount: 1, requestB64: '!!!not base64!!!' } },
+      AI_URL, { method: 'POST', headers: JSON_CT, body: CHAT_JSON }, window);
+    assert.equal(bad.outcome, 'BLOCKED');
+    assert.match(assertBlocked(bad.w.logs, 'fail-open-file-held', 'unavailable'), /\bcause=unchecked-pass\b/);
+  }
+});
+
+// ── round 3 of the zh#370 review: a tool's output text carrying a file ────
+// Port of the Rust `tool_output_text_carrying_a_file_is_held`.
+
+test('releasableUnderFailOpen: tool output text carrying a file is held (tool_output_text_carrying_a_file_is_held)', () => {
+  const blob = 'QUJD'.repeat(MAX_OPAQUE_STRING / 4);
+  const under = 'QUJD'.repeat(MAX_OPAQUE_STRING / 4 - 1);
+  const uri = `data:application/pdf;base64,${blob}`;
+  const shortUri = 'data:application/pdf;base64,JVBERi0x';
+  const prose = `lockfile:\n${'a b '.repeat(5000)}\nsha512: ${under}`;
+  const tr = (content) => anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content }] }] });
+  for (const [ok, c] of [
+    [true, prose], [true, under], [true, `see ${shortUri} in the source`], [false, `see ${uri}`], [false, blob], [false, uri],
+    [true, [{ type: 'text', text: under }]], [false, [{ type: 'text', text: blob }]],
+    [false, [{ type: 'text', text: 'x' }, { type: 'text', text: uri }]],
+    [true, [{ type: 'tool_reference', tool_name: 'x' }]], [false, 1]
+  ]) {
+    assert.equal(releasable(tr(c)), ok, `tool_result ${JSON.stringify(c).slice(0, 60)}`);
+  }
+  assert.ok(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't' }] }] })));
+  assert.ok(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'text', text: blob }] }] })), 'a prompt is not tool text');
+  const fr = (t) => jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent',
+    { contents: [{ parts: [{ functionResponse: { name: 'f', response: {}, parts: [{ text: t }] } }] }] });
+  assert.ok(releasable(fr(under)));
+  assert.ok(!releasable(fr(blob)));
+  assert.ok(!releasable(fr(uri)));
+  const out = (o) => jreq('POST', 'api.openai.com', '/v1/responses', { input: [{ type: 'custom_tool_call_output', call_id: 'c', output: o }] });
+  assert.ok(releasable(out(under)));
+  assert.ok(!releasable(out(blob)));
+  assert.ok(!releasable(out(uri)));
+  assert.ok(releasable(out([{ type: 'input_text', text: under }])));
+  assert.ok(!releasable(out([{ type: 'input_text', text: 'x' }, { type: 'input_text', text: blob }])));
+  assert.ok(!releasable(out([{ type: 'input_image', text: 'x' }])), 'output parts keep their shape check');
+  assert.ok(!releasable(out(1)));
+  assert.ok(!releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [{ type: 'function_call_output', call_id: 'c', output: blob }] })));
+  assert.ok(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [{ role: 'user', content: blob }] })));
+  const tool = (role, c) => jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [{ role, tool_call_id: '1', content: c }] });
+  assert.ok(releasable(tool('tool', under)));
+  assert.ok(!releasable(tool('tool', blob)));
+  assert.ok(!releasable(tool('function', uri)));
+  assert.ok(releasable(tool('function', shortUri)));
+  assert.ok(!releasable(tool('tool', [{ type: 'text', text: blob }])));
+  assert.ok(releasable(tool('tool', [{ type: 'text', text: under }])));
+  assert.ok(releasable(tool('tool', null)));
+  assert.ok(releasable(tool('user', blob)));
+  assert.ok(releasable(tool('assistant', [{ type: 'refusal', refusal: blob }])));
+});
+
+const R3_HELD = {
+  'Anthropic tool_result of pure base64 (800 KB)': [CC_URL, jsonInit({ messages: [{ role: 'user', content: [
+    { type: 'tool_result', tool_use_id: 't', content: 'UEsDBBQAAAAIAA'.repeat(800000 / 14) }] }] })],
+  'Anthropic tool_result text part of pure base64': [CC_URL, jsonInit({ messages: [{ role: 'user', content: [
+    { type: 'tool_result', tool_use_id: 't', content: [{ type: 'text', text: 'UEsDBBQAAAAIAA'.repeat(1000) }] }] }] })],
+  'Gemini functionResponse.parts text of pure base64 (500 KB)': [G3_URL, g3Call({ functionResponse: { name: 'read', response: {},
+    parts: [{ text: 'JVBERi0xLjcK'.repeat(500000 / 12) }] } })],
+  'Codex custom_tool_call_output of pure base64': [CODEX_URL, jsonInit({ type: 'response.create', input: [
+    { type: 'custom_tool_call_output', call_id: 'c', output: 'JVBERi0xLjcK'.repeat(1000) }] })],
+  'Codex function_call_output of pure base64': [CODEX_URL, jsonInit({ type: 'response.create', input: [
+    { type: 'function_call_output', call_id: 'c', output: 'JVBERi0xLjcK'.repeat(1000) }] })],
+  'OpenAI tool-role message of a data URI': ['https://api.openai.com/v1/chat/completions', jsonInit({ messages: [
+    { role: 'tool', tool_call_id: '1', content: `data:application/pdf;base64,${'JVBERi0xLjcK'.repeat(400)}` }] })]
+};
+
+test('fail-open round 3: tool output text carrying a file is HELD, on a verdict timeout and on a relay outage', async () => {
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    for (const [name, [url, init]] of Object.entries(R3_HELD)) {
+      const r = await foRun(outage, url, init);
+      assert.equal(r.outcome, 'BLOCKED', `${oname}: ${name}`);
+      assert.equal(r.w.netCalls.length, 0, `${oname}: ${name}`);
+      assert.equal(r.w.unchecked.length, 0, `${oname}: ${name}`);
+      assertBlocked(r.w.logs, 'fail-open-file-held', 'unavailable');
+    }
+  }
+});
+
+test('fail-open round 3: ordinary tool text (a lockfile with hashes) is still SENT', async () => {
+  const lockfile = `integrity sha512-${'QUJD'.repeat(20)} resolved https://x\n`.repeat(200);
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    const r = await foRun(outage, CC_URL, jsonInit({ messages: [{ role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 't', content: lockfile }] }] }));
+    assert.equal(r.outcome, 'SENT', oname);
+    assert.deepEqual(r.w.unchecked, [outage.cause], oname);
+  }
+});
+
+// ── round 3b of the zh#370 review: an encoded run ANYWHERE in tool output ──
+// Port of the Rust `an_encoded_run_anywhere_in_tool_output_is_held`.
+
+test('releasableUnderFailOpen: an encoded run anywhere in tool output is held (an_encoded_run_anywhere_in_tool_output_is_held)', () => {
+  const b64 = 'JVBERi0xLjcK7b+IRl8Dre0pqxTCVufYUFZ5GjhDIMQ0lWhy'.repeat(200);
+  const wrap = (sep, w) => b64.match(new RegExp(`.{1,${w}}`, 'g')).join(sep);
+  const hex = '255044462d312e370aedbf88465f03'.repeat(150);
+  const tr = (c) => anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: c }] }] });
+  for (const [name, text] of [
+    ['trailing newline', `${b64}\n`], ['leading space', ` ${b64}`], ['prefix text', `Here is the file:\n${b64}`],
+    ['glued prefix', `out:${b64}`], ['wrapped 76, LF', wrap('\n', 76)], ['wrapped 76, CRLF', wrap('\r\n', 76)],
+    ['wrapped 64 by spaces', wrap(' ', 64)], ['wrapped by blank lines', wrap('\n\n', 76)],
+    ['text before a data uri', `see: data:application/pdf;base64,${b64}`],
+    ['leading whitespace data uri', `  \n data:application/pdf;base64,${b64}`],
+    ['hex with a prefix', `hex:\n${hex}`], ['hex pure', hex],
+    ['wrapped with a short last line', `${wrap('\n', 76)}\nQUJD`]
+  ]) {
+    assert.ok(!releasable(tr(text)), `${name} must be held`);
+  }
+  const chunks = b64.match(/.{1,3000}/g);
+  assert.ok(!releasable(tr(chunks.map((c) => ({ type: 'text', text: c })))), 'parts');
+  assert.ok(!releasable(anth({ messages: [{ role: 'user', content: chunks.map((c) => ({ type: 'tool_result', tool_use_id: 't', content: c })) }] })), 'results');
+  assert.ok(!releasable(jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent',
+    { contents: [{ parts: [{ functionResponse: { name: 'f', parts: chunks.map((c) => ({ text: c })) } }] }] })), 'gemini parts');
+  const ok = [
+    'QUJD'.repeat(MAX_OPAQUE_STRING / 4 - 1),
+    `${'QUJD'.repeat(600)}.${'QUJD'.repeat(600)}`,
+    'the quick brown fox jumps over the lazy dog '.repeat(200),
+    `integrity sha512-${'QUJD'.repeat(20)} resolved https://x\n`.repeat(300),
+    `${'QUJD'.repeat(500)} ${'QUJD'.repeat(400)}`.replaceAll('QUJDQUJD', 'QUJD QUJD'),
+    `${'QUJD'.repeat(800)}\nthe end\n${'QUJD'.repeat(800)}`
+  ];
+  ok.forEach((text, i) => assert.ok(releasable(tr(text)), `ok case ${i} must go out`));
+  const exact = 'Q'.repeat(MAX_OPAQUE_STRING);
+  assert.ok(!releasable(tr(exact.match(/.{1,16}/g).join('\n'))));
+  assert.ok(releasable(tr(exact.slice(1).match(/.{1,16}/g).join('\n'))));
+  const lines = (w, n) => Array(n).fill('Q'.repeat(w)).join('\n');
+  assert.ok(releasable(tr(lines(15, 600))));
+  assert.ok(!releasable(tr(lines(16, 300))));
+  assert.ok(!releasable(tr(wrap('\t', 76))));
+  assert.ok(!releasable(tr(`${b64}. done`)));
+  for (const sep of ['/', '=', '-', '_', '+']) {
+    assert.ok(!releasable(tr(Array(50).fill('Q'.repeat(90)).join(sep))), sep);
+  }
+  assert.ok(releasable(tr(Array(50).fill('Q'.repeat(90)).join('.'))));
+  assert.ok(releasable(tr(Array(50).fill('Q'.repeat(90)).join('é'))), 'a non-ASCII character ends a run');
+  const half = tr('QUJD'.repeat(600));
+  assert.ok(releasable(half) && releasable(half), 'each request scans afresh');
+});
+
+// The re-check's 18 c6 repros, through the real fetch hook, on a verdict
+// timeout and on a relay outage. Built here at full size.
+{
+  const B = 'JVBERi0xLjcK7b+IRl8Dre0pqxTCVufYUFZ5GjhDIMQ0lWhy'.repeat(16700);
+  const HEX = '255044462d312e370aedbf88465f03'.repeat(20000);
+  const wrap76 = (sep) => B.match(/.{1,76}/g).join(sep);
+  const chunks = B.slice(0, 800000).match(/.{1,4000}/g);
+  const tr = (c) => [CC_URL, jsonInit({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: c }] }] })];
+  const codex = (o) => [CODEX_URL, jsonInit({ type: 'response.create', input: [{ type: 'function_call_output', call_id: 'c', output: o }] })];
+  const toolRole = (c) => ['https://api.openai.com/v1/chat/completions', jsonInit({ messages: [{ role: 'tool', tool_call_id: '1', content: c }] })];
+  const C6 = {
+    'R1 gemini part 500k b64': () => [G3_URL, g3Call({ functionResponse: { name: 'r', response: {}, parts: [{ text: B.slice(0, 500000) }] } })],
+    'R2 tool_result 800k b64': () => tr(B),
+    'R3 tool_result prefix text': () => tr(`Here is the file:\n${B}`),
+    'R4 tool_result trailing newline': () => tr(`${B}\n`),
+    'R5 tool_result leading space': () => tr(` ${B}`),
+    'R6 tool_result mime wrapped': () => tr(`${wrap76('\n')}\n`),
+    'R7 tool_result wrapped 76 spaces': () => tr(wrap76(' ')),
+    'R8 tool_result text before data uri': () => tr(`see: data:application/pdf;base64,${B}`),
+    'R9 tool_result leading ws data uri': () => tr(`  \n data:application/pdf;base64,${B}`),
+    'R10 tool_result parts chunks': () => tr(chunks.map((c) => ({ type: 'text', text: c }))),
+    'R11 many tool results': () => [CC_URL, jsonInit({ messages: [{ role: 'user', content: chunks.map((c) => ({ type: 'tool_result', tool_use_id: 't', content: c })) }] })],
+    'R12 gemini parts chunks': () => [G3_URL, g3Call({ functionResponse: { name: 'r', response: {}, parts: chunks.map((c) => ({ text: c })) } })],
+    'R13 codex fco prefix': () => codex(`cat out:\n${B}`),
+    'R14 chat tool role prefix': () => toolRole(`out:\n${B}`),
+    'R15 codex fco pure': () => codex(B),
+    'R16 chat tool role pure': () => toolRole(B),
+    'R17 hex prefix': () => tr(`hex:\n${HEX}`),
+    'R18 hex pure': () => tr(HEX)
+  };
+  for (const [name, build] of Object.entries(C6)) {
+    test(`fail-open round 3b (c6): ${name} is HELD, on a verdict timeout and on a relay outage`, async () => {
+      const [url, init] = build();
+      for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+        const r = await foRun(outage, url, init);
+        assert.equal(r.outcome, 'BLOCKED', `${oname}: ${name}`);
+        assert.equal(r.w.netCalls.length, 0, `${oname}: ${name}`);
+        assert.equal(r.w.unchecked.length, 0, `${oname}: ${name}`);
+        assertBlocked(r.w.logs, 'fail-open-file-held', 'unavailable');
+      }
+    });
+  }
+}
+
+// ── round 3c of the zh#370 review: a wrapped file inside line decorations ──
+// Port of the Rust `a_wrapped_file_inside_line_decorations_is_held`.
+
+test('releasableUnderFailOpen: a wrapped file inside line decorations is held (a_wrapped_file_inside_line_decorations_is_held)', () => {
+  const b64 = 'JVBERi0xLjcK5+7nYV7zXzDkm0guFcrnUAcgHhJhew/tp+Fkd5b/AivqjtAqgqF1kw8jN8'.repeat(100);
+  const lines = b64.match(/.{1,76}/g);
+  const tr = (c) => anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: c }] }] });
+  const each = (f, sep) => lines.map((l, i) => f(i, l)).join(sep);
+  const pad6 = (n) => String(n).padStart(6, ' ');
+  for (const [name, text] of [
+    ['Read arrows', each((i, l) => `${pad6(i + 1)}→${l}`, '\n')],
+    ['cat -n tabs', each((i, l) => `${pad6(i + 1)}\t${l}`, '\n')],
+    ['N\\t unpadded', each((i, l) => `${i + 1}\t${l}`, '\n')],
+    ['short line every 50', each((i, l) => (i % 50 === 49 ? `${l}\nok` : l), '\n')],
+    ['# after every line', each((_, l) => `${l}\n#`, '\n')],
+    ['blank lines', each((_, l) => `${l}\n`, '\n')],
+    ['literal backslash-n', lines.join('\\n')],
+    ['short token per line', each((_, l) => `${l} x`, '\n')],
+    ['quoted lines', each((_, l) => `"${l}",`, '\n')],
+    ['single quoted', each((_, l) => `'${l}'`, '\n')],
+    ['pipe table', each((_, l) => `| ${l} |`, '\n')],
+    ['Read arrows + quotes', each((i, l) => `${pad6(i + 1)}→  "${l}",`, '\n')],
+    ['CRLF + numbers', each((i, l) => `${i + 1}\t${l}\r`, '\n')]
+  ]) {
+    assert.ok(!releasable(tr(text)), `${name} must be held`);
+  }
+  const read = (body) => body.map((l, i) => `${pad6(i + 1)}→${l}`).join('\n');
+  const h = (i) => `${String(i).padStart(86, '0')}==`;
+  const range = (n) => [...Array(n).keys()];
+  const lockJson = range(2000).flatMap((i) => [`    "node_modules/p${i}": {`,
+    `      "resolved": "https://registry.npmjs.org/p${i}/-/p${i}-1.0.0.tgz",`, `      "integrity": "sha512-${h(i)}",`, '    },']);
+  const yarn = range(2000).flatMap((i) => [`p${i}@^1.0.0:`, '  version "1.0.0"', `  integrity sha512-${h(i)}`, '']);
+  const gosum = range(3000).map((i) => `github.com/org/module${i} v1.${i}.0 h1:${h(i).slice(0, 43)}=`);
+  const cargo = range(2000).flatMap((i) => ['[[package]]', `name = "crate${i}"`, `checksum = "${i.toString(16).padStart(64, '0')}"`, '']);
+  const cert = range(40).map((i) => `MIIH${String(i).padStart(60, '0')}`);
+  const pem = range(6).flatMap((n) => [`# CA ${n}`, '-----BEGIN CERTIFICATE-----', ...cert, '-----END CERTIFICATE-----']);
+  const map = [`{"version":3,"mappings":"${'AAAA,SAASA,CAAC;'.repeat(5000)}","sources":["a.js"]}`];
+  const min = ['!function(e){var t={};function n(r){if(t[r])return t[r].exports}}(this);'.repeat(2000)];
+  for (const [name, body] of [['package-lock', lockJson], ['yarn.lock', yarn], ['go.sum', gosum], ['Cargo.lock', cargo],
+    ['PEM chain', pem], ['sourcemap', map], ['minified', min]]) {
+    assert.ok(releasable(tr(read(body))), `${name} (Read) must go out`);
+    assert.ok(releasable(tr(body.join('\n'))), `${name} (raw) must go out`);
+  }
+  const encLines = (n, f) => Array(n).fill(f('Q'.repeat(64))).join('\n');
+  assert.ok(releasable(tr(encLines(63, (l) => l))));
+  assert.ok(!releasable(tr(encLines(64, (l) => `"${l}"`))));
+  assert.ok(releasable(tr(encLines(63, (l) => `"${l}"`))));
+  assert.ok(!releasable(tr(encLines(64, (l) => `${l} abcd`))));
+  assert.ok(releasable(tr(encLines(64, (l) => `${l} abcde`))));
+  assert.ok(!releasable(tr(encLines(64, (l) => `${l} ab cd`))));
+  const withEvery = (filler) => range(64).map(() => `${'Q'.repeat(64)}\n${filler}`).join('\n');
+  assert.ok(!releasable(tr(withEvery('####'))));
+  assert.ok(releasable(tr(withEvery('#####'))));
+  assert.ok(releasable(tr(withEvery('Q Q Q Q Q'))));
+  // Non-ASCII counts in UTF-8 bytes, as in Rust: 'é' is 2, '→' is 3.
+  assert.ok(!releasable(tr(withEvery('##é'))));
+  assert.ok(releasable(tr(withEvery('###é'))));
+  assert.ok(releasable(tr(withEvery('##\u2192'))));
+  assert.ok(!releasable(tr(withEvery('#\u2192'))));
+  assert.ok(releasable(tr(encLines(64, (l) => `${l};`))));
+  assert.ok(releasable(tr(encLines(64, (l) => `${l}é`))));
+  assert.ok(releasable(tr(encLines(64, (l) => `${l}→`))), 'a 3-byte character counts as 3 other bytes');
+  assert.ok(releasable(tr(encLines(64, (l) => `12345 ${l}`))));
+  assert.ok(releasable(tr(encLines(64, (l) => `x1234\t${l}`))));
+  assert.ok(!releasable(tr(encLines(64, (l) => `x123\t${l}`))));
+  assert.ok(!releasable(tr(encLines(64, (l) => `12\t ${l}`))));
+  const armoured = range(64).map((i) => (i % 32 === 31 ? '  -----END X-----' : 'Q'.repeat(64))).join('\n');
+  assert.ok(releasable(tr(armoured)));
+  assert.ok(!releasable(tr(encLines(64, (l) => `${l}\\`))));
+  const q = 'Q'.repeat(64);
+  assert.ok(!releasable(tr(Array(64).fill(q).join('\\n####\\n'))));
+  assert.ok(!releasable(tr(range(64).map((i) => `${10000 + i}\t${q}`).join('\n'))));
+  assert.ok(releasable(tr(encLines(64, (l) => `→${l}`))));
+  const quoted = (w, n) => Array(n).fill(`"${'Q'.repeat(w)}"`).join('\n');
+  assert.ok(!releasable(tr(quoted(16, 256))));
+  assert.ok(releasable(tr(quoted(15, 400))));
+  for (const armour of ['-----QQQQQQQQQQQQQQQQQQQQQQQQQQQQ', '   -----QQQQQQQQQQQQQQQQQQQQQQQQQQQQ']) {
+    const text = range(96).map((i) => (i % 48 === 47 ? armour : `"${q}"`)).join('\n');
+    assert.ok(releasable(tr(text)), armour);
+  }
+});
+
+// The re-check's c7 repros that must hold, through the real fetch hook.
+{
+  const B = 'JVBERi0xLjcK5+7nYV7zXzDkm0guFcrnUAcgHhJhew/tp+Fkd5b/AivqjtAqgqF1kw8jN8'.repeat(11400);
+  const L = B.match(/.{1,76}/g);
+  const pad6 = (n) => String(n).padStart(6, ' ');
+  const C7 = {
+    'S01 short line every 50 lines': () => L.map((l, i) => (i % 50 === 49 ? `${l}\nok` : l)).join('\n'),
+    'S02 short line after every line': () => L.map((l) => `${l}\n#`).join('\n'),
+    'S08 literal backslash-n': () => L.join('\\n'),
+    'S11 line numbers cat -n': () => L.map((l, i) => `${pad6(i + 1)}\t${l}`).join('\n'),
+    'S11b line numbers Read': () => L.map((l, i) => `${pad6(i + 1)}→${l}`).join('\n'),
+    'S12 short token then line': () => L.map((l) => `${l} x`).join('\n'),
+    'S13 quoted lines json': () => L.map((l) => `"${l}",`).join('\n'),
+    'S14 pipe table': () => L.map((l) => `| ${l} |`).join('\n')
+  };
+  for (const [name, build] of Object.entries(C7)) {
+    test(`fail-open round 3c (c7): ${name} is HELD, on a verdict timeout and on a relay outage`, async () => {
+      const init = jsonInit({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: build() }] }] });
+      for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+        const r = await foRun(outage, CC_URL, init);
+        assert.equal(r.outcome, 'BLOCKED', `${oname}: ${name}`);
+        assert.equal(r.w.netCalls.length, 0, `${oname}: ${name}`);
+        assert.equal(r.w.unchecked.length, 0, `${oname}: ${name}`);
+        assertBlocked(r.w.logs, 'fail-open-file-held', 'unavailable');
+      }
+    });
+  }
+}
