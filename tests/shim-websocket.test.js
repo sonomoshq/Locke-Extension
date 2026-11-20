@@ -336,16 +336,26 @@ test('guard unreachable (no-bridge relay code) and no fail-open window: refused 
   assert.notEqual(ws.sonomosBlockReason, 'internal-error');
 });
 
-test('guard unreachable inside the user\'s fail-open window: the frame is sent and tallied unchecked', async () => {
-  const { WebSocket, unchecked } = makeWorld(() => ({ ok: false, code: 'no-bridge' }), {
-    config: { failOpenActive: true, failOpenUntilMs: Date.now() + 60_000 }
-  });
+test('guard unreachable inside the user\'s fail-open window: a known chat frame is sent and tallied; any other frame is held (zh#370 default deny)', async () => {
+  const config = { failOpenActive: true, failOpenUntilMs: Date.now() + 60_000 };
+  // Default deny: only the Codex Responses frame is a recognised chat frame.
+  const codex = makeWorld(() => ({ ok: false, code: 'no-bridge' }), { page: 'https://chatgpt.com/', config });
+  const ok = new codex.WebSocket('wss://chatgpt.com/backend-api/codex/responses');
+  const frame = JSON.stringify({ type: 'response.create', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }] });
+  ok.send(frame);
+  await waitFor(() => ok.wire.length === 1);
+  assert.deepEqual(ok.wire, [frame]);
+  assert.equal(ok.closes.length, 0);
+  assert.equal(codex.unchecked.length, 1);
+
+  // Grok's frames are not in the rule: held, nothing tallied.
+  const { WebSocket, unchecked } = makeWorld(() => ({ ok: false, code: 'no-bridge' }), { config });
   const ws = new WebSocket(GROK_URL);
   ws.send('hello');
-  await waitFor(() => ws.wire.length === 1);
-  assert.deepEqual(ws.wire, ['hello']);
-  assert.equal(ws.closes.length, 0);
-  assert.equal(unchecked.length, 1);
+  await waitFor(() => ws.closes.length === 1);
+  assert.deepEqual(ws.wire, []);
+  assert.equal(ws.sonomosBlockReason, 'fail-open-file-held');
+  assert.equal(unchecked.length, 0);
 });
 
 // ── consent ──────────────────────────────────────────────────────────────
