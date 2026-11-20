@@ -6850,7 +6850,7 @@ test('releasableUnderFailOpen: an encoded run anywhere in tool output is held (a
     'the quick brown fox jumps over the lazy dog '.repeat(200),
     `integrity sha512-${'QUJD'.repeat(20)} resolved https://x\n`.repeat(300),
     `${'QUJD'.repeat(500)} ${'QUJD'.repeat(400)}`.replaceAll('QUJDQUJD', 'QUJD QUJD'),
-    `${'QUJD'.repeat(800)}\nend\n${'QUJD'.repeat(800)}`
+    `${'QUJD'.repeat(800)}\nthe end\n${'QUJD'.repeat(800)}`
   ];
   ok.forEach((text, i) => assert.ok(releasable(tr(text)), `ok case ${i} must go out`));
   const exact = 'Q'.repeat(MAX_OPAQUE_STRING);
@@ -6905,6 +6905,117 @@ test('releasableUnderFailOpen: an encoded run anywhere in tool output is held (a
       const [url, init] = build();
       for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
         const r = await foRun(outage, url, init);
+        assert.equal(r.outcome, 'BLOCKED', `${oname}: ${name}`);
+        assert.equal(r.w.netCalls.length, 0, `${oname}: ${name}`);
+        assert.equal(r.w.unchecked.length, 0, `${oname}: ${name}`);
+        assertBlocked(r.w.logs, 'fail-open-file-held', 'unavailable');
+      }
+    });
+  }
+}
+
+// ── round 3c of the zh#370 review: a wrapped file inside line decorations ──
+// Port of the Rust `a_wrapped_file_inside_line_decorations_is_held`.
+
+test('releasableUnderFailOpen: a wrapped file inside line decorations is held (a_wrapped_file_inside_line_decorations_is_held)', () => {
+  const b64 = 'JVBERi0xLjcK5+7nYV7zXzDkm0guFcrnUAcgHhJhew/tp+Fkd5b/AivqjtAqgqF1kw8jN8'.repeat(100);
+  const lines = b64.match(/.{1,76}/g);
+  const tr = (c) => anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: c }] }] });
+  const each = (f, sep) => lines.map((l, i) => f(i, l)).join(sep);
+  const pad6 = (n) => String(n).padStart(6, ' ');
+  for (const [name, text] of [
+    ['Read arrows', each((i, l) => `${pad6(i + 1)}→${l}`, '\n')],
+    ['cat -n tabs', each((i, l) => `${pad6(i + 1)}\t${l}`, '\n')],
+    ['N\\t unpadded', each((i, l) => `${i + 1}\t${l}`, '\n')],
+    ['short line every 50', each((i, l) => (i % 50 === 49 ? `${l}\nok` : l), '\n')],
+    ['# after every line', each((_, l) => `${l}\n#`, '\n')],
+    ['blank lines', each((_, l) => `${l}\n`, '\n')],
+    ['literal backslash-n', lines.join('\\n')],
+    ['short token per line', each((_, l) => `${l} x`, '\n')],
+    ['quoted lines', each((_, l) => `"${l}",`, '\n')],
+    ['single quoted', each((_, l) => `'${l}'`, '\n')],
+    ['pipe table', each((_, l) => `| ${l} |`, '\n')],
+    ['Read arrows + quotes', each((i, l) => `${pad6(i + 1)}→  "${l}",`, '\n')],
+    ['CRLF + numbers', each((i, l) => `${i + 1}\t${l}\r`, '\n')]
+  ]) {
+    assert.ok(!releasable(tr(text)), `${name} must be held`);
+  }
+  const read = (body) => body.map((l, i) => `${pad6(i + 1)}→${l}`).join('\n');
+  const h = (i) => `${String(i).padStart(86, '0')}==`;
+  const range = (n) => [...Array(n).keys()];
+  const lockJson = range(2000).flatMap((i) => [`    "node_modules/p${i}": {`,
+    `      "resolved": "https://registry.npmjs.org/p${i}/-/p${i}-1.0.0.tgz",`, `      "integrity": "sha512-${h(i)}",`, '    },']);
+  const yarn = range(2000).flatMap((i) => [`p${i}@^1.0.0:`, '  version "1.0.0"', `  integrity sha512-${h(i)}`, '']);
+  const gosum = range(3000).map((i) => `github.com/org/module${i} v1.${i}.0 h1:${h(i).slice(0, 43)}=`);
+  const cargo = range(2000).flatMap((i) => ['[[package]]', `name = "crate${i}"`, `checksum = "${i.toString(16).padStart(64, '0')}"`, '']);
+  const cert = range(40).map((i) => `MIIH${String(i).padStart(60, '0')}`);
+  const pem = range(6).flatMap((n) => [`# CA ${n}`, '-----BEGIN CERTIFICATE-----', ...cert, '-----END CERTIFICATE-----']);
+  const map = [`{"version":3,"mappings":"${'AAAA,SAASA,CAAC;'.repeat(5000)}","sources":["a.js"]}`];
+  const min = ['!function(e){var t={};function n(r){if(t[r])return t[r].exports}}(this);'.repeat(2000)];
+  for (const [name, body] of [['package-lock', lockJson], ['yarn.lock', yarn], ['go.sum', gosum], ['Cargo.lock', cargo],
+    ['PEM chain', pem], ['sourcemap', map], ['minified', min]]) {
+    assert.ok(releasable(tr(read(body))), `${name} (Read) must go out`);
+    assert.ok(releasable(tr(body.join('\n'))), `${name} (raw) must go out`);
+  }
+  const encLines = (n, f) => Array(n).fill(f('Q'.repeat(64))).join('\n');
+  assert.ok(releasable(tr(encLines(63, (l) => l))));
+  assert.ok(!releasable(tr(encLines(64, (l) => `"${l}"`))));
+  assert.ok(releasable(tr(encLines(63, (l) => `"${l}"`))));
+  assert.ok(!releasable(tr(encLines(64, (l) => `${l} abcd`))));
+  assert.ok(releasable(tr(encLines(64, (l) => `${l} abcde`))));
+  assert.ok(!releasable(tr(encLines(64, (l) => `${l} ab cd`))));
+  const withEvery = (filler) => range(64).map(() => `${'Q'.repeat(64)}\n${filler}`).join('\n');
+  assert.ok(!releasable(tr(withEvery('####'))));
+  assert.ok(releasable(tr(withEvery('#####'))));
+  assert.ok(releasable(tr(withEvery('Q Q Q Q Q'))));
+  // Non-ASCII counts in UTF-8 bytes, as in Rust: 'é' is 2, '→' is 3.
+  assert.ok(!releasable(tr(withEvery('##é'))));
+  assert.ok(releasable(tr(withEvery('###é'))));
+  assert.ok(releasable(tr(withEvery('##\u2192'))));
+  assert.ok(!releasable(tr(withEvery('#\u2192'))));
+  assert.ok(releasable(tr(encLines(64, (l) => `${l};`))));
+  assert.ok(releasable(tr(encLines(64, (l) => `${l}é`))));
+  assert.ok(releasable(tr(encLines(64, (l) => `${l}→`))), 'a 3-byte character counts as 3 other bytes');
+  assert.ok(releasable(tr(encLines(64, (l) => `12345 ${l}`))));
+  assert.ok(releasable(tr(encLines(64, (l) => `x1234\t${l}`))));
+  assert.ok(!releasable(tr(encLines(64, (l) => `x123\t${l}`))));
+  assert.ok(!releasable(tr(encLines(64, (l) => `12\t ${l}`))));
+  const armoured = range(64).map((i) => (i % 32 === 31 ? '  -----END X-----' : 'Q'.repeat(64))).join('\n');
+  assert.ok(releasable(tr(armoured)));
+  assert.ok(!releasable(tr(encLines(64, (l) => `${l}\\`))));
+  const q = 'Q'.repeat(64);
+  assert.ok(!releasable(tr(Array(64).fill(q).join('\\n####\\n'))));
+  assert.ok(!releasable(tr(range(64).map((i) => `${10000 + i}\t${q}`).join('\n'))));
+  assert.ok(releasable(tr(encLines(64, (l) => `→${l}`))));
+  const quoted = (w, n) => Array(n).fill(`"${'Q'.repeat(w)}"`).join('\n');
+  assert.ok(!releasable(tr(quoted(16, 256))));
+  assert.ok(releasable(tr(quoted(15, 400))));
+  for (const armour of ['-----QQQQQQQQQQQQQQQQQQQQQQQQQQQQ', '   -----QQQQQQQQQQQQQQQQQQQQQQQQQQQQ']) {
+    const text = range(96).map((i) => (i % 48 === 47 ? armour : `"${q}"`)).join('\n');
+    assert.ok(releasable(tr(text)), armour);
+  }
+});
+
+// The re-check's c7 repros that must hold, through the real fetch hook.
+{
+  const B = 'JVBERi0xLjcK5+7nYV7zXzDkm0guFcrnUAcgHhJhew/tp+Fkd5b/AivqjtAqgqF1kw8jN8'.repeat(11400);
+  const L = B.match(/.{1,76}/g);
+  const pad6 = (n) => String(n).padStart(6, ' ');
+  const C7 = {
+    'S01 short line every 50 lines': () => L.map((l, i) => (i % 50 === 49 ? `${l}\nok` : l)).join('\n'),
+    'S02 short line after every line': () => L.map((l) => `${l}\n#`).join('\n'),
+    'S08 literal backslash-n': () => L.join('\\n'),
+    'S11 line numbers cat -n': () => L.map((l, i) => `${pad6(i + 1)}\t${l}`).join('\n'),
+    'S11b line numbers Read': () => L.map((l, i) => `${pad6(i + 1)}→${l}`).join('\n'),
+    'S12 short token then line': () => L.map((l) => `${l} x`).join('\n'),
+    'S13 quoted lines json': () => L.map((l) => `"${l}",`).join('\n'),
+    'S14 pipe table': () => L.map((l) => `| ${l} |`).join('\n')
+  };
+  for (const [name, build] of Object.entries(C7)) {
+    test(`fail-open round 3c (c7): ${name} is HELD, on a verdict timeout and on a relay outage`, async () => {
+      const init = jsonInit({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: build() }] }] });
+      for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+        const r = await foRun(outage, CC_URL, init);
         assert.equal(r.outcome, 'BLOCKED', `${oname}: ${name}`);
         assert.equal(r.w.netCalls.length, 0, `${oname}: ${name}`);
         assert.equal(r.w.unchecked.length, 0, `${oname}: ${name}`);

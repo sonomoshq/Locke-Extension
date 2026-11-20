@@ -1808,7 +1808,55 @@
     // (wrapped output) continues it; any other character ends it; a line of
     // MIN_WRAPPED_LINE or more carries it on; the run carries across outputs.
     const MIN_WRAPPED_LINE = 16;
-    const encRun = { run: 0, open: false, token: 0, longest: 0 };
+    const MAX_LINE_SHORT = 4;
+    const encRun = { run: 0, open: false, token: 0, lines: 0, longest: 0 };
+    // The line view (Rust `EncodedRun::line`): lines split at a newline or a
+    // literal backslash-n; a leading line number (spaces, digits, then a tab
+    // or an arrow) dropped; quotes, commas, pipes and backslashes are
+    // wrappers. An encoded line adds to the line run, a short line with no
+    // encoded token leaves it, anything else (or PEM armour) ends it.
+    const isWrapper = (c) => c === 32 || c === 9 || c === 13 || c === 34 || c === 39 || c === 44 ||
+      c === 124 || c === 92;
+    const isTrimSpace = (c) => c === 32 || c === 9 || c === 10 || c === 12 || c === 13;
+    const encLine = (s, from, to) => {
+      let i = from;
+      while (i < to && s.charCodeAt(i) === 32) i++;
+      let j = i;
+      while (j < to && s.charCodeAt(j) >= 48 && s.charCodeAt(j) <= 57) j++;
+      if (j > i && j < to && (s.charCodeAt(j) === 9 || s.charCodeAt(j) === 0x2192)) from = j + 1;
+      while (from < to && isTrimSpace(s.charCodeAt(from))) from++;
+      let encoded = 0, short = 0, other = 0, token = 0;
+      const end = () => {
+        if (token >= MIN_WRAPPED_LINE) encoded += token; else short += token;
+        token = 0;
+      };
+      for (let k = from; k < to; k++) {
+        const c = s.charCodeAt(k);
+        if (isB64(c)) { token++; continue; }
+        end();
+        // Rust counts bytes: a non-ASCII character is 2-4 'other' bytes.
+        if (!isWrapper(c)) other += c < 0x80 ? 1 : c < 0x800 || (c >= 0xD800 && c <= 0xDFFF) ? 2 : 3;
+      }
+      end();
+      if (s.startsWith('-----', from) && from + 5 <= to) {
+        encRun.lines = 0;
+      } else if (encoded > 0 && other === 0 && short <= MAX_LINE_SHORT) {
+        encRun.lines += encoded;
+        if (encRun.lines > encRun.longest) encRun.longest = encRun.lines;
+      } else if (encoded > 0 || other + short > MAX_LINE_SHORT) {
+        encRun.lines = 0;
+      }
+    };
+    const encLines = (s) => {
+      let start = 0;
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c === 10) { encLine(s, start, i); start = i + 1; } else if (c === 92 && s.charCodeAt(i + 1) === 110) {
+          encLine(s, start, i); i++; start = i + 1;
+        }
+      }
+      encLine(s, start, s.length);
+    };
     const endToken = () => {
       const len = encRun.token;
       encRun.token = 0;
@@ -1821,6 +1869,7 @@
     const isB64 = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ||
       c === 43 || c === 47 || c === 45 || c === 95 || c === 61;
     const toolTextOk = (s) => {
+      encLines(s);
       for (let i = 0; i < s.length; i++) {
         const c = s.charCodeAt(i);
         if (isB64(c)) {
