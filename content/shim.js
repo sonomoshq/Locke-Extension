@@ -1803,7 +1803,36 @@
     const authored = (v) => within(authoredB, MAX_AUTHORED, () => authoredWalk(v));
     // A tool's output text (zh#370 round 3): free text, but no data URI and no
     // bare base64 run of MAX_OPAQUE_STRING or more — authored()'s string checks.
-    const toolTextOk = (s) => !dataUri(s) && !base64Run(s, MAX_OPAQUE_STRING);
+    // EncodedRun (Rust): one linear scan over every tool output in the
+    // request for the longest base64/hex run anywhere. Whitespace inside a run
+    // (wrapped output) continues it; any other character ends it; a line of
+    // MIN_WRAPPED_LINE or more carries it on; the run carries across outputs.
+    const MIN_WRAPPED_LINE = 16;
+    const encRun = { run: 0, open: false, token: 0, longest: 0 };
+    const endToken = () => {
+      const len = encRun.token;
+      encRun.token = 0;
+      if (len === 0) return;
+      if (!encRun.open) encRun.run = 0;
+      encRun.run += len;
+      encRun.open = len >= MIN_WRAPPED_LINE;
+      if (encRun.run > encRun.longest) encRun.longest = encRun.run;
+    };
+    const isB64 = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ||
+      c === 43 || c === 47 || c === 45 || c === 95 || c === 61;
+    const toolTextOk = (s) => {
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (isB64(c)) {
+          encRun.token++;
+        } else {
+          endToken();
+          if (!(c === 32 || c === 9 || c === 13 || c === 10)) encRun.open = false;
+        }
+      }
+      endToken();
+      return encRun.longest < MAX_OPAQUE_STRING;
+    };
     const toolText = (v) => typeof v === 'string' && toolTextOk(v);
     // A provider-minted token (signature, encrypted reasoning): a string, not past MAX_MODEL_TOKEN.
     const modelToken = (v) => v === undefined || v === null || (typeof v === 'string' && utf8Len(v) <= MAX_MODEL_TOKEN);
