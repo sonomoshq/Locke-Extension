@@ -23,6 +23,11 @@ read, beacons, deferred fetches and synchronous XHR) is held with the reason
 pass: an `allow` or `redact` receipt marked `unchecked` is re-checked against
 the same rule and held when it is not a known chat turn, with the window on or
 off (the user's pause is not re-judged).
+The rule also refuses a duplicate JSON key anywhere, an attachment-looking or
+base64 query string, non-ASCII keys, inline-data and `{mimeType, data}` blobs
+inside tool inputs, tool definitions and Gemini function calls, and bounds
+each message's settings separately; Codex tool outputs carrying
+`internal_chat_message_metadata_passthrough` are no longer held.
 
 **Added — Google AI Mode from the search bar is screened.** Typing a prompt
 into Google's search box in AI Mode and pressing enter loads
