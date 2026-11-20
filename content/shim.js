@@ -1801,6 +1801,10 @@
       return take(authoredB, 8);
     };
     const authored = (v) => within(authoredB, MAX_AUTHORED, () => authoredWalk(v));
+    // A tool's output text (zh#370 round 3): free text, but no data URI and no
+    // bare base64 run of MAX_OPAQUE_STRING or more — authored()'s string checks.
+    const toolTextOk = (s) => !dataUri(s) && !base64Run(s, MAX_OPAQUE_STRING);
+    const toolText = (v) => typeof v === 'string' && toolTextOk(v);
     // A provider-minted token (signature, encrypted reasoning): a string, not past MAX_MODEL_TOKEN.
     const modelToken = (v) => v === undefined || v === null || (typeof v === 'string' && utf8Len(v) <= MAX_MODEL_TOKEN);
 
@@ -1833,8 +1837,8 @@
         case 'tool_result': {
           if (!onlyKeys(b, ['type', 'tool_use_id', 'content', 'is_error', 'cache_control'])) return false;
           const c = get(b, 'content');
-          const contentOk = c === undefined || typeof c === 'string' ||
-            (Array.isArray(c) && c.every((p) => textBlock(p) || toolReference(p)));
+          const contentOk = c === undefined || (typeof c === 'string' && toolTextOk(c)) ||
+            (Array.isArray(c) && c.every((p) => (textBlock(p) && toolText(get(p, 'text'))) || toolReference(p)));
           return contentOk && restOpaque(b, ['content']);
         }
         default: return false;
@@ -1994,7 +1998,14 @@
         const c = get(m, 'content');
         const contentOk = c === undefined || c === null || typeof c === 'string' ||
           (Array.isArray(c) && c.every(chatPart));
-        return contentOk && restOpaque(m, ['content', 'tool_calls']) && noneOr(get(m, 'tool_calls'), toolCallsOk);
+        // A tool-role message is a tool's output.
+        const role = get(m, 'role');
+        const toolOk = !(role === 'tool' || role === 'function') ||
+          (typeof c === 'string' ? toolTextOk(c)
+            : Array.isArray(c) ? c.every((p) => get(p, 'type') !== 'text' || toolText(get(p, 'text')))
+              : true);
+        return contentOk && restOpaque(m, ['content', 'tool_calls']) && noneOr(get(m, 'tool_calls'), toolCallsOk) &&
+          toolOk;
       })) && onlyKeys(o, CHAT_PARAMS) &&
         ['tools', 'functions', 'tool_choice'].every((k) => noneOr(get(o, k), authored)) &&
         restOpaque(o, ['messages', 'tools', 'functions', 'tool_choice']);
@@ -2010,6 +2021,12 @@
         return (t === 'input_text' || t === 'output_text' || t === 'text' || t === 'summary_text') &&
           isStr(get(p, 'text')) && noneOr(get(p, 'annotations'), opaque) && noneOr(get(p, 'logprobs'), opaque);
       });
+    };
+    // inputTextParts for a tool's output: each text is toolTextOk.
+    const outputTextParts = (v) => {
+      if (typeof v === 'string') return toolTextOk(v);
+      if (Array.isArray(v)) return inputTextParts(v) && v.every((p) => toolText(get(p, 'text')));
+      return false;
     };
     const responseItem = (o) => item(() => {
       if (!isObj(o)) return false;
@@ -2038,7 +2055,7 @@
         case 'local_shell_call_output':
           return onlyKeys(o, ['type', 'id', 'call_id', 'output', 'status',
             'internal_chat_message_metadata_passthrough']) &&
-            inputTextParts(get(o, 'output')) && restOpaque(o, ['output']);
+            outputTextParts(get(o, 'output')) && restOpaque(o, ['output']);
         case 'additional_tools':
           return onlyKeys(o, ['type', 'id', 'role', 'tools']) && noneOr(get(o, 'tools'), authored) &&
             restOpaque(o, ['tools']);
@@ -2076,7 +2093,7 @@
       isStr(get(f, 'name')) &&
       noneOr(get(f, 'response'), (r) => isObj(r) && authored(r)) &&
       noneOr(get(f, 'parts'), (parts) => Array.isArray(parts) &&
-        parts.every((p) => isObj(p) && onlyKeys(p, ['text']) && isStr(get(p, 'text')))) &&
+        parts.every((p) => isObj(p) && onlyKeys(p, ['text']) && toolText(get(p, 'text')))) &&
       restOpaque(f, ['name', 'response', 'parts']));
     const geminiApi = (o) => {
       if (!isObj(o)) return false;
