@@ -4684,26 +4684,199 @@ test('fail-open: NOT governed - consent, malformed verdicts and guard decisions 
   }
 });
 
-test('fail-open: oversize, stream and unreadable bodies send unscreened in an open window, block otherwise', async () => {
+test('fail-open: oversize, stream and unreadable bodies are HELD in an open window (zh#370), and block as before otherwise', async () => {
   const bodies = [
     BIG,
     new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1])); c.close(); } }),
     { toString() { throw new Error('nope'); } }
   ];
   for (const body of bodies) {
+    // Unreadable, so it cannot be proven file-free: held even under fail-open.
     const open = makeWorld(() => allowVerdict);
     open.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
-    await open.sandbox.fetch(AI_URL, { method: 'POST', body, duplex: 'half' });
-    assert.equal(open.netCalls.length, 1);
-    assert.equal(open.unchecked.length, 1);
-    assert.match(open.unchecked[0], /^uncapturable-/);
+    await assert.rejects(open.sandbox.fetch(AI_URL, { method: 'POST', body, duplex: 'half' }), blockedError);
+    assert.equal(open.netCalls.length, 0);
+    assert.equal(open.unchecked.length, 0, 'nothing was sent unchecked');
+    const line = assertBlocked(open.logs, 'fail-open-file-held', 'unavailable');
+    assert.match(line, /\bcause=uncapturable-/);
 
     const expired = makeWorld(() => allowVerdict);
     expired.deliver({ type: 'SONOMOS_CONFIG', config: expiredWindow() });
     await assert.rejects(expired.sandbox.fetch(AI_URL, { method: 'POST', body, duplex: 'half' }), blockedError);
     assert.equal(expired.netCalls.length, 0);
     assert.equal(expired.unchecked.length, 0);
+    assert.ok(!findLine(expired.logs, 'fail-open-file-held'), 'window closed: the old reason, not the new one');
   }
+});
+
+// ── fail-open never sends a possible file (zh#370) ──────────────────────
+
+const multipartFile = () => imageForm();
+const dataUrlJson = () => JSON.stringify({ q: 'look', image: 'data:image/png;base64,iVBORw0KGgo=' });
+const FILE_BODIES = { multipart: multipartFile, 'json data-url': dataUrlJson };
+const TEXT_BODY = () => '{"q":"just a prompt"}';
+
+// Each outage, as the world options that produce it.
+const OUTAGES = {
+  'verdict timeout': { onCapture: () => new Promise(() => {}), cause: 'verdict-timeout', closedReason: 'verdict-timeout', config: { enforceTimeoutMs: 1000 } },
+  'channel failed': { onCapture: () => allowVerdict, globals: { postMessage: () => { throw new Error('channel gone'); } }, cause: 'verdict-channel-failed', closedReason: 'verdict-channel-failed', tallyUnobservable: true },
+  'verdict missing': { onCapture: () => null, cause: 'verdict-missing', closedReason: 'verdict-missing' },
+  'relay no-bridge': { onCapture: () => ({ ok: false, code: 'no-bridge' }), cause: 'relay-no-bridge', closedReason: 'connector-not-started' },
+  'relay bridge-error': { onCapture: () => ({ ok: false, code: 'bridge-error' }), cause: 'relay-bridge-error', closedReason: 'native-call-failed' }
+};
+
+function outageWorld(outage, window) {
+  const w = makeWorld(outage.onCapture, outage.globals || {});
+  w.deliver({ type: 'SONOMOS_CONFIG', config: { ...(outage.config || {}), ...(window || {}) } });
+  return w;
+}
+
+test('fail-open: a request that may carry a file is HELD on every outage, with the file reason', async () => {
+  for (const [outName, outage] of Object.entries(OUTAGES)) {
+    for (const [bodyName, mk] of Object.entries(FILE_BODIES)) {
+      const w = outageWorld(outage, openWindow());
+      await assert.rejects(w.sandbox.fetch(AI_URL, { method: 'POST', body: mk() }), blockedError, `${outName} / ${bodyName}`);
+      assert.equal(w.netCalls.length, 0, `${outName} / ${bodyName}: nothing sent`);
+      assert.equal(w.unchecked.length, 0, `${outName} / ${bodyName}: not an unchecked send`);
+      const line = assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
+      assert.match(line, new RegExp(`\\bcause=${outage.cause}\\b`), outName);
+      assert.ok(!findLine(w.logs, 'unchecked-fail-open'), outName);
+    }
+  }
+});
+
+test('fail-open: a plain-text prompt still fails open exactly as before, tallied', async () => {
+  for (const [outName, outage] of Object.entries(OUTAGES)) {
+    const w = outageWorld(outage, openWindow());
+    await w.sandbox.fetch(AI_URL, { method: 'POST', body: TEXT_BODY() });
+    assert.equal(w.netCalls.length, 1, outName);
+    // A dead channel cannot carry the tally message either; the log line proves it.
+    if (!outage.tallyUnobservable) assert.deepEqual(w.unchecked, [outage.cause], outName);
+    assertReason(w.logs, 'unchecked-fail-open', 'warn');
+    assert.ok(!findLine(w.logs, 'fail-open-file-held'), outName);
+  }
+});
+
+test('fail-open OFF: file and text requests block on every outage with the same reasons as before', async () => {
+  for (const [outName, outage] of Object.entries(OUTAGES)) {
+    for (const mk of [multipartFile, dataUrlJson, TEXT_BODY]) {
+      const w = outageWorld(outage, null);
+      await assert.rejects(w.sandbox.fetch(AI_URL, { method: 'POST', body: mk() }), blockedError, outName);
+      assert.equal(w.netCalls.length, 0, outName);
+      assert.equal(w.unchecked.length, 0, outName);
+      assertBlocked(w.logs, outage.closedReason, 'unavailable');
+      assert.ok(!findLine(w.logs, 'fail-open-file-held'), outName);
+    }
+  }
+});
+
+test('fail-open: the host\'s file-held receipt gets the file sentence; an old host\'s infrastructure block still blocks', async () => {
+  const held = 'Locke could not screen this request and it may carry a file — held back (files are never sent unchecked, even under fail-open)';
+  const w = makeWorld(() => ({ ok: true, receipt: { decision: 'block', blockCause: 'infrastructure', reason: held, redactedCount: 0, unchecked: false } }));
+  w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  await assert.rejects(w.sandbox.fetch(AI_URL, { method: 'POST', body: multipartFile() }),
+    (e) => blockedError(e) && /may include a file/.test(e.message));
+  assert.equal(w.netCalls.length, 0);
+  assert.equal(w.unchecked.length, 0);
+  assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
+
+  // An older host answers a generic infrastructure block: still a block.
+  const old = makeWorld(() => ({ ok: true, receipt: { decision: 'block', blockCause: 'infrastructure', reason: 'screening unavailable' } }));
+  old.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  await assert.rejects(old.sandbox.fetch(AI_URL, { method: 'POST', body: multipartFile() }), blockedError);
+  assert.equal(old.netCalls.length, 0);
+  assertBlocked(old.logs, 'screening-unavailable', 'unavailable');
+
+  // And a host that sends the reason as a relay error code never opens the window.
+  const code = makeWorld(() => ({ ok: false, code: 'fail-open-file-held' }));
+  code.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  await assert.rejects(code.sandbox.fetch(AI_URL, { method: 'POST', body: TEXT_BODY() }), blockedError);
+  assert.equal(code.netCalls.length, 0);
+  assert.equal(code.unchecked.length, 0);
+});
+
+test('fail-open: an uncapturable async XHR body is held; a sync XHR is held; closed window keeps the old reasons', async () => {
+  for (const open of [true, false]) {
+    const w = makeXhrWorld(() => allowVerdict);
+    if (open) w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+    const a = new w.sandbox.XMLHttpRequest();
+    a.open('POST', 'https://chat.openai.com/api/chat', true);
+    a.send(BIG);
+    await waitFor(() => a.aborted);
+    assert.deepEqual(a.sent, []);
+    assert.equal(a.sonomosBlockReason, open ? 'fail-open-file-held' : 'uncapturable-oversize');
+    const s = new w.sandbox.XMLHttpRequest();
+    s.open('POST', 'https://chat.openai.com/api/chat', false);
+    s.send('{"q":"hi"}');
+    assert.deepEqual(s.sent, []);
+    assert.equal(s.sonomosBlockReason, open ? 'fail-open-file-held' : 'uncapturable-sync-xhr');
+    assert.equal(w.unchecked.length, 0);
+  }
+});
+
+test('fail-open: a beacon and a deferred fetch are held, not sent', async () => {
+  const b = makeBeaconWorld();
+  b.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  assert.equal(b.sandbox.navigator.sendBeacon('https://chat.openai.com/ces/v1/t', '{"prompt":"x"}'), false);
+  assert.deepEqual(b.beacons, []);
+  assert.equal(b.unchecked.length, 0);
+  assertBlocked(b.logs, 'fail-open-file-held');
+
+  const f = makeFetchLaterWorld();
+  f.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  assert.throws(() => f.sandbox.fetchLater(AI_URL, { method: 'POST', body: '{"q":1}' }), blockedError);
+  assert.equal(f.laterCalls.length, 0);
+  assert.equal(f.unchecked.length, 0);
+  assertBlocked(f.logs, 'fail-open-file-held');
+});
+
+// ── mayCarryAFile: the cross-repo contract, vector by vector ────────────
+// The shim is a classic script, so the function is lifted out of its source
+// between the markers and evaluated on its own.
+const mayCarryAFile = (() => {
+  const m = /\/\/ <mayCarryAFile>\n([\s\S]*?)\/\/ <\/mayCarryAFile>/.exec(SHIM_SRC);
+  assert.ok(m, 'markers present');
+  return vm.runInNewContext(`${m[1]}; mayCarryAFile`, { TextDecoder });
+})();
+
+const rawReq = (headers, body) => Buffer.concat([
+  Buffer.from(`POST /x HTTP/1.1\r\nHost: h.example\r\n${headers ? headers + '\r\n' : ''}\r\n`),
+  Buffer.isBuffer(body) ? body : Buffer.from(body)
+]);
+const b64 = (n, c = 'A') => c.repeat(n);
+
+test('mayCarryAFile: plain text is false', () => {
+  assert.equal(mayCarryAFile(rawReq('content-type: application/json', '{"q":"hi"}')), false);
+  assert.equal(mayCarryAFile(rawReq('content-type: application/json', '')), false);
+  assert.equal(mayCarryAFile(rawReq('content-type: application/x-www-form-urlencoded', 'f.req=%5B%22hi%22%5D')), false);
+  assert.equal(mayCarryAFile(rawReq('', '{"q":"hi"}')), false, 'no content-type + UTF-8');
+});
+
+test('mayCarryAFile: files, encodings and opaque types are true', () => {
+  assert.equal(mayCarryAFile(rawReq('content-type: application/json', JSON.stringify({ data: b64(600) }))), true);
+  assert.equal(mayCarryAFile(rawReq('content-type: application/json', '{"i":"data:image/png;base64,AAAA"}')), true);
+  assert.equal(mayCarryAFile(rawReq('content-type: application/json', '{"i":"DATA:IMAGE/PNG;BASE64,AAAA"}')), true);
+  assert.equal(mayCarryAFile(rawReq('content-type: multipart/form-data; boundary=x', '--x--')), true);
+  assert.equal(mayCarryAFile(rawReq('content-type: application/octet-stream', 'abc')), true);
+  assert.equal(mayCarryAFile(rawReq('content-type: image/png', 'abc')), true);
+  assert.equal(mayCarryAFile(Buffer.from('POST /x HTTP/1.1\r\nHost: h\r\n')), true, 'no CRLFCRLF');
+  assert.equal(mayCarryAFile(rawReq('content-type: application/json\r\ncontent-encoding: gzip', '{"q":1}')), true);
+  assert.equal(mayCarryAFile(rawReq('content-type: application/json\r\ncontent-encoding: identity', '{"q":1}')), false);
+  assert.equal(mayCarryAFile(rawReq('', Buffer.from([0xff, 0xfe, 0x00, 0x01]))), true, 'no content-type + not UTF-8');
+});
+
+test('mayCarryAFile: the 512-byte run threshold', () => {
+  assert.equal(mayCarryAFile(rawReq('content-type: text/plain', b64(512))), true);
+  assert.equal(mayCarryAFile(rawReq('content-type: text/plain', b64(511))), false);
+});
+
+test('mayCarryAFile: provider-minted tokens are exempt, anything else long is not', () => {
+  const sig = b64(2000, 'Ab1+') ;
+  assert.equal(mayCarryAFile(rawReq('content-type: application/json', `{"type":"thinking","signature": "${sig}=="}`)), false);
+  assert.equal(mayCarryAFile(rawReq('content-type: application/json', `{"thoughtSignature":"${b64(900, 'x')}"}`)), false);
+  assert.equal(mayCarryAFile(rawReq('content-type: application/json', `{"encrypted_content":"gAAAA${b64(900, 'x')}"}`)), false);
+  assert.equal(mayCarryAFile(rawReq('content-type: application/json', `{"data":"${b64(900, 'x')}"}`)), true);
+  assert.equal(mayCarryAFile(rawReq('content-type: application/json', `{"signature":"${b64(10)}.${b64(900)}"}`)), true);
 });
 
 // ── Locke signed out: only a request nobody called AI may pass ─────────────

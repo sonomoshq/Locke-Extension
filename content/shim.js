@@ -1557,13 +1557,22 @@
   // Verdict shape (the SW's reply): { ok, receipt: { decision, reason,
   // redactedCount, unchecked, unscreened, requestB64?, … } }, or
   // { ok: false, code, message } when the relay itself failed.
+  // Reason for a block that fail-open would otherwise have released.
+  const FILE_HELD = 'fail-open-file-held';
+  // Exactly what the native host / bridge puts in the receipt it answers a
+  // possible-file capture with under fail-open (em dash U+2014). A block receipt
+  // carrying it maps to FILE_HELD so the user gets the file-specific sentence.
+  const FILE_HELD_REASON = 'Locke could not screen this request and it may carry a file — held back (files are never sent unchecked, even under fail-open)';
+
   // Relay codes that mean "screening could not complete" (an outage), as
   // opposed to a malformed answer (our/guard bug) or consent. Under the
-  // desktop app's fail-open window these send the original; otherwise they
+  // desktop app's fail-open window these send the original (plain text only — see FILE_HELD); otherwise they
   // block as before. Absent codes fall to `native-call-failed` = unavailable.
   const RELAY_CODES_KEEP_BLOCKING = new Set([
     'data-consent-required', 'bridge-empty', 'bridge-unknown-response',
-    'bridge-protocol-mismatch', 'capture-error', 'bad-request'
+    'bridge-protocol-mismatch', 'capture-error', 'bad-request',
+    // A host that ever sends the file-held answer as a code: never a release.
+    FILE_HELD
   ]);
   function failOpenSend(cause, waitedMs) {
     noteUncheckedSend(cause);
@@ -1573,6 +1582,88 @@
       fields: { waitedMs, cause, because: 'user-fail-open-window' }
     };
   }
+
+  // ── fail-open never carries a file (zh#370) ──────────────────────────────
+  //
+  // The fail-open window lets a PLAIN TEXT prompt out when screening cannot
+  // answer. It never lets a file out: a request that may carry one stays
+  // blocked on every fail-open path, with its own reason so the user is told
+  // why. The rule is shared byte-for-byte with the Proxy and the Bridge (Rust);
+  // change all three together.
+  //
+  // <mayCarryAFile>
+  // May this raw request (head, CRLFCRLF, body — the synthesizeRequest output)
+  // carry a file? Errs toward true. A false means: a plain-text prompt.
+  function mayCarryAFile(raw) {
+    const n = raw.byteLength;
+    let split = -1;
+    for (let i = 0; i + 3 < n; i++) {
+      if (raw[i] === 13 && raw[i + 1] === 10 && raw[i + 2] === 13 && raw[i + 3] === 10) { split = i; break; }
+    }
+    if (split < 0) return true;
+    let head = '';
+    for (let i = 0; i < split; i++) head += String.fromCharCode(raw[i]);
+    head = head.toLowerCase();
+    const bodyStart = split + 4;
+    if (bodyStart >= n) return false;
+    let ce = null;
+    let ct = null;
+    for (const line of head.split('\r\n')) {
+      const c = line.indexOf(':');
+      if (c < 0) continue;
+      const name = line.slice(0, c).trim();
+      if (name === 'content-encoding' && ce === null) ce = line.slice(c + 1).trim();
+      else if (name === 'content-type' && ct === null) ct = line.slice(c + 1).trim();
+    }
+    if (ce !== null && ce !== '' && ce !== 'identity') return true;
+    if (ct !== null) {
+      const textual = ct.includes('json') || ct.startsWith('text/') ||
+        ct.includes('x-www-form-urlencoded') || ct.includes('xml');
+      if (!textual) return true;
+    } else {
+      try { new TextDecoder('utf-8', { fatal: true }).decode(raw.subarray(bodyStart)); } catch { return true; }
+    }
+    // `;base64,` (ASCII case-insensitive) — a data: URL.
+    for (let i = bodyStart; i + 7 < n; i++) {
+      if (raw[i] !== 59) continue;
+      const w = String.fromCharCode(raw[i + 1], raw[i + 2], raw[i + 3], raw[i + 4], raw[i + 5], raw[i + 6], raw[i + 7]).toLowerCase();
+      if (w === 'base64,') return true;
+    }
+    const isRun = (b) => (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57) ||
+      b === 43 || b === 47 || b === 95 || b === 45;
+    const isWs = (b) => b === 32 || b === 9 || b === 10 || b === 13 || b === 12;
+    // A provider-minted opaque token (Anthropic thinking `signature`, Gemini
+    // `thoughtSignature`, OpenAI `encrypted_content`) resent every agent turn:
+    // the whole value of a JSON string under such a key.
+    const isModelToken = (s, e) => {
+      let a = e;
+      while (a < n && raw[a] === 61) a++;
+      if (a >= n || raw[a] !== 34) return false;
+      if (s - 1 < bodyStart || raw[s - 1] !== 34) return false;
+      let k = s - 2;
+      while (k >= bodyStart && isWs(raw[k])) k--;
+      if (k < bodyStart || raw[k] !== 58) return false;
+      k--;
+      while (k >= bodyStart && isWs(raw[k])) k--;
+      if (k < bodyStart || raw[k] !== 34) return false;
+      let j = k - 1;
+      while (j >= bodyStart && raw[j] !== 34) j--;
+      if (j < bodyStart) return false;
+      let key = '';
+      for (let x = j + 1; x < k; x++) key += String.fromCharCode(raw[x]);
+      key = key.toLowerCase();
+      return key.endsWith('signature') || key === 'encrypted_content';
+    };
+    let i = bodyStart;
+    while (i < n) {
+      if (!isRun(raw[i])) { i++; continue; }
+      const s = i;
+      while (i < n && isRun(raw[i])) i++;
+      if (i - s >= 512 && !isModelToken(s, i)) return true;
+    }
+    return false;
+  }
+  // </mayCarryAFile>
 
   // The ONE relay code that lets a request through: `locke-signed-out`. The
   // native host sends it only when its connection to Locke failed AND the
@@ -1762,15 +1853,24 @@
     return true;
   }
 
-  function decide(res, coverage, scope, url) {
+  // `mayFile`: may the request carry a file (mayCarryAFile on its raw bytes, or
+  // an upload scope). Under fail-open a possible file is HELD, never released.
+  // Defaults to true so a caller that forgets it errs toward blocking.
+  function decide(res, coverage, scope, url, mayFile = true) {
     const waitedMs = res.elapsedMs;
-    if (res.outcome === 'timeout' && failOpenActive()) return failOpenSend('verdict-timeout', waitedMs);
-    if (res.outcome === 'channel-failed' && failOpenActive()) return failOpenSend('verdict-channel-failed', waitedMs);
+    const held = (cause) => ({ action: 'block', reason: FILE_HELD, fields: { waitedMs, cause } });
+    if (res.outcome === 'timeout' && failOpenActive()) {
+      return mayFile ? held('verdict-timeout') : failOpenSend('verdict-timeout', waitedMs);
+    }
+    if (res.outcome === 'channel-failed' && failOpenActive()) {
+      return mayFile ? held('verdict-channel-failed') : failOpenSend('verdict-channel-failed', waitedMs);
+    }
     if (res.outcome === 'verdict' && failOpenActive()) {
       const v0 = res.verdict;
-      if (!v0) return failOpenSend('verdict-missing', waitedMs);
+      if (!v0) return mayFile ? held('verdict-missing') : failOpenSend('verdict-missing', waitedMs);
       if (v0.ok !== true && !RELAY_CODES_KEEP_BLOCKING.has(v0.code)) {
-        return failOpenSend(`relay-${clip(v0.code) || 'unknown'}`, waitedMs);
+        const cause = `relay-${clip(v0.code) || 'unknown'}`;
+        return mayFile ? held(cause) : failOpenSend(cause, waitedMs);
       }
     }
     if (res.outcome === 'timeout') {
@@ -1970,6 +2070,7 @@
       // whose reason also matches nothing falls through to the policy
       // wording, which still blocks.
       const fields = { waitedMs, guardReason: clip(r.reason) };
+      if (r.reason === FILE_HELD_REASON) return { action: 'block', reason: FILE_HELD, fields: { waitedMs, cause: 'host-receipt' } };
       return isInfrastructureBlock(r)
         ? { action: 'block', reason: 'screening-unavailable', fields }
         : { action: 'block', reason: 'decision-block', fields };
@@ -2152,6 +2253,11 @@
     // The desktop app answered us, so "start it" would be the wrong advice.
     'screening-timeout': ['unavailable',
       'the on-device screener did not finish in time, so nothing was checked — this is NOT a sensitive-data block. Try again; if it keeps happening, check the Locke desktop app.'],
+
+    // Fail-open lets plain text through when screening is down; a request that
+    // may carry a file is held instead (zh#370). Nothing was sent.
+    'fail-open-file-held': ['unavailable',
+      'Locke couldn’t screen this request, and it may include a file. Fail-open only lets plain text through, so this was not sent. Remove the attachment to send now, or wait until screening is back.'],
 
     'verdict-timeout': ['unavailable',
       'the on-device screener did not answer in time, so nothing was checked — this is NOT a sensitive-data block. Check that the Locke desktop app is running, then try again.'],
@@ -2483,7 +2589,7 @@
       const raw = synthesizeRequest(method, url, headers, null, new Uint8Array(0), false);
       const coverage = coverageFor(url, scope);
       const res = await enforce(b64FromBytes(raw), providerFor(url, scope), consentGeneration, coverage);
-      const d = decide(res, coverage, scope, url);
+      const d = decide(res, coverage, scope, url, false); // bodyless: no file can ride a query
       if (d.action === 'redact') {
         const target = rebuiltTarget(res.verdict.receipt.requestB64);
         const next = target ? sameEndpoint(url, target) : null;
@@ -2994,12 +3100,19 @@
   // Both hooks report an uncapturable body identically — the reason travels on
   // the capture result, and the oversize case additionally names the cap it
   // exceeded.
-  function sayUncapturable(say, cap) {
-    say('warn', cap.reason, {
+  function sayUncapturable(say, cap, reason = cap.reason) {
+    say('warn', reason, {
       action: 'block',
       bytes: cap.byteLength ?? null,
-      capBytes: cap.reason === 'uncapturable-oversize' ? MAX_BODY : null
+      capBytes: cap.reason === 'uncapturable-oversize' ? MAX_BODY : null,
+      ...(reason !== cap.reason ? { cause: cap.reason } : {})
     });
+  }
+  // The reason an unreadable body is refused under: while the fail-open window
+  // is open it cannot be proven file-free, so it is HELD (FILE_HELD) rather than
+  // released as it was before zh#370; otherwise its own uncapturable reason.
+  function uncapturableReason(cap) {
+    return failOpenActive() ? FILE_HELD : cap.reason;
   }
 
   // ── raw request synthesis ───────────────────────────────────────────────
@@ -3199,17 +3312,11 @@
             // before it can leave. From here we NEVER send the original
             // unscreened body.
             committed = true;
-            if (cap.bytes == null && failOpenActive()) {
-              // The desktop app's fail-open window: send the original
-              // unscreened (releaseFrozenFetch below) and tally it.
-              action = 'send';
-              noteUncheckedSend(cap.reason);
-              say('warn', 'unchecked-fail-open', { action: 'send', cause: cap.reason, bytes: cap.byteLength ?? null, because: 'user-fail-open-window' });
-            } else if (cap.bytes == null) {
+            if (cap.bytes == null) {
               action = 'block'; // uncapturable body → fail closed, no round-trip
-              blockReason = cap.reason;
-              blockFields = { bytes: cap.byteLength ?? null };
-              sayUncapturable(say, cap);
+              blockReason = uncapturableReason(cap); // fail-open holds it too (zh#370)
+              blockFields = { bytes: cap.byteLength ?? null, ...(blockReason !== cap.reason ? { cause: cap.reason } : {}) };
+              sayUncapturable(say, cap, blockReason);
             } else {
               shape.bytes = cap.bytes.byteLength;
               if (!shape.ct) shape.ct = mediaType(cap.effectiveCt);
@@ -3233,7 +3340,7 @@
                 coverageFor(url, scope));
               const d = decide(!dataSharingAllowed || consentGeneration !== dataConsentGeneration
                 ? { outcome: 'verdict', verdict: { ok: false, code: 'data-consent-required' } } : res,
-              coverageFor(url, scope), scope, url);
+              coverageFor(url, scope), scope, url, scope === SCOPE.UPLOAD || mayCarryAFile(raw));
               action = d.action;
               let reason = d.reason;
               let extra = d.fields;
@@ -3507,14 +3614,12 @@
       // In scope with a body: hold it. A sync XHR can't be deferred → fail
       // closed before we spend anything on capture.
       const xhr = this;
-      if (!s.async && failOpenActive()) {
-        noteUncheckedSend('uncapturable-sync-xhr');
-        say('warn', 'unchecked-fail-open', { action: 'send', cause: 'uncapturable-sync-xhr', because: 'user-fail-open-window' });
-        return origSend.apply(this, arguments);
-      }
       if (!s.async) {
-        say('warn', 'uncapturable-sync-xhr', { action: 'block' });
-        blockXhr(xhr, 'uncapturable-sync-xhr');
+        // Cannot be held or read, so cannot be proven file-free: refused even
+        // in the fail-open window, under its own reason there (zh#370).
+        const syncReason = failOpenActive() ? FILE_HELD : 'uncapturable-sync-xhr';
+        say('warn', syncReason, { action: 'block', ...(syncReason !== 'uncapturable-sync-xhr' ? { cause: 'uncapturable-sync-xhr' } : {}) });
+        blockXhr(xhr, syncReason);
         return;
       }
 
@@ -3595,16 +3700,10 @@
           origSend.call(xhr, frozen);
           return;
         }
-        if (cap.bytes == null && failOpenActive()) {
-          noteUncheckedSend(cap.reason);
-          say('warn', 'unchecked-fail-open', { action: 'send', cause: cap.reason, bytes: cap.byteLength ?? null, because: 'user-fail-open-window' });
-          releaseXhr(xhr);
-          origSend.call(xhr, frozen);
-          return;
-        }
-        if (cap.bytes == null) { // uncapturable → fail closed
-          sayUncapturable(say, cap);
-          blockXhr(xhr, cap.reason, { bytes: cap.byteLength ?? null });
+        if (cap.bytes == null) { // uncapturable → fail closed (fail-open holds it too, zh#370)
+          const why = uncapturableReason(cap);
+          sayUncapturable(say, cap, why);
+          blockXhr(xhr, why, { bytes: cap.byteLength ?? null });
           return;
         }
         shape.bytes = cap.bytes.byteLength;
@@ -3620,7 +3719,7 @@
         const res = await enforce(b64FromBytes(raw), providerFor(s.url, scope), s.consentGeneration,
           coverageFor(s.url, scope));
         if (abandoned()) return;
-        const d = decide(res, coverageFor(s.url, scope), scope, s.url);
+        const d = decide(res, coverageFor(s.url, scope), scope, s.url, scope === SCOPE.UPLOAD || mayCarryAFile(raw));
         const veto = (d.action === 'redact' && scope === SCOPE.UPLOAD)
           ? uploadRedactVeto(d.reason, s.headers, unsigned != null) : null;
         if (veto) {
@@ -3724,13 +3823,11 @@
           // have landed yet and this reads as in scope — fail-closed, exactly
           // as before, and the window is the one it always was.
           inScope = isCapturePathUrl(target);
-          if (inScope && failOpenActive()) {
-            noteUncheckedSend('uncapturable-beacon');
-            say('warn', 'unchecked-fail-open', { action: 'send', cause: 'uncapturable-beacon', because: 'user-fail-open-window' });
-            return origSendBeacon.apply(this, arguments);
-          }
           if (inScope) {
-            say('warn', 'uncapturable-beacon', { action: 'block' });
+            // Cannot be held or read, so cannot be proven file-free: refused
+            // even in the fail-open window, under its own reason there (zh#370).
+            const bReason = failOpenActive() ? FILE_HELD : 'uncapturable-beacon';
+            say('warn', bReason, { action: 'block', ...(bReason !== 'uncapturable-beacon' ? { cause: 'uncapturable-beacon' } : {}) });
             return false;
           }
           // A beacon whose data is a user's FILE (a File, or a FormData
@@ -3835,14 +3932,12 @@
           return origFetchLater.apply(this, arguments);
         }
         const say = reporter(shape, Date.now());
-        if (refuse === 'uncapturable-deferred-fetch' && failOpenActive()) {
-          noteUncheckedSend(refuse);
-          say('warn', 'unchecked-fail-open', { action: 'send', cause: refuse, because: 'user-fail-open-window' });
-          return origFetchLater.apply(this, arguments);
-        }
         if (refuse) {
-          say('warn', refuse, { action: 'block' });
-          throw new TypeError(blockMessage(refuse, null));
+          // A deferred fetch cannot be held or read, so it cannot be proven
+          // file-free: refused even in the fail-open window (zh#370).
+          const dReason = refuse === 'uncapturable-deferred-fetch' && failOpenActive() ? FILE_HELD : refuse;
+          say('warn', dReason, { action: 'block', ...(dReason !== refuse ? { cause: refuse } : {}) });
+          throw new TypeError(blockMessage(dReason, null));
         }
         say('debug', 'not-in-scope', { action: 'send' });
         return origFetchLater.apply(this, arguments);
@@ -3998,21 +4093,17 @@
         return { action: 'send', payload: wsOriginal(snap) };
       }
       if (consentGone()) return { action: 'block', reason: 'data-consent-required' };
-      if (cap.bytes == null && failOpenActive()) {
-        noteUncheckedSend(cap.reason);
-        say('warn', 'unchecked-fail-open', { action: 'send', cause: cap.reason, bytes: cap.byteLength ?? null, because: 'user-fail-open-window' });
-        return { action: 'send', payload: wsOriginal(snap) };
-      }
       if (cap.bytes == null) {
-        sayUncapturable(say, cap);
-        return { action: 'block', reason: cap.reason, fields: { bytes: cap.byteLength ?? null } };
+        const why = uncapturableReason(cap); // fail-open holds it too (zh#370)
+        sayUncapturable(say, cap, why);
+        return { action: 'block', reason: why, fields: { bytes: cap.byteLength ?? null } };
       }
       const raw = synthesizeRequest('WS-SEND', url, {}, null, cap.bytes, false);
       const coverage = coverageFor(url, SCOPE.AI);
       const res = await enforce(b64FromBytes(raw), providerFor(url, SCOPE.AI), consentGeneration, coverage);
       const d = decide(consentGone()
         ? { outcome: 'verdict', verdict: { ok: false, code: 'data-consent-required' } } : res,
-      coverage, SCOPE.AI, url);
+      coverage, SCOPE.AI, url, mayCarryAFile(raw));
       let { action, reason } = d;
       let extra = d.fields;
       let payload = wsOriginal(snap);

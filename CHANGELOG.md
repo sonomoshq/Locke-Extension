@@ -8,6 +8,14 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Fixed — fail-open no longer sends a file unscreened (zh#370).** With the
+desktop app's fail-open window on, a request that may carry an attached file
+was sent as-is when the screener timed out, the channel failed, the relay
+errored, or the body could not be read. Now only a plain-text prompt fails
+open; anything that may carry a file (multipart or binary bodies, `;base64,`
+data, long base64 runs, any body we cannot read, beacons, deferred fetches,
+synchronous XHR) is blocked with the new reason `fail-open-file-held`.
+
 **Added — Google AI Mode from the search bar is screened.** Typing a prompt
 into Google's search box in AI Mode and pressing enter loads
 `/search?…&udm=50&q=<prompt>` as a page navigation, which left unscreened.
