@@ -1608,7 +1608,12 @@
     const MAX_RELEASABLE_BODY = 6 * 1024 * 1024;
     const MAX_OPAQUE_STRING = 4096;
     const MAX_OPAQUE_ARRAY = 64;
-    const MAX_OPAQUE_TOTAL = 16 * 1024;
+    const MAX_OPAQUE_TOTAL = 8 * 1024;
+    const MAX_ITEM_OPAQUE = 4 * 1024;
+    const MAX_OPAQUE_BASE64 = 512;
+    const MAX_MODEL_TOKEN = 256 * 1024;
+    const MAX_AUTHORED = 1024 * 1024;
+    const MAX_QUERY = 2048;
     const ANTHROPIC_PARAMS = [
       'model', 'messages', 'system', 'max_tokens', 'metadata', 'stop_sequences', 'stream',
       'temperature', 'top_k', 'top_p', 'tools', 'tool_choice', 'thinking', 'context_management',
@@ -1633,18 +1638,35 @@
       'labels'
     ];
     const DENY = ['attach', 'file', 'image', 'upload', 'extracted', 'inline', 'document', 'blob',
-      'audio', 'video', 'media', 'base64', 'dataurl', 'data_url'];
+      'audio', 'video', 'media', 'base64', 'dataurl', 'data_url', 'asset_pointer', 'selected_sources'];
+    const INLINE = ['inlinedata', 'inline_data', 'filedata', 'file_data', 'image_url', 'imageurl',
+      'input_image', 'input_file', 'input_audio', 'b64_json'];
+    const MIME = ['mimetype', 'mime_type', 'media_type', 'mediatype'];
+    const MIME_TOPS = ['application/', 'image/', 'text/', 'audio/', 'video/', 'font/', 'model/'];
     const GEMINI_PATH = '/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate';
     const fatal = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
     const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
-    // What is left of MAX_OPAQUE_TOTAL for this request.
-    let opaqueLeft = MAX_OPAQUE_TOTAL;
-    const spend = (n) => {
-      if (n > opaqueLeft) return false;
-      opaqueLeft -= n;
+    // Budgets. `opaque` is what is left of the settings budget (the whole
+    // request, or the one message/block/item under judgement); `authored` is
+    // what is left for the authored JSON value being walked.
+    const opaqueB = { left: MAX_OPAQUE_TOTAL };
+    const authoredB = { left: 0 };
+    const take = (cell, n) => {
+      if (n > cell.left) return false;
+      cell.left -= n;
       return true;
     };
+    const spend = (n) => take(opaqueB, n);
+    // Run f with a fresh budget of n in cell, then restore the outer one.
+    const within = (cell, n, f) => {
+      const outer = cell.left;
+      cell.left = n;
+      let ok;
+      try { ok = f(); } finally { cell.left = outer; }
+      return ok;
+    };
+    const item = (f) => within(opaqueB, MAX_ITEM_OPAQUE, f);
 
     // UTF-8 byte length (Rust's str::len) of a well-formed string.
     const utf8Len = (s) => {
@@ -1669,9 +1691,34 @@
       if (Array.isArray(v)) return v.every((x) => sane(x, depth + 1));
       return Object.keys(v).every((k) => !LONE_SURROGATE.test(k) && sane(v[k], depth + 1));
     };
+    // A repeated key in any object of already-valid JSON text. JSON.parse keeps
+    // the last one and cannot see it; the Rust reader refuses it, so must this.
+    const hasDuplicateKey = (text) => {
+      const stack = [];
+      let prev = '';
+      const re = /"(?:[^"\\]|\\[\s\S])*"|[{}[\],]/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        const t = m[0];
+        if (t === '{') stack.push(new Set());
+        else if (t === '[') stack.push(null);
+        else if (t === '}' || t === ']') stack.pop();
+        else if (t[0] === '"') {
+          const top = stack[stack.length - 1];
+          if (top && (prev === '{' || prev === ',')) {
+            const key = JSON.parse(t);
+            if (top.has(key)) return true;
+            top.add(key);
+          }
+        }
+        prev = t[0] === '"' ? '"' : t;
+      }
+      return false;
+    };
     const parseJson = (text) => {
       let v;
       try { v = JSON.parse(text); } catch { return undefined; }
+      if (hasDuplicateKey(text)) return undefined;
       return sane(v, 0) ? { v } : undefined;
     };
 
@@ -1682,7 +1729,14 @@
     const asStr = (v) => (typeof v === 'string' ? v : undefined);
     const noneOr = (v, f) => v === undefined || f(v);
     const lower = (s) => s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
-    const denyKey = (key) => { const k = lower(key); return DENY.some((d) => k.includes(d)); };
+    const isAscii = (s) => /^[\x00-\x7f]*$/.test(s);
+    // Keys on these surfaces are ASCII; one that is not could fold to an
+    // attachment key somewhere this rule does not look, so it counts as one.
+    const denyKey = (key) => {
+      if (!isAscii(key)) return true;
+      const k = lower(key);
+      return DENY.some((d) => k.includes(d));
+    };
     const empty = (v) => {
       if (v === null || v === false) return true;
       if (typeof v === 'string') return v.length === 0;
@@ -1693,54 +1747,107 @@
     const emptyOrAbsent = (v) => v === undefined || empty(v);
     const onlyKeys = (o, allowed) => Object.keys(o).every((k) => allowed.includes(k));
 
+    // Rust's char::is_whitespace (Unicode White_Space; not JS's, which adds U+FEFF and drops U+0085).
+    const isWs = (c) => (c >= 9 && c <= 13) || c === 32 || c === 0x85 || c === 0xa0 || c === 0x1680 ||
+      (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000;
+    const rtrim = (s) => {
+      let a = 0;
+      let b = s.length;
+      while (a < b && isWs(s.charCodeAt(a))) a++;
+      while (b > a && isWs(s.charCodeAt(b - 1))) b--;
+      return s.slice(a, b);
+    };
+    const trimStart = (s) => {
+      let a = 0;
+      while (a < s.length && isWs(s.charCodeAt(a))) a++;
+      return s.slice(a);
+    };
+
+    // `data:<type>;base64,…`
+    const dataUri = (s) => {
+      const t = trimStart(s);
+      return lower(t.slice(0, 5)) === 'data:' && lower(t).includes(';base64,');
+    };
+    // At least `min` bytes of only the base64 alphabets (standard and URL-safe, padded).
+    const base64Run = (s, min) => s.length >= min && /^[A-Za-z0-9+/\-_=]*$/.test(s);
+    // A settings string: short, not a data URI, not a long bare base64 run.
+    const opaqueStringOk = (s) => utf8Len(s) <= MAX_OPAQUE_STRING && !dataUri(s) && !base64Run(s, MAX_OPAQUE_BASE64);
+
     // Settings, ids and metadata: short strings, short arrays, no attachment key.
     const opaque = (v) => {
-      if (typeof v === 'string') return utf8Len(v) <= MAX_OPAQUE_STRING && spend(utf8Len(v));
+      if (typeof v === 'string') return opaqueStringOk(v) && spend(utf8Len(v));
       if (Array.isArray(v)) return v.length <= MAX_OPAQUE_ARRAY && v.every(opaque);
       if (isObj(v)) {
         return Object.keys(v).every((k) => (!denyKey(k) || empty(v[k])) && spend(utf8Len(k)) && opaque(v[k]));
       }
       return spend(8);
     };
+
+    // JSON the model or the client wrote as structure (a tool call's input, a
+    // Gemini function call or response, tool definitions): free keys and text,
+    // but no inline-data container, no {mime type, data} blob, no data URI, no
+    // long bare base64, no non-ASCII key; bounded by MAX_AUTHORED.
+    const authoredWalk = (v) => {
+      if (typeof v === 'string') return !dataUri(v) && !base64Run(v, MAX_OPAQUE_STRING) && take(authoredB, utf8Len(v));
+      if (Array.isArray(v)) return v.every(authoredWalk);
+      if (isObj(v)) {
+        const keys = Object.keys(v);
+        const dataV = get(v, 'data');
+        const blob = keys.some((k) => MIME.includes(lower(k)) && typeof v[k] === 'string') &&
+          typeof dataV === 'string' && dataV !== '';
+        return !blob && keys.every((k) => isAscii(k) &&
+          (!INLINE.includes(lower(k)) || empty(v[k])) && take(authoredB, utf8Len(k)) && authoredWalk(v[k]));
+      }
+      return take(authoredB, 8);
+    };
+    const authored = (v) => within(authoredB, MAX_AUTHORED, () => authoredWalk(v));
+    // A provider-minted token (signature, encrypted reasoning): a string, not past MAX_MODEL_TOKEN.
+    const modelToken = (v) => v === undefined || v === null || (typeof v === 'string' && utf8Len(v) <= MAX_MODEL_TOKEN);
+
     const restOpaque = (o, skip) => Object.keys(o).filter((k) => !skip.includes(k))
       .every((k) => (!denyKey(k) || empty(o[k])) && spend(utf8Len(k)) && opaque(o[k]));
 
     // ── Anthropic API ──
-    const textBlock = (b) => isObj(b) && get(b, 'type') === 'text' && isStr(get(b, 'text')) &&
+    const textBlock = (b) => item(() => isObj(b) && get(b, 'type') === 'text' && isStr(get(b, 'text')) &&
       onlyKeys(b, ['type', 'text', 'cache_control', 'citations']) &&
-      noneOr(get(b, 'cache_control'), opaque) && noneOr(get(b, 'citations'), opaque);
+      noneOr(get(b, 'cache_control'), opaque) && noneOr(get(b, 'citations'), opaque));
     const toolReference = (b) => isObj(b) && onlyKeys(b, ['type', 'tool_name']) &&
       get(b, 'type') === 'tool_reference' && isStr(get(b, 'tool_name')) && utf8Len(get(b, 'tool_name')) <= 256;
-    const anthropicBlock = (b) => {
+    const anthropicBlock = (b) => item(() => {
       if (!isObj(b)) return false;
       switch (asStr(get(b, 'type'))) {
         case 'text': return textBlock(b);
         case 'thinking':
           return onlyKeys(b, ['type', 'thinking', 'signature', 'cache_control']) &&
-            isStr(get(b, 'thinking')) && strOrAbsent(get(b, 'signature'));
+            isStr(get(b, 'thinking')) && modelToken(get(b, 'signature')) &&
+            noneOr(get(b, 'cache_control'), opaque);
         case 'redacted_thinking':
-          return onlyKeys(b, ['type', 'data', 'cache_control']) && isStr(get(b, 'data'));
+          return onlyKeys(b, ['type', 'data', 'cache_control']) &&
+            isStr(get(b, 'data')) && modelToken(get(b, 'data')) &&
+            noneOr(get(b, 'cache_control'), opaque);
         case 'tool_use':
         case 'server_tool_use':
           return onlyKeys(b, ['type', 'id', 'name', 'input', 'cache_control', 'caller']) &&
-            isStr(get(b, 'name')) && isObj(get(b, 'input'));
+            isStr(get(b, 'name')) && isObj(get(b, 'input')) && authored(get(b, 'input')) &&
+            restOpaque(b, ['name', 'input']);
         case 'tool_result': {
           if (!onlyKeys(b, ['type', 'tool_use_id', 'content', 'is_error', 'cache_control'])) return false;
           const c = get(b, 'content');
-          if (c === undefined || typeof c === 'string') return true;
-          return Array.isArray(c) && c.every((p) => textBlock(p) || toolReference(p));
+          const contentOk = c === undefined || typeof c === 'string' ||
+            (Array.isArray(c) && c.every((p) => textBlock(p) || toolReference(p)));
+          return contentOk && restOpaque(b, ['content']);
         }
         default: return false;
       }
-    };
-    const anthropicMessage = (m) => {
+    });
+    const anthropicMessage = (m) => item(() => {
       if (!isObj(m)) return false;
       const role = asStr(get(m, 'role'));
       if (!(role === 'user' || role === 'assistant' || role === 'system')) return false;
       const c = get(m, 'content');
       const contentOk = typeof c === 'string' || (Array.isArray(c) && c.every(anthropicBlock));
       return contentOk && restOpaque(m, ['role', 'content']);
-    };
+    });
     const anthropic = (o) => {
       if (!isObj(o)) return false;
       const msgs = get(o, 'messages');
@@ -1749,6 +1856,7 @@
       const systemOk = sys === undefined || sys === null || typeof sys === 'string' ||
         (Array.isArray(sys) && sys.every(textBlock));
       return systemOk && onlyKeys(o, ANTHROPIC_PARAMS) && msgs.every(anthropicMessage) &&
+        noneOr(get(o, 'tools'), authored) && noneOr(get(o, 'tool_choice'), authored) &&
         restOpaque(o, ['messages', 'system', 'tools', 'tool_choice']);
     };
 
@@ -1770,19 +1878,19 @@
           noneOr(get(o, 'recent_titles'), (t) => Array.isArray(t) && t.length <= MAX_OPAQUE_ARRAY && t.every(isStr));
       }
       const promptOk = route === 'completion' ? isStr(get(o, 'prompt')) : strOrAbsent(get(o, 'prompt'));
-      return promptOk && emptyOrAbsent(get(o, 'attachments')) && emptyOrAbsent(get(o, 'files')) &&
-        emptyOrAbsent(get(o, 'sync_sources')) && restOpaque(o, ['prompt', 'tools']);
+      return promptOk && emptyOrAbsent(get(o, 'sync_sources')) && noneOr(get(o, 'tools'), authored) &&
+        restOpaque(o, ['prompt', 'tools']);
     };
 
     // ── ChatGPT web ──
-    const chatgptMessage = (m) => {
+    const chatgptMessage = (m) => item(() => {
       if (!isObj(m)) return false;
       const c = get(m, 'content');
       if (!isObj(c)) return false;
       const contentOk = onlyKeys(c, ['content_type', 'parts']) && get(c, 'content_type') === 'text' &&
         Array.isArray(get(c, 'parts')) && get(c, 'parts').every(isStr);
       return contentOk && restOpaque(m, ['content']);
-    };
+    });
     const chatgpt = (o, send) => {
       if (!isObj(o)) return false;
       if (!send) return !hasOwn(o, 'messages') && restOpaque(o, []);
@@ -1814,6 +1922,15 @@
       }
       try { return fatal.decode(new Uint8Array(out)); } catch { return undefined; }
     };
+    // An uploaded file's reference: its upload path (`/…`) or its MIME type.
+    const geminiUploadRef = (v) => {
+      if (typeof v === 'string') {
+        return v.startsWith('/') || MIME_TOPS.some((t) => lower(v).startsWith(t));
+      }
+      if (Array.isArray(v)) return v.some(geminiUploadRef);
+      if (isObj(v)) return Object.keys(v).some((k) => geminiUploadRef(v[k]));
+      return false;
+    };
     const geminiWeb = (body) => {
       let freq;
       for (const pair of body.split('&')) {
@@ -1835,7 +1952,7 @@
       const [turn, ...others] = pi.v;
       const turnOk = Array.isArray(turn) && turn.length >= 1 && typeof turn[0] === 'string' &&
         turn.slice(1).every((x) => x === null || typeof x === 'boolean' || typeof x === 'number');
-      return turnOk && others.every(opaque);
+      return turnOk && others.every((x) => opaque(x) && !geminiUploadRef(x));
     };
 
     // ── duck.ai ──
@@ -1859,23 +1976,28 @@
       onlyKeys(c, ['id', 'type', 'function', 'custom']) &&
       ['function', 'custom'].every((k) => noneOr(get(c, k), (f) => isObj(f) &&
         onlyKeys(f, ['name', 'arguments', 'input']) && Object.keys(f).every((x) => isStr(f[x])))));
+    const chatPart = (p) => {
+      if (!isObj(p)) return false;
+      const t = asStr(get(p, 'type'));
+      if (t === 'text') return onlyKeys(p, ['type', 'text']) && isStr(get(p, 'text'));
+      if (t === 'refusal') return onlyKeys(p, ['type', 'refusal']) && isStr(get(p, 'refusal'));
+      return false;
+    };
     const chatCompletions = (o) => {
       if (!isObj(o)) return false;
       const msgs = get(o, 'messages');
       if (!Array.isArray(msgs)) return false;
-      return msgs.every((m) => {
+      return msgs.every((m) => item(() => {
         if (!isObj(m)) return false;
         if (!onlyKeys(m, ['role', 'content', 'name', 'tool_calls', 'tool_call_id', 'refusal'])) return false;
         if (!isStr(get(m, 'role'))) return false;
         const c = get(m, 'content');
         const contentOk = c === undefined || c === null || typeof c === 'string' ||
-          (Array.isArray(c) && c.every((p) => {
-            if (!isObj(p) || !onlyKeys(p, ['type', 'text', 'refusal'])) return false;
-            const t = asStr(get(p, 'type'));
-            return t === 'text' || t === 'refusal';
-          }));
+          (Array.isArray(c) && c.every(chatPart));
         return contentOk && restOpaque(m, ['content', 'tool_calls']) && noneOr(get(m, 'tool_calls'), toolCallsOk);
-      }) && onlyKeys(o, CHAT_PARAMS) && restOpaque(o, ['messages', 'tools', 'functions']);
+      })) && onlyKeys(o, CHAT_PARAMS) &&
+        ['tools', 'functions', 'tool_choice'].every((k) => noneOr(get(o, k), authored)) &&
+        restOpaque(o, ['messages', 'tools', 'functions', 'tool_choice']);
     };
 
     // ── OpenAI Responses / Codex ──
@@ -1889,7 +2011,7 @@
           isStr(get(p, 'text')) && noneOr(get(p, 'annotations'), opaque) && noneOr(get(p, 'logprobs'), opaque);
       });
     };
-    const responseItem = (o) => {
+    const responseItem = (o) => item(() => {
       if (!isObj(o)) return false;
       switch (asStr(get(o, 'type'))) {
         case 'message':
@@ -1903,7 +2025,8 @@
           return onlyKeys(o, ['type', 'id', 'summary', 'encrypted_content', 'content', 'status']) &&
             noneOr(get(o, 'summary'), inputTextParts) &&
             noneOr(get(o, 'content'), (c) => c === null || inputTextParts(c)) &&
-            strOrAbsent(get(o, 'encrypted_content'));
+            modelToken(get(o, 'encrypted_content')) &&
+            restOpaque(o, ['summary', 'content', 'encrypted_content']);
         case 'function_call':
         case 'custom_tool_call':
         case 'local_shell_call':
@@ -1913,20 +2036,23 @@
         case 'function_call_output':
         case 'custom_tool_call_output':
         case 'local_shell_call_output':
-          return onlyKeys(o, ['type', 'id', 'call_id', 'output', 'status']) &&
+          return onlyKeys(o, ['type', 'id', 'call_id', 'output', 'status',
+            'internal_chat_message_metadata_passthrough']) &&
             inputTextParts(get(o, 'output')) && restOpaque(o, ['output']);
         case 'additional_tools':
-          return onlyKeys(o, ['type', 'id', 'role', 'tools']);
+          return onlyKeys(o, ['type', 'id', 'role', 'tools']) && noneOr(get(o, 'tools'), authored) &&
+            restOpaque(o, ['tools']);
         default: return false;
       }
-    };
+    });
     const responses = (o, ws) => {
       if (!isObj(o)) return false;
       if (ws && get(o, 'type') !== 'response.create') return false;
       const input = get(o, 'input');
       const inputOk = typeof input === 'string' || (Array.isArray(input) && input.every(responseItem));
       return inputOk && onlyKeys(o, RESPONSES_PARAMS) && strOrAbsent(get(o, 'instructions')) &&
-        restOpaque(o, ['input', 'instructions', 'tools']);
+        noneOr(get(o, 'tools'), authored) && noneOr(get(o, 'tool_choice'), authored) &&
+        restOpaque(o, ['input', 'instructions', 'tools', 'tool_choice']);
     };
 
     // ── Gemini API ──
@@ -1940,6 +2066,18 @@
       const verb = model.slice(c + 1);
       return c > 0 && (verb === 'generateContent' || verb === 'streamGenerateContent' || verb === 'countTokens');
     };
+    // {name, args, id}: the model's call; its args walked as authored JSON.
+    const geminiFunctionCall = (f) => isObj(f) && onlyKeys(f, ['name', 'args', 'id']) &&
+      isStr(get(f, 'name')) && strOrAbsent(get(f, 'id')) &&
+      noneOr(get(f, 'args'), (a) => isObj(a) && authored(a));
+    // {name, response, id, parts, …}: the tool's answer; parts may only be text.
+    const geminiFunctionResponse = (f) => item(() => isObj(f) &&
+      onlyKeys(f, ['name', 'response', 'id', 'parts', 'willContinue', 'scheduling']) &&
+      isStr(get(f, 'name')) &&
+      noneOr(get(f, 'response'), (r) => isObj(r) && authored(r)) &&
+      noneOr(get(f, 'parts'), (parts) => Array.isArray(parts) &&
+        parts.every((p) => isObj(p) && onlyKeys(p, ['text']) && isStr(get(p, 'text')))) &&
+      restOpaque(f, ['name', 'response', 'parts']));
     const geminiApi = (o) => {
       if (!isObj(o)) return false;
       const contents = get(o, 'contents');
@@ -1947,23 +2085,31 @@
       const contentOk = (c) => isObj(c) && onlyKeys(c, ['role', 'parts']) && strOrAbsent(get(c, 'role')) &&
         Array.isArray(get(c, 'parts')) && get(c, 'parts').every((p) => isObj(p) && Object.keys(p).length > 0 &&
           onlyKeys(p, ['text', 'thought', 'thoughtSignature', 'functionCall', 'functionResponse']) &&
-          strOrAbsent(get(p, 'text')) && strOrAbsent(get(p, 'thoughtSignature')));
+          strOrAbsent(get(p, 'text')) && modelToken(get(p, 'thoughtSignature')) &&
+          noneOr(get(p, 'thought'), (t) => typeof t === 'boolean') &&
+          noneOr(get(p, 'functionCall'), geminiFunctionCall) &&
+          noneOr(get(p, 'functionResponse'), geminiFunctionResponse));
       return contents.every(contentOk) && noneOr(get(o, 'systemInstruction'), contentOk) &&
-        onlyKeys(o, GEMINI_PARAMS) && restOpaque(o, ['contents', 'systemInstruction', 'tools']);
+        onlyKeys(o, GEMINI_PARAMS) && noneOr(get(o, 'tools'), authored) &&
+        restOpaque(o, ['contents', 'systemInstruction', 'tools']);
+    };
+
+    // The query string is settings too: short, each value a setting, no
+    // parameter named for an attachment.
+    const queryOk = (query) => {
+      const q = query.split('#')[0];
+      return utf8Len(q) <= MAX_QUERY && q.split('&').filter((p) => p !== '').every((pair) => {
+        const eq = pair.indexOf('=');
+        const k = formDecode(eq < 0 ? pair : pair.slice(0, eq));
+        const v = formDecode(eq < 0 ? '' : pair.slice(eq + 1));
+        if (k === undefined || v === undefined) return false;
+        return (!denyKey(k) || v === '') && opaqueStringOk(v);
+      });
     };
 
     // ── framing: any doubt is a hold ──
-    // Rust's str::trim: Unicode White_Space (not JS's, which adds U+FEFF and drops U+0085).
-    const isWs = (c) => (c >= 9 && c <= 13) || c === 32 || c === 0x85 || c === 0xa0 || c === 0x1680 ||
-      (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000;
-    const rtrim = (s) => {
-      let a = 0;
-      let b = s.length;
-      while (a < b && isWs(s.charCodeAt(a))) a++;
-      while (b > a && isWs(s.charCodeAt(b - 1))) b--;
-      return s.slice(a, b);
-    };
     const releasable = () => {
+      opaqueB.left = MAX_OPAQUE_TOTAL;
       if (raw == null || typeof raw.subarray !== 'function' || typeof raw.length !== 'number') return false;
       let split = -1;
       for (let i = 0; i + 3 < raw.length; i++) {
@@ -1978,7 +2124,9 @@
       if (parts.length !== 3) return false;
       const [method, target, version] = parts;
       if (version !== 'HTTP/1.1' || !target.startsWith('/')) return false;
-      const path = target.split(/[?#]/)[0];
+      const qi = target.indexOf('?');
+      const path = (qi < 0 ? target : target.slice(0, qi)).split('#')[0];
+      if (!queryOk(qi < 0 ? '' : target.slice(qi + 1))) return false;
       let host;
       let ct;
       let ce = false;

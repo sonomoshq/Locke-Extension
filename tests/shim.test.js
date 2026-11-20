@@ -5015,8 +5015,17 @@ test('releasableUnderFailOpen: framing edges, 6 MiB cap +/- 1 (framing_edges)', 
 test('releasableUnderFailOpen: opaque limits, deny keys, the per-request budget (opaque_limits_and_deny_keys)', () => {
   const chat = (extra) => releasable(jreq('POST', 'chatgpt.com', '/backend-api/f/conversation',
     { messages: [{ content: { content_type: 'text', parts: ['hi'] } }], x: extra }));
-  assert.equal(chat('a'.repeat(MAX_OPAQUE_STRING)), true);
-  assert.equal(chat('a'.repeat(MAX_OPAQUE_STRING + 1)), false);
+  assert.equal(chat('a '.repeat(MAX_OPAQUE_STRING / 2)), true);
+  assert.equal(chat(`${'a '.repeat(MAX_OPAQUE_STRING / 2)} `), false);
+  // A bare base64 run is a file's bytes from 512 on; any other character and it is not a run.
+  assert.equal(chat('Q'.repeat(511)), true);
+  assert.equal(chat('Q'.repeat(512)), false);
+  assert.equal(chat('Q'.repeat(512) + '+/-_='), false);
+  assert.equal(chat('Q'.repeat(512) + '!'), true);
+  assert.equal(chat(' data:text/plain;base64,QQ=='), false);
+  assert.equal(chat('DATA:x;BASE64,QQ'), false);
+  assert.equal(chat('data: not a uri'), true);
+  assert.equal(chat('see ;base64, in the docs'), true);
   assert.equal(chat(Array(MAX_OPAQUE_ARRAY).fill(1)), true);
   assert.equal(chat(Array(MAX_OPAQUE_ARRAY + 1).fill(1)), false);
   assert.equal(chat({ deep: { image_url: 'x' } }), false);
@@ -5031,19 +5040,19 @@ test('releasableUnderFailOpen: opaque limits, deny keys, the per-request budget 
   }
   for (const k of ['signature', 'prompt', 'metadata', 'kind', 'data']) assert.equal(chat({ [k]: 'v' }), true, k);
   // Many short strings, each under every per-item limit, past the total.
-  const chunks = Array.from({ length: 10 }, () => 'a'.repeat(2000));
-  assert.equal(chat(chunks.slice(0, 7)), true);
-  assert.equal(chat(chunks), false);
-  assert.equal(chat({ a: chunks.slice(0, 5), b: chunks.slice(0, 5) }), false);
+  const chunks = Array.from({ length: 10 }, () => 'a '.repeat(1000));
+  assert.equal(chat(chunks.slice(0, 3)), true);
+  assert.equal(chat(chunks.slice(0, 5)), false);
+  assert.equal(chat({ a: chunks.slice(0, 2), b: chunks.slice(0, 3) }), false);
   assert.equal(chat(Array.from({ length: 40 }, () => Array(60).fill(255))), false);
   // The budget is per request, not per call history.
-  assert.equal(chat(chunks.slice(0, 7)), true);
-  // Object keys spend their length; scalars spend 8 (16384 / 8 = 2048 numbers fit, spread under the array cap).
+  assert.equal(chat(chunks.slice(0, 3)), true);
+  // Object keys spend their length; scalars spend 8 (8192 / 8 = 1024 numbers fit, spread under the array cap).
   const keys = Object.fromEntries(Array.from({ length: 90 }, (_, i) => ['k'.repeat(200) + i, 1]));
   assert.equal(chat(keys), false, 'keys count against the budget');
-  const nums = Array.from({ length: 30 }, () => Array(64).fill(1)); // 1920 numbers = 15360 + nothing else
+  const nums = Array.from({ length: 15 }, () => Array(64).fill(1)); // 960 numbers = 7680 + nothing else
   assert.equal(chat(nums), true);
-  const nums2 = Array.from({ length: 40 }, () => Array(64).fill(1)); // 2560 numbers = 20480 > budget
+  const nums2 = Array.from({ length: 20 }, () => Array(64).fill(1)); // 1280 numbers = 10240 > budget
   assert.equal(chat(nums2), false);
 });
 
@@ -5141,11 +5150,11 @@ test('releasableUnderFailOpen: per-surface params and block edges that Rust pins
   assert.equal(an({ system: [{ type: 'text', text: 'a' }] }), true);
   assert.equal(an({ system: [{ type: 'image' }] }), false);
   assert.equal(an({ system: 5 }), false);
-  assert.equal(an({ tools: [{ name: 't', input_schema: { image: 'a'.repeat(9000) } }] }), true, 'tool definitions are skipped');
+  assert.equal(an({ tools: [{ name: 't', input_schema: { image: 'a '.repeat(4500) } }] }), true, 'tool definitions are authored JSON: free text and keys');
   assert.equal(an({ tool_choice: { type: 'auto', file: 'x' } }), true, 'tool_choice is skipped');
   assert.equal(an({ stop_sequences: ['a'.repeat(5000)] }), false);
   assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'tool_use', name: 'x', input: [] }] }] })), false);
-  assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'tool_use', name: 'x', input: { a: 'a'.repeat(9000) } }] }] })), true, 'what the model wrote');
+  assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'tool_use', name: 'x', input: { a: 'a '.repeat(4500) } }] }] })), true, 'what the model wrote');
   assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'thinking', thinking: 't', signature: 5 }] }] })), false);
   assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'thinking', thinking: 't', extra: 1 }] }] })), false);
   assert.equal(releasable(anth({ messages: [{ role: 'user', content: [{ type: 'redacted_thinking', data: 5 }] }] })), false);
@@ -5191,7 +5200,7 @@ test('releasableUnderFailOpen: per-surface params and block edges that Rust pins
   assert.equal(ri({ type: 'local_shell_call', action: { blob: 'x' } }), false);
   assert.equal(ri({ type: 'function_call_output', call_id: 'c', output: [{ type: 'input_text', text: 'x' }] }), true);
   assert.equal(ri({ type: 'function_call_output', call_id: 'c', output: 5 }), false);
-  assert.equal(ri({ type: 'additional_tools', tools: [{ big: 'a'.repeat(9000) }] }), true);
+  assert.equal(ri({ type: 'additional_tools', tools: [{ big: 'a '.repeat(4500) }] }), true);
   assert.equal(ri({ type: 'additional_tools', extra: 1 }), false);
   assert.equal(ri({ type: 'input_file' }), false);
   assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: 5 })), false);
@@ -5254,8 +5263,8 @@ test('releasableUnderFailOpen: header and body parsing the way Rust reads them',
   assert.equal(chat(`{${msg},"\\udc00":1}`), false, 'in a key');
   assert.equal(chat(`{${msg},"x":${'['.repeat(127)}${']'.repeat(127)}}`), false, 'array 127 deep + the object is 128 levels');
   assert.equal(chat(`{${msg},"x":${'['.repeat(126)}${']'.repeat(126)}}`), true, '127 levels is the most serde reads');
-  assert.equal(chat(`{${msg},${msg}}`), true, 'duplicate keys: last wins');
-  assert.equal(chat(`{${msg},"messages":[{"content":{"content_type":"multimodal_text","parts":[]}}]}`), false, 'duplicate keys: last wins');
+  assert.equal(chat(`{${msg},${msg}}`), false, 'duplicate keys hold, whatever the values');
+  assert.equal(chat(`{${msg},"messages":[{"content":{"content_type":"multimodal_text","parts":[]}}]}`), false, 'duplicate keys hold');
   assert.equal(chat(`{${msg},"__proto__":{"image":"x"}}`), false, '__proto__ is an ordinary key');
   assert.equal(chat(`{${msg},"__proto__":"a"}`), true);
   assert.equal(chat(`${'  \n'}{${msg}}  `), true);
@@ -5267,10 +5276,12 @@ test('releasableUnderFailOpen: header and body parsing the way Rust reads them',
   assert.equal(chat(`{${msg},"x":"${euro.repeat(1366)}"}`), false);
   assert.equal(chat(`{${msg},"x":"${'😀'.repeat(1024)}"}`), true, '4 bytes each = 4096');
   assert.equal(chat(`{${msg},"x":"${'😀'.repeat(1025)}"}`), false);
-  // Keys spend their byte length too.
-  assert.equal(chat(`{${msg},"${euro.repeat(1400)}":1}`), true, 'key under the budget');
-  const many = Array.from({ length: 4 }, (_, i) => `"${euro.repeat(1400)}${i}":1`).join(',');
-  assert.equal(chat(`{${msg},${many}}`), false, '4 keys x 4200 bytes = over 16384');
+  // Budget is in bytes: key x (1) + 2 x 4095 + 1 = 8192 passes, one more byte holds (2730 chars would not).
+  const e = euro.repeat(1365);
+  assert.equal(chat(`{${msg},"x":["${e}","${e}","a"]}`), true);
+  assert.equal(chat(`{${msg},"x":["${e}","${e}","a","a"]}`), false);
+  // A non-ASCII key is held as an attachment key.
+  assert.equal(chat(`{${msg},"${euro}":1}`), false);
 });
 
 // ── Locke signed out: only a request nobody called AI may pass ─────────────
@@ -6163,17 +6174,17 @@ test('fail-open: a bodyless URL-query send still fails open on our own failure, 
   assert.match(String(w.netCalls[0][0]), /%5BNAME%5D/);
 });
 
-test('releasableUnderFailOpen: the settings budget is exact (16384 passes, 16385 holds)', () => {
+test('releasableUnderFailOpen: the settings budget is exact (8192 passes, 8193 holds)', () => {
   const chat = (extra) => releasable(jreq('POST', 'chatgpt.com', '/backend-api/f/conversation',
     { messages: [{ content: { content_type: 'text', parts: ['hi'] } }], x: extra }));
-  // key "x" costs 1; strings cost their bytes.
-  const fit = ['a'.repeat(4096), 'a'.repeat(4096), 'a'.repeat(4096), 'a'.repeat(4095)];
-  assert.equal(chat(fit), true, '1 + 16383 = 16384');
-  assert.equal(chat([...fit.slice(0, 3), 'a'.repeat(4096)]), false, '16385');
-  // Scalars cost 8: 2047 numbers + key "x" (1) = 16377; 2048 numbers = 16385.
+  // key "x" costs 1; strings cost their bytes (spaced, so not a base64 run).
+  const full = 'a '.repeat(2048); // 4096 bytes
+  assert.equal(chat([full, 'a '.repeat(2047) + 'a']), true, '1 + 4096 + 4095 = 8192');
+  assert.equal(chat([full, full]), false, '8193');
+  // Scalars cost 8: 1023 numbers + key "x" (1) = 8185; 1024 numbers = 8193.
   const nums = (n) => Array.from({ length: Math.ceil(n / 64) }, (_, i) => Array(Math.min(64, n - i * 64)).fill(7));
-  assert.equal(chat(nums(2047)), true);
-  assert.equal(chat(nums(2048)), false);
+  assert.equal(chat(nums(1023)), true);
+  assert.equal(chat(nums(1024)), false);
 });
 
 test('releasableUnderFailOpen: more edges the first mutation pass left alive', () => {
@@ -6224,7 +6235,8 @@ test('releasableUnderFailOpen: more edges the first mutation pass left alive', (
   assert.equal(dk({ type: 'file', text: 'a' }), false);
   const cc = (m) => releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [m] }));
   assert.equal(cc({ role: 'user', content: [{ type: 'input_audio' }] }), false);
-  assert.equal(cc({ role: 'user', content: [{ type: 'text' }] }), true);
+  assert.equal(cc({ role: 'user', content: [{ type: 'text', text: 'x' }] }), true);
+  assert.equal(cc({ role: 'user', content: [{ type: 'text' }] }), false, 'a part must carry a string text');
   assert.equal(cc({ role: 'user', content: 'a', weird: 'x' }), false);
   // Responses: ids and unknown keys are settings; reasoning content must be text parts or null.
   const ri = (item) => releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [item] }));
@@ -6244,6 +6256,429 @@ test('releasableUnderFailOpen: more edges the first mutation pass left alive', (
   assert.equal(hv(' application/json　'), true);
   assert.equal(hv('﻿application/json'), false);
   assert.equal(hv('application/json​'), false);
+});
+
+// ── round 2 of the zh#370 review: the Rust `round_two_review` and the changed
+// `opaque_limits_and_deny_keys` lines, same inputs, same expectations ───────
+const MAX_MODEL_TOKEN = 256 * 1024;
+const MAX_AUTHORED = 1024 * 1024;
+const MAX_ITEM_OPAQUE = 4 * 1024;
+const MAX_QUERY = 2048;
+const MAX_OPAQUE_BASE64 = 512;
+const FORM = 'application/x-www-form-urlencoded';
+
+test('releasableUnderFailOpen: round_two_review (Rust) - Gemini function calls and responses', () => {
+  const pdf = b64n(4000);
+  const g3 = (b) => jreq('POST', 'generativelanguage.googleapis.com',
+    '/v1beta/models/gemini-3-pro-preview:streamGenerateContent?alt=sse', b);
+  const call = (part) => g3({ contents: [{ role: 'model', parts: [part] }] });
+  assert.equal(releasable(call({ functionCall: { name: 'weather', args: { city: 'Oslo' } } })), true);
+  assert.equal(releasable(call({ functionResponse: { name: 'weather', response: { temp: 3, text: 'cold' }, parts: [{ text: 'ok' }] } })), true);
+  const held = {
+    'functionResponse.parts inlineData': { functionResponse: { name: 'f', response: {}, parts: [{ inlineData: { mimeType: 'application/pdf', data: pdf } }] } },
+    'functionResponse.response inlineData': { functionResponse: { name: 'f', response: { inlineData: { mimeType: 'application/pdf', data: pdf } } } },
+    'functionResponse.response nested blob': { functionResponse: { name: 'f', response: { result: { mime_type: 'image/png', data: b64n(64) } } } },
+    'functionCall.args file': { functionCall: { name: 'f', args: { file: b64n(MAX_OPAQUE_STRING) } } },
+    'functionCall.args data uri': { functionCall: { name: 'f', args: { x: 'data:application/pdf;base64,QQ==' } } },
+    'functionCall args not object': { functionCall: { name: 'f', args: 'x' } },
+    'functionCall extra key': { functionCall: { name: 'f', args: {}, blob: 'x' } },
+    'functionCall no name': { functionCall: { args: {} } },
+    'functionCall not object': { functionCall: 'f' },
+    'functionResponse extra key': { functionResponse: { name: 'f', response: {}, x: 1 } },
+    'functionResponse part extra key': { functionResponse: { name: 'f', parts: [{ text: 'x', y: 1 }] } },
+    'functionResponse part not text': { functionResponse: { name: 'f', parts: [{ text: 1 }] } },
+    'functionResponse parts not array': { functionResponse: { name: 'f', parts: { text: 'x' } } },
+    'functionResponse response string': { functionResponse: { name: 'f', response: 'x' } },
+    'functionResponse no name': { functionResponse: { response: {} } },
+    'thought not a bool': { text: 'x', thought: 'x' },
+    'thoughtSignature too long': { text: 'x', thoughtSignature: 'Q'.repeat(MAX_MODEL_TOKEN + 1) }
+  };
+  for (const [name, part] of Object.entries(held)) assert.equal(releasable(call(part)), false, `${name} must be held`);
+  assert.equal(releasable(call({ text: 'x', thoughtSignature: 'Q'.repeat(MAX_MODEL_TOKEN) })), true);
+  assert.equal(releasable(g3({ contents: [], tools: [{ x: { inlineData: { data: 'QQ' } } }] })), false);
+  assert.equal(releasable(g3({ contents: [], tools: [{ functionDeclarations: [{ name: 'f',
+    parameters: { properties: { mimeType: { type: 'string' }, data: { type: 'string' } } } }] }] })), true);
+  // Function call id and response settings.
+  assert.equal(releasable(call({ functionCall: { name: 'f', args: {}, id: 1 } })), false);
+  assert.equal(releasable(call({ functionCall: { name: 'f', args: {}, id: 'c1' } })), true);
+  assert.equal(releasable(call({ functionResponse: { name: 'f', response: {}, willContinue: { file: 'x' } } })), false);
+  assert.equal(releasable(call({ functionResponse: { name: 'f', response: {}, willContinue: true } })), true);
+});
+
+test('releasableUnderFailOpen: round_two_review (Rust) - Codex outputs, per-item budgets, long histories', () => {
+  const codex = (items) => req('WS-SEND', 'chatgpt.com', '/backend-api/codex/responses', null,
+    JSON.stringify({ type: 'response.create', input: items }));
+  const md = { turn_id: 't', create_time: 1.5, content_item_kinds: ['tool.output'] };
+  assert.equal(releasable(codex([{ type: 'custom_tool_call_output', call_id: 'c', output: 'done', internal_chat_message_metadata_passthrough: md }])), true);
+  assert.equal(releasable(codex([{ type: 'custom_tool_call_output', call_id: 'c', output: 'done',
+    internal_chat_message_metadata_passthrough: { x: 'a '.repeat(MAX_ITEM_OPAQUE) } }])), false);
+  const long = Array.from({ length: 300 }, (_, i) => ({ type: 'message', id: `msg_${String(i).padStart(40, '0')}`, role: 'user',
+    content: [{ type: 'input_text', text: 'x' }], internal_chat_message_metadata_passthrough: md }));
+  assert.equal(releasable(codex(long)), true, '300 items are not one budget');
+  const cc = Array.from({ length: 300 }, (_, i) => ({ role: 'assistant', content: [{ type: 'tool_use', id: `toolu_${String(i).padStart(40, '0')}`,
+    name: 'Bash', input: { command: 'ls' }, cache_control: { type: 'ephemeral' } }] }));
+  assert.equal(releasable(anth({ messages: cc })), true);
+  const am = (m) => anth({ messages: [m] });
+  const half = 'a '.repeat(1100);
+  assert.equal(releasable(codex([{ type: 'reasoning', id: half, status: half }])), false);
+  assert.equal(releasable(codex([{ type: 'message', role: 'user', content: 'x', internal_chat_message_metadata_passthrough: { x: half, y: half } }])), false);
+  assert.equal(releasable(am({ role: 'user', content: 'hi', output_config: { x: half, y: half } })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: half, name: 'n', input: {}, cache_control: { x: half } }] })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: 'a '.repeat(1900), name: 'n', input: {} }] })), true);
+  const blocks = Array.from({ length: 10 }, () => ({ type: 'tool_use', id: 'a '.repeat(400), name: 'n', input: {} }));
+  assert.equal(releasable(am({ role: 'assistant', content: blocks })), true, 'each block has its own budget');
+  assert.equal(releasable(codex([{ type: 'additional_tools', tools: [{ x: 'data:x;base64,QQ' }] }])), false);
+  assert.equal(releasable(codex([{ type: 'additional_tools', tools: [], id: 'a '.repeat(MAX_ITEM_OPAQUE) }])), false);
+  const enc = (n) => codex([{ type: 'reasoning', encrypted_content: 'Q'.repeat(n) }]);
+  assert.equal(releasable(enc(MAX_MODEL_TOKEN)), true);
+  assert.equal(releasable(enc(MAX_MODEL_TOKEN + 1)), false);
+  assert.equal(releasable(codex([{ type: 'reasoning', x: 1 }])), false);
+});
+
+test('releasableUnderFailOpen: round_two_review (Rust) - authored JSON, tool defs, model tokens', () => {
+  const am = (m) => anth({ messages: [m] });
+  const use = (input) => am({ role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'n', input }] });
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'Write',
+    input: { file_path: '/a.txt', content: 'a '.repeat(100000) } }] })), true);
+  const heldInputs = {
+    'data uri': { x: 'data:image/png;base64,iVBOR' },
+    'inline image': { image_url: { url: 'https://x/y.png' } },
+    'bare base64': { x: b64n(MAX_OPAQUE_STRING) },
+    'source blob': { source: { type: 'base64', media_type: 'application/pdf', data: 'QQ' } },
+    'non-ascii key': { 'fıle': 'x' },
+    'over the cap': { x: 'a '.repeat(MAX_AUTHORED / 2 + 1) },
+    'many keys over the cap': Object.fromEntries(Array.from({ length: 20000 }, (_, i) => [String(i).padStart(60, '0'), null]))
+  };
+  for (const [name, input] of Object.entries(heldInputs)) assert.equal(releasable(use(input)), false, `tool_use.input ${name} must be held`);
+  assert.equal(releasable(use({ x: b64n(MAX_OPAQUE_STRING - 1), image_url: '', inlineData: null })), true);
+  // tools / tool_choice walked on every surface.
+  assert.equal(releasable(anth({ messages: [], tools: [{ name: 'x', input_schema: {}, x: 'data:a;base64,QQ' }] })), false);
+  assert.equal(releasable(anth({ messages: [], tool_choice: { type: 'tool', name: b64n(MAX_OPAQUE_STRING) } })), false);
+  assert.equal(releasable(jreq('POST', 'claude.ai', CLAUDE_AI, { prompt: 'x', tools: [{ input_file: 'x' }] })), false);
+  const cc = (b) => releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', b));
+  assert.equal(cc({ messages: [], tools: [{ function: { name: 'f', description: 'data:x;base64,QQ' } }] }), false);
+  assert.equal(cc({ messages: [], tool_choice: { x: 'data:x;base64,QQ' } }), false);
+  assert.equal(cc({ messages: [], functions: [{ input_image: 'x' }] }), false);
+  const rs = (b) => releasable(jreq('POST', 'api.openai.com', '/v1/responses', b));
+  assert.equal(rs({ input: 'hi', tools: [{ x: 'data:x;base64,QQ' }] }), false);
+  assert.equal(rs({ input: 'hi', tool_choice: { x: 'data:x;base64,QQ' } }), false);
+  // Numbers spend, blobs need a MIME string and a non-empty data string.
+  assert.equal(releasable(use({ x: Array(MAX_AUTHORED / 8 + 1).fill(1) })), false);
+  assert.equal(releasable(use({ x: Array(1000).fill(1) })), true);
+  assert.equal(releasable(use({ mimeType: { type: 'string' }, data: 'x' })), true);
+  assert.equal(releasable(use({ mimeType: 'image/png', data: '' })), true);
+  assert.equal(releasable(use({ mimeType: 'application/json', data: { x: 1 } })), true);
+  assert.equal(releasable(use({ MimeType: 'image/png', data: 'x' })), false);
+  // Signatures and redacted thinking.
+  const sig = (n) => am({ role: 'assistant', content: [{ type: 'thinking', thinking: 't', signature: 'Q'.repeat(n) }] });
+  assert.equal(releasable(sig(MAX_MODEL_TOKEN)), true);
+  assert.equal(releasable(sig(MAX_MODEL_TOKEN + 1)), false);
+  const red = (n) => am({ role: 'assistant', content: [{ type: 'redacted_thinking', data: 'Q'.repeat(n) }] });
+  assert.equal(releasable(red(MAX_MODEL_TOKEN)), true);
+  assert.equal(releasable(red(MAX_MODEL_TOKEN + 1)), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'redacted_thinking', data: 5 }] })), false);
+  const big = { x: 'a '.repeat(MAX_ITEM_OPAQUE) };
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'thinking', thinking: 't', cache_control: big }] })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'redacted_thinking', data: 'd', cache_control: big }] })), false);
+  assert.equal(releasable(am({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'a '.repeat(MAX_ITEM_OPAQUE), content: 'x' }] })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: 'a '.repeat(MAX_ITEM_OPAQUE), name: 'n', input: {} }] })), false);
+});
+
+test('releasableUnderFailOpen: round_two_review (Rust) - query, chat parts, duplicate keys, unicode keys, ChatGPT pointers, Gemini upload refs', () => {
+  const hi = { messages: [{ role: 'user', content: 'hi' }] };
+  const q = (query) => jreq('POST', 'api.anthropic.com', `/v1/messages?${query}`, hi);
+  assert.equal(releasable(q('beta=true&x=&&y')), true);
+  assert.equal(releasable(q(`x=${'a'.repeat(MAX_QUERY)}`)), false);
+  assert.equal(releasable(q(`x=${b64n(MAX_OPAQUE_BASE64)}`)), false);
+  assert.equal(releasable(q('file=cv.pdf')), false);
+  assert.equal(releasable(q('file=')), true);
+  assert.equal(releasable(q('x=%zz')), false);
+  assert.equal(releasable(q('%zz=1')), false);
+  assert.equal(releasable(q('x=data:a;base64,QQ')), false);
+  assert.equal(releasable(jreq('POST', 'api.anthropic.com', '/v1/messages#frag', hi)), true);
+  // Query cap and the fragment cut.
+  assert.equal(releasable(q(`x=${'a+'.repeat(1000)}`)), true);
+  assert.equal(releasable(q(`x=${'a+'.repeat(1100)}`)), false);
+  assert.equal(releasable(jreq('POST', 'api.anthropic.com', `/v1/messages?x=1#${'a'.repeat(3000)}`, hi)), true);
+  // A non-string chat-completions part.
+  const cc1 = (part) => releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [{ role: 'user', content: [part] }] }));
+  assert.equal(cc1({ type: 'text', text: 'x' }), true);
+  assert.equal(cc1({ type: 'text', text: { image_url: 'x' } }), false);
+  assert.equal(cc1({ type: 'text', text: ['x'] }), false);
+  assert.equal(cc1({ type: 'refusal', refusal: { x: 1 } }), false);
+  assert.equal(cc1({ type: 'text', text: 'x', refusal: 'y' }), false);
+  assert.equal(cc1({ type: 'refusal', refusal: 'y', text: 'x' }), false);
+  // Duplicate keys, anywhere.
+  const dup = (body) => req('POST', 'api.anthropic.com', '/v1/messages', 'application/json', body);
+  assert.equal(releasable(dup('{"messages":[{"role":"user","content":"hi"}]}')), true);
+  assert.equal(releasable(dup('{"messages":[{"role":"user","content":"hi"}],"messages":[]}')), false);
+  assert.equal(releasable(dup('{"messages":[{"role":"user","content":"hi","content":[{"type":"image"}]}]}')), false);
+  assert.equal(releasable(dup('{"messages":[{"role":"user","content":[{"type":"tool_use","id":"t","name":"n","input":{"a":1,"a":2}}]}]}')), false);
+  assert.equal(releasable(dup('{"messages":[],"x":1e999}')), false);
+  const gw = (outer) => releasable(req('POST', 'gemini.google.com', GEMINI, FORM, `f.req=${formEnc(outer)}&at=x`));
+  assert.equal(gw(JSON.stringify([null, '[["hi"],{"a":1,"a":2}]'])), false, 'inner f.req');
+  assert.equal(gw('[null,"[[\\"hi\\"]]",{"a":1,"a":2}]'), false, 'outer f.req');
+  assert.equal(gw('[null,"[[\\"hi\\"]]",{"a":1,"b":2}]'), true);
+  // Unicode keys fold to attachment keys somewhere: held.
+  const web = (extra) => releasable(jreq('POST', 'chatgpt.com', '/backend-api/f/conversation',
+    { messages: [{ content: { content_type: 'text', parts: ['hi'] } }], x: extra }));
+  assert.equal(web({ 'FİLE': 'x' }), false);
+  assert.equal(web({ 'ｆｉｌｅ': 'x' }), false);
+  assert.equal(web({ ok_key: 'x' }), true);
+  // ChatGPT asset pointers and selected sources.
+  const cg = (meta) => releasable(jreq('POST', 'chatgpt.com', '/backend-api/conversation',
+    { messages: [{ content: { content_type: 'text', parts: ['hi'] }, metadata: meta }] }));
+  assert.equal(cg({ selected_sources: [], asset_pointer: '' }), true);
+  assert.equal(cg({ selected_sources: ['drive'] }), false);
+  assert.equal(cg({ x: { asset_pointer: 'file-service://file-1' } }), false);
+  // Gemini web: an upload reference in a non-turn slot.
+  const slot = (other) => releasable(req('POST', 'gemini.google.com', GEMINI, FORM,
+    `f.req=${formEnc(JSON.stringify([null, JSON.stringify([['hi'], other])]))}`));
+  assert.equal(slot(['c_9cf48bd306a5cf08', null, 1]), true);
+  assert.equal(slot([[['/contrib_service/ttl_1d/abc', 3]]]), false);
+  assert.equal(slot(['x', 'application/pdf']), false);
+  assert.equal(slot({ k: 'Image/PNG' }), false);
+  for (const t of ['image/', 'text/', 'audio/', 'video/', 'font/', 'model/', 'application/']) assert.equal(slot([`${t}x`]), false, t);
+  assert.equal(slot(['imag/x', 'applications/x', 'x/image/']), true, 'prefixes are exact');
+});
+
+test('releasableUnderFailOpen: round 2 boundaries - budgets, authored JSON, tokens, data URIs, base64 runs', () => {
+  const chat = (extra) => releasable(jreq('POST', 'chatgpt.com', '/backend-api/f/conversation',
+    { messages: [{ content: { content_type: 'text', parts: ['hi'] } }], x: extra }));
+  const cmsg = (extra) => releasable(jreq('POST', 'chatgpt.com', '/backend-api/f/conversation',
+    { messages: [{ content: { content_type: 'text', parts: ['hi'] }, ...extra }] }));
+  const am = (m) => anth({ messages: [m] });
+  const use = (input) => am({ role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'n', input }] });
+  // The per-item budget is exactly 4096: key a (1) + 4094 + key b (1) + 0 passes, one more byte holds.
+  const s4094 = 'a '.repeat(2047);
+  assert.equal(cmsg({ a: s4094, b: '' }), true);
+  assert.equal(cmsg({ a: s4094, b: 'x' }), false);
+  // ...and a nested item restores the enclosing item's budget, not a fresh one.
+  const big = (n) => 'a '.repeat(n / 2);
+  assert.equal(releasable(am({ role: 'user', content: [{ type: 'tool_result', tool_use_id: big(4000), content: [{ type: 'text', text: 'x' }],
+    cache_control: { x: big(2000) } }] })), false, 'tool_result: 4000 + 2000 in one item');
+  // Each text block of a tool result has its own budget.
+  const parts = Array.from({ length: 10 }, () => ({ type: 'text', text: 'x', cache_control: { x: big(800) } }));
+  assert.equal(releasable(am({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: parts }] })), true);
+  // Each chatgpt / chat-completions message and Gemini function response has its own budget.
+  const many = (mk) => Array.from({ length: 20 }, mk);
+  assert.equal(releasable(jreq('POST', 'chatgpt.com', '/backend-api/f/conversation',
+    { messages: many(() => ({ content: { content_type: 'text', parts: ['hi'] }, id: big(600) })) })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions',
+    { messages: many(() => ({ role: 'user', content: 'hi', name: big(600) })) })), true);
+  assert.equal(releasable(jreq('POST', 'generativelanguage.googleapis.com', '/v1beta/models/g:generateContent',
+    { contents: [{ role: 'user', parts: many(() => ({ functionResponse: { name: 'f', response: {}, id: big(600) } })) }] })), true);
+  // The authored budget is exactly MAX_AUTHORED: key k (1) + the string.
+  assert.equal(releasable(use({ k: 'a '.repeat(MAX_AUTHORED / 2 - 1) + 'a' })), true, '1 + (MAX - 1)');
+  assert.equal(releasable(use({ k: 'a '.repeat(MAX_AUTHORED / 2) })), false, '1 + MAX');
+  // Every inline-data container is held with a value, in any case; empty is fine.
+  for (const k of ['inlinedata', 'inline_data', 'filedata', 'file_data', 'image_url', 'imageurl', 'input_image', 'input_file', 'input_audio', 'b64_json']) {
+    for (const key of [k, k.toUpperCase(), k[0].toUpperCase() + k.slice(1)]) {
+      assert.equal(releasable(use({ x: { [key]: 'v' } })), false, key);
+      assert.equal(releasable(use({ x: { [key]: { a: 1 } } })), false, key);
+      assert.equal(releasable(use({ x: { [key]: '' } })), true, `${key} empty`);
+    }
+  }
+  // A blob: any MIME key beside a non-empty data string; neither alone.
+  for (const k of ['mimetype', 'mime_type', 'media_type', 'mediatype', 'MimeType', 'MEDIA_TYPE']) {
+    assert.equal(releasable(use({ [k]: 'image/png', data: 'QQ' })), false, k);
+    assert.equal(releasable(use({ [k]: 'image/png' })), true, `${k} alone`);
+    assert.equal(releasable(use({ [k]: 5, data: 'QQ' })), true, `${k} not a string`);
+    assert.equal(releasable(use({ [k]: null, data: 'QQ' })), true, `${k} null`);
+  }
+  assert.equal(releasable(use({ data: 'QQ' })), true);
+  assert.equal(releasable(use({ mimeType: 'image/png', Data: 'QQ' })), true, 'data is an exact key');
+  assert.equal(releasable(use({ mimeType: 'image/png', data: ['QQ'] })), true);
+  assert.equal(releasable(use({ x: [{ mimeType: 'image/png', data: 'QQ' }] })), false, 'a blob inside an array');
+  assert.equal(releasable(use({ x: [b64n(4095)] })), true);
+  assert.equal(releasable(use({ x: [b64n(4096)] })), false);
+  assert.equal(releasable(use({ x: ['é'] })), true);
+  assert.equal(releasable(use({ 'é': 'x' })), false, 'latin-1 key');
+  assert.equal(releasable(use({ '': 'x', '\u0080': 1 })), false, 'U+0080 key');
+  // Model tokens count bytes, not characters; null and absent are fine, a number is not.
+  const sig = (v) => am({ role: 'assistant', content: [{ type: 'thinking', thinking: 't', signature: v }] });
+  assert.equal(releasable(sig('é'.repeat(MAX_MODEL_TOKEN / 2))), true);
+  assert.equal(releasable(sig('é'.repeat(MAX_MODEL_TOKEN / 2 + 1))), false);
+  assert.equal(releasable(sig(null)), true);
+  assert.equal(releasable(sig(5)), false);
+  const red = (b) => am({ role: 'assistant', content: [{ type: 'redacted_thinking', ...b }] });
+  assert.equal(releasable(red({ data: 'x' })), true);
+  assert.equal(releasable(red({ data: null })), false, 'redacted data must be a string');
+  assert.equal(releasable(red({})), false);
+  const gsig = (v) => jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent', { contents: [{ parts: [{ text: 'x', thoughtSignature: v }] }] });
+  assert.equal(releasable(gsig(null)), true);
+  assert.equal(releasable(gsig(5)), false);
+  assert.equal(releasable(gsig('é'.repeat(MAX_MODEL_TOKEN / 2 + 1))), false);
+  // data URIs: a prefix then ;base64, - JS and Rust trim differently (U+0085 yes, U+FEFF no).
+  assert.equal(chat('data;base64,QQ'), true, 'no colon');
+  assert.equal(chat('database;base64,QQ'), true);
+  assert.equal(chat('data:x base64,QQ'), true, 'no semicolon');
+  assert.equal(chat('data:x;base64'), true, 'no comma');
+  assert.equal(chat('data:x;BASE64,QQ'), false);
+  assert.equal(chat('\u0085data:x;base64,QQ'), false, 'U+0085 is trimmed');
+  assert.equal(chat('﻿data:x;base64,QQ'), true, 'U+FEFF is not');
+  assert.equal(chat('\t\n data:x;base64,QQ'), false);
+  assert.equal(chat('x data:x;base64,QQ'), true, 'the prefix is at the start');
+  // Base64 runs: every alphabet member, from 512 on.
+  for (const run of ['0123456789'.repeat(52), 'q'.repeat(512), 'Q'.repeat(512), '+'.repeat(512), '/'.repeat(512), '-'.repeat(512), '_'.repeat(512), '='.repeat(512)]) {
+    assert.equal(chat(run), false, run.slice(0, 12));
+    assert.equal(chat(run.slice(0, 511)), true, `${run.slice(0, 12)} one short`);
+    assert.equal(chat(`${run} `), true);
+    assert.equal(chat(`${run}é`), true);
+  }
+});
+
+test('releasableUnderFailOpen: round 2 boundaries - query, duplicate keys, parts, upload refs', () => {
+  const hi = { messages: [{ role: 'user', content: 'hi' }] };
+  const q = (query) => jreq('POST', 'api.anthropic.com', `/v1/messages?${query}`, hi);
+  assert.equal(releasable(q(`x=${'a+'.repeat(1023)}`)), true, '2048 bytes');
+  assert.equal(releasable(q(`x=${'a+'.repeat(1023)}a`)), false, '2049 bytes');
+  assert.equal(releasable(q(`x=${'é'.repeat(1024)}`)), false, 'bytes, not characters');
+  assert.equal(releasable(q(`x=${'é'.repeat(1023)}`)), true);
+  assert.equal(releasable(q('file')), true, 'no = is an empty value');
+  assert.equal(releasable(q('x')), true);
+  assert.equal(releasable(q('x=1?file=cv')), true, 'the first ? starts the query');
+  assert.equal(releasable(q('x=1#file=cv')), true, 'a fragment is cut');
+  assert.equal(releasable(q('FILE=')), true);
+  assert.equal(releasable(q('a=1&file=%63v')), false, 'values are decoded');
+  assert.equal(releasable(q('f%69le=cv')), false, 'keys are decoded');
+  assert.equal(releasable(q('x=1&&&')), true);
+  assert.equal(releasable(q('x=%zz&file=')), false, 'a bad escape in any pair');
+  assert.equal(releasable(q('x=1;file=cv')), true, '; is not a separator');
+  // The path is cut at ? then #: a ? after the # is in the fragment.
+  assert.equal(releasable(jreq('POST', 'api.anthropic.com', '/v1/messages#a?b', hi)), true);
+  assert.equal(releasable(jreq('POST', 'api.anthropic.com', '/v1/messages#a?file=cv', hi)), false, 'the query still reads what follows the first ?');
+  // Duplicate keys: escapes, strings holding quotes, arrays of equal strings, nesting.
+  const dup = (body) => releasable(req('POST', 'api.anthropic.com', '/v1/messages', 'application/json', body));
+  assert.equal(dup('{"messages":[],"\\u006dessages":[]}'), false, 'an escaped spelling of the same key');
+  assert.equal(dup('{"messages":[],"model":"x\\"y","model":"z"}'), false, 'after a string holding an escaped quote');
+  assert.equal(dup('{"messages":[],"a":"x\\"y","b":1,"b":2}'), false);
+  assert.equal(dup('{"messages":[],"stop_sequences":["a","a"],"model":"m"}'), true, 'equal strings in an array are not keys');
+  assert.equal(dup('{"messages":[],"metadata":{"a":1},"thread":{"a":2}}'), true, 'the same key in two objects');
+  assert.equal(dup('{"messages":[],"metadata":{"a":{"a":1}}}'), true, 'a key inside its own value');
+  assert.equal(dup('{"messages":[],"metadata":{"a":1,"b":{"x":1},"a":2}}'), false, 'a repeat after a nested object');
+  assert.equal(dup('{"messages":[],"metadata":{"a":[1,{"b":1}],"a":2}}'), false, 'a repeat after a nested array');
+  assert.equal(dup('{"messages":[],"metadata":{"a":"x","a":"x"}}'), false, 'equal values');
+  assert.equal(dup('{"messages":[],"metadata":{"a":1,"A":2}}'), true, 'case-sensitive');
+  // Chat-completions parts and function-call settings.
+  const cc = (m) => releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [m] }));
+  assert.equal(cc({ role: 'user', content: ['x'] }), false, 'a part that is not an object');
+  assert.equal(cc({ role: 'user', content: [null] }), false);
+  assert.equal(cc({ role: 'user', content: [{ type: 'text', text: 'x' }, 5] }), false);
+  assert.equal(cc({ role: 'user', content: [{ type: 'text' }] }), false);
+  assert.equal(cc({ role: 'user', content: [{ type: 'refusal' }] }), false);
+  assert.equal(cc({ role: 'user', content: [{ type: 'refusal', refusal: 'x' }] }), true);
+  assert.equal(cc({ role: 'user', content: [{ type: 'text', text: 'x', extra: 1 }] }), false);
+  assert.equal(cc({ role: 'user', content: [{ type: 'other', text: 'x' }] }), false);
+  const call = (calls) => cc({ role: 'assistant', content: null, tool_calls: calls });
+  assert.equal(call([{ id: 'c', type: 'function', function: { name: 'f', arguments: big4k() } }]), true, 'arguments are not settings');
+  assert.equal(call(Array.from({ length: 100 }, (_, i) => ({ id: `c${i}`, type: 'function', function: { name: 'f', arguments: '{}' } }))), true);
+  assert.equal(call([{ id: 'c', type: 'function', function: { name: 'f', arguments: 5 } }]), false);
+  const gc = (part) => releasable(jreq('POST', 'generativelanguage.googleapis.com', '/v1beta/models/g:generateContent', { contents: [{ role: 'model', parts: [part] }] }));
+  assert.equal(gc({ functionCall: { name: 'f', args: {}, id: null } }), true, 'a null id');
+  assert.equal(gc({ functionCall: { name: 'f' } }), true, 'absent args');
+  assert.equal(gc({ functionCall: { name: 'f', args: null } }), false);
+  assert.equal(gc({ functionResponse: { name: 'f', response: {}, scheduling: 'SILENT' } }), true);
+  assert.equal(gc({ functionResponse: { name: 'f', response: {}, id: 'x' } }), true);
+  assert.equal(gc({ functionResponse: { name: 'f' } }), true, 'absent response');
+  assert.equal(gc({ functionResponse: { name: 'f', response: null } }), false);
+  assert.equal(gc({ functionResponse: { name: 'f', parts: [] } }), true);
+  assert.equal(gc({ functionResponse: { name: 'f', parts: [5] } }), false);
+  assert.equal(gc({ functionResponse: { name: 'f', parts: [null] } }), false);
+  assert.equal(gc({ functionResponse: { name: 'f', parts: ['x'] } }), false);
+  assert.equal(gc({ functionResponse: { name: 'f', id: 'a '.repeat(MAX_ITEM_OPAQUE) } }), false, 'the id is a setting');
+  assert.equal(gc({ functionResponse: { name: 'f', willContinue: 'a '.repeat(MAX_ITEM_OPAQUE) } }), false);
+  assert.equal(gc({ thought: true, text: 'x' }), true);
+  assert.equal(gc({ thought: null, text: 'x' }), false);
+  // Chat-completions tool_choice and Responses tool definitions are authored JSON, not settings.
+  const big5000 = 'a '.repeat(2500);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [], tool_choice: { type: 'function', function: { name: 'f' }, note: big5000 } })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [], tools: [{ type: 'function', function: { name: 'f', description: big5000 } }] })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/chat/completions', { messages: [], functions: [{ name: 'f', description: big5000 }] })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: 'x', tool_choice: { type: 'function', note: big5000 } })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: 'x', tools: [{ type: 'function', description: big5000 }] })), true);
+  assert.equal(releasable(anth({ ...hi, tool_choice: { type: 'auto', note: big5000 } })), true);
+  assert.equal(releasable(jreq('POST', 'claude.ai', CLAUDE_AI, { prompt: 'x', tools: [{ d: big5000 }] })), true);
+  assert.equal(releasable(jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent', { contents: [], tools: [{ d: big5000 }] })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [{ type: 'additional_tools', tools: [{ d: big5000 }] }] })), true);
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [{ type: 'additional_tools', tools: [], extra: 1 }] })), false, 'additional_tools settings are held to the settings rule');
+  assert.equal(releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [{ type: 'additional_tools', tools: [], id: big5000 }] })), false);
+  // Responses items: reasoning, outputs.
+  const ri = (item) => releasable(jreq('POST', 'api.openai.com', '/v1/responses', { input: [item] }));
+  assert.equal(ri({ type: 'reasoning', encrypted_content: null }), true);
+  assert.equal(ri({ type: 'reasoning', encrypted_content: 5 }), false);
+  assert.equal(ri({ type: 'reasoning', id: 'x', status: 'completed' }), true);
+  assert.equal(ri({ type: 'reasoning', id: big5000 }), false);
+  assert.equal(ri({ type: 'reasoning', status: { file: 'x' } }), false);
+  assert.equal(ri({ type: 'function_call_output', call_id: 'c', output: 'x', internal_chat_message_metadata_passthrough: { a: 'b' } }), true);
+  assert.equal(ri({ type: 'function_call_output', call_id: 'c', output: 'x', internal_chat_message_metadata_passthrough: big5000 }), false);
+  assert.equal(ri({ type: 'local_shell_call_output', call_id: 'c', output: 'x', other: 1 }), false);
+  // tool_use / tool_result settings are settings.
+  const am = (m) => anth({ messages: [m] });
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: big5000, name: 'n', input: {} }] })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'n', input: {}, caller: { file: 'x' } }] })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'n', input: {}, cache_control: { x: big5000 } }] })), false);
+  assert.equal(releasable(am({ role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'n' }] })), false, 'input is required');
+  assert.equal(releasable(am({ role: 'user', content: [{ type: 'tool_result', tool_use_id: big5000, content: 'x' }] })), false);
+  assert.equal(releasable(am({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'x', is_error: { file: 'x' } }] })), false);
+  assert.equal(releasable(am({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'x', is_error: true }] })), true);
+  // Gemini web: a prompt may look like a path or a MIME type; only the other slots are searched.
+  const gw = (turn, other) => releasable(req('POST', 'gemini.google.com', GEMINI, FORM,
+    `f.req=${formEnc(JSON.stringify([null, JSON.stringify([turn, other])]))}`));
+  assert.equal(gw(['/start the day'], ['en']), true);
+  assert.equal(gw(['text/plain is a type'], ['en']), true);
+  assert.equal(gw(['hi'], ['en', { a: ['x', ['application/pdf']] }]), false, 'nested in an object in an array');
+  assert.equal(gw(['hi'], ['en', { a: 'IMAGE/x' }]), false);
+  assert.equal(gw(['hi'], ['applications/x', 'images/x', 'texts/x', 'audios/x', 'videos/x', 'fonts/x', 'models/x', 'x/image/', 'application', 'image']), true, 'exact prefixes');
+  assert.equal(gw(['hi'], ['İmage/x']), true, 'an unrelated unicode letter is not a prefix');
+  assert.equal(gw(['hi'], { k: { j: '/up' } }), false);
+});
+
+function big4k() { return 'a '.repeat(2500); }
+
+// ── round 2 through the real fetch hook (verdict timeout + relay outage) ────
+const G3_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent';
+const CODEX_URL = 'https://chatgpt.com/backend-api/codex/responses';
+const CHATGPT_URL = 'https://chatgpt.com/backend-api/conversation';
+const HI = { messages: [{ role: 'user', content: 'hi' }] };
+const g3Call = (part) => jsonInit({ contents: [{ role: 'model', parts: [part] }] });
+const R2_HELD = {
+  'Gemini 3 functionResponse.parts inlineData PDF': [G3_URL, g3Call({ functionResponse: { name: 'f', response: {}, parts: [{ inlineData: { mimeType: 'application/pdf', data: b64n(4000) } }] } })],
+  'Gemini functionResponse.response.inlineData': [G3_URL, g3Call({ functionResponse: { name: 'f', response: { inlineData: { mimeType: 'application/pdf', data: b64n(4000) } } } })],
+  'Gemini functionCall.args.file b64': [G3_URL, g3Call({ functionCall: { name: 'f', args: { file: b64n(4096) } } })],
+  'duplicate key, LAST value benign': [CC_URL, { method: 'POST', headers: JSON_CT, body: '{"messages":[{"role":"user","content":[{"type":"image","source":{}}]}],"messages":[{"role":"user","content":"hi"}]}' }],
+  'FİLE key': [CHATGPT_URL, jsonInit({ messages: [{ content: { content_type: 'text', parts: ['hi'] } }], 'FİLE': 'Jane Doe 123-45-6789' })],
+  'ChatGPT asset_pointer': [CHATGPT_URL, jsonInit({ messages: [{ content: { content_type: 'text', parts: ['hi'] }, metadata: { x: { asset_pointer: 'file-service://file-1' } } }] })],
+  'ChatGPT selected_sources': [CHATGPT_URL, jsonInit({ messages: [{ content: { content_type: 'text', parts: ['hi'] }, metadata: { selected_sources: ['drive'] } }] })],
+  'query string carrying base64': [`${CC_URL}?x=${b64n(600)}`, jsonInit(HI)],
+  'non-string chat part': ['https://api.openai.com/v1/chat/completions', jsonInit({ messages: [{ role: 'user', content: [{ type: 'text', text: { file: 'x' } }] }] })]
+};
+
+test('fail-open round 2: the review\'s new leaks are HELD, on a verdict timeout and on a relay outage', async () => {
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    for (const [name, [url, init]] of Object.entries(R2_HELD)) {
+      const r = await foRun(outage, url, init);
+      assert.equal(r.outcome, 'BLOCKED', `${oname}: ${name}`);
+      assert.equal(r.w.netCalls.length, 0, `${oname}: ${name}`);
+      assert.equal(r.w.unchecked.length, 0, `${oname}: ${name}`);
+      assertBlocked(r.w.logs, 'fail-open-file-held', 'unavailable');
+    }
+  }
+});
+
+test('fail-open round 2: a Codex tool output carrying internal_chat_message_metadata_passthrough is SENT', async () => {
+  const body = { type: 'response.create', input: [{ type: 'custom_tool_call_output', call_id: 'c', output: 'done',
+    internal_chat_message_metadata_passthrough: { turn_id: 't', create_time: 1.5, content_item_kinds: ['tool.output'] } }] };
+  for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+    const r = await foRun(outage, CODEX_URL, jsonInit(body));
+    assert.equal(r.outcome, 'SENT', oname);
+    assert.equal(r.w.netCalls.length, 1, oname);
+    assert.deepEqual(r.w.unchecked, [outage.cause], oname);
+  }
+  // Control: the same frame with a file-ish key in the metadata is held.
+  const bad = structuredClone(body);
+  bad.input[0].internal_chat_message_metadata_passthrough.asset_pointer = 'file-service://f';
+  assert.equal((await foRun(FO_OUTAGES['verdict timeout'], CODEX_URL, jsonInit(bad))).outcome, 'BLOCKED');
 });
 
 test('decide() holds by default: a caller that forgets the releasable argument gets a hold', () => {
