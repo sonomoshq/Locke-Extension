@@ -6746,11 +6746,12 @@ test('mixed versions: a redact whose rebuilt request cannot be decoded is held a
 test('releasableUnderFailOpen: tool output text carrying a file is held (tool_output_text_carrying_a_file_is_held)', () => {
   const blob = 'QUJD'.repeat(MAX_OPAQUE_STRING / 4);
   const under = 'QUJD'.repeat(MAX_OPAQUE_STRING / 4 - 1);
-  const uri = 'data:application/pdf;base64,JVBERi0x';
-  const prose = `lockfile:\n${'a b '.repeat(5000)}\nsha512-${under}`;
+  const uri = `data:application/pdf;base64,${blob}`;
+  const shortUri = 'data:application/pdf;base64,JVBERi0x';
+  const prose = `lockfile:\n${'a b '.repeat(5000)}\nsha512: ${under}`;
   const tr = (content) => anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content }] }] });
   for (const [ok, c] of [
-    [true, prose], [true, under], [true, `see ${uri}`], [false, blob], [false, uri],
+    [true, prose], [true, under], [true, `see ${shortUri} in the source`], [false, `see ${uri}`], [false, blob], [false, uri],
     [true, [{ type: 'text', text: under }]], [false, [{ type: 'text', text: blob }]],
     [false, [{ type: 'text', text: 'x' }, { type: 'text', text: uri }]],
     [true, [{ type: 'tool_reference', tool_name: 'x' }]], [false, 1]
@@ -6778,6 +6779,7 @@ test('releasableUnderFailOpen: tool output text carrying a file is held (tool_ou
   assert.ok(releasable(tool('tool', under)));
   assert.ok(!releasable(tool('tool', blob)));
   assert.ok(!releasable(tool('function', uri)));
+  assert.ok(releasable(tool('function', shortUri)));
   assert.ok(!releasable(tool('tool', [{ type: 'text', text: blob }])));
   assert.ok(releasable(tool('tool', [{ type: 'text', text: under }])));
   assert.ok(releasable(tool('tool', null)));
@@ -6797,7 +6799,7 @@ const R3_HELD = {
   'Codex function_call_output of pure base64': [CODEX_URL, jsonInit({ type: 'response.create', input: [
     { type: 'function_call_output', call_id: 'c', output: 'JVBERi0xLjcK'.repeat(1000) }] })],
   'OpenAI tool-role message of a data URI': ['https://api.openai.com/v1/chat/completions', jsonInit({ messages: [
-    { role: 'tool', tool_call_id: '1', content: 'data:application/pdf;base64,JVBERi0xLjcK' }] })]
+    { role: 'tool', tool_call_id: '1', content: `data:application/pdf;base64,${'JVBERi0xLjcK'.repeat(400)}` }] })]
 };
 
 test('fail-open round 3: tool output text carrying a file is HELD, on a verdict timeout and on a relay outage', async () => {
@@ -6821,3 +6823,97 @@ test('fail-open round 3: ordinary tool text (a lockfile with hashes) is still SE
     assert.deepEqual(r.w.unchecked, [outage.cause], oname);
   }
 });
+
+// ── round 3b of the zh#370 review: an encoded run ANYWHERE in tool output ──
+// Port of the Rust `an_encoded_run_anywhere_in_tool_output_is_held`.
+
+test('releasableUnderFailOpen: an encoded run anywhere in tool output is held (an_encoded_run_anywhere_in_tool_output_is_held)', () => {
+  const b64 = 'JVBERi0xLjcK7b+IRl8Dre0pqxTCVufYUFZ5GjhDIMQ0lWhy'.repeat(200);
+  const wrap = (sep, w) => b64.match(new RegExp(`.{1,${w}}`, 'g')).join(sep);
+  const hex = '255044462d312e370aedbf88465f03'.repeat(150);
+  const tr = (c) => anth({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: c }] }] });
+  for (const [name, text] of [
+    ['trailing newline', `${b64}\n`], ['leading space', ` ${b64}`], ['prefix text', `Here is the file:\n${b64}`],
+    ['glued prefix', `out:${b64}`], ['wrapped 76, LF', wrap('\n', 76)], ['wrapped 76, CRLF', wrap('\r\n', 76)],
+    ['wrapped 64 by spaces', wrap(' ', 64)], ['wrapped by blank lines', wrap('\n\n', 76)],
+    ['text before a data uri', `see: data:application/pdf;base64,${b64}`],
+    ['leading whitespace data uri', `  \n data:application/pdf;base64,${b64}`],
+    ['hex with a prefix', `hex:\n${hex}`], ['hex pure', hex],
+    ['wrapped with a short last line', `${wrap('\n', 76)}\nQUJD`]
+  ]) {
+    assert.ok(!releasable(tr(text)), `${name} must be held`);
+  }
+  const chunks = b64.match(/.{1,3000}/g);
+  assert.ok(!releasable(tr(chunks.map((c) => ({ type: 'text', text: c })))), 'parts');
+  assert.ok(!releasable(anth({ messages: [{ role: 'user', content: chunks.map((c) => ({ type: 'tool_result', tool_use_id: 't', content: c })) }] })), 'results');
+  assert.ok(!releasable(jreq('POST', 'generativelanguage.googleapis.com', '/v1/models/g:generateContent',
+    { contents: [{ parts: [{ functionResponse: { name: 'f', parts: chunks.map((c) => ({ text: c })) } }] }] })), 'gemini parts');
+  const ok = [
+    'QUJD'.repeat(MAX_OPAQUE_STRING / 4 - 1),
+    `${'QUJD'.repeat(600)}.${'QUJD'.repeat(600)}`,
+    'the quick brown fox jumps over the lazy dog '.repeat(200),
+    `integrity sha512-${'QUJD'.repeat(20)} resolved https://x\n`.repeat(300),
+    `${'QUJD'.repeat(500)} ${'QUJD'.repeat(400)}`.replaceAll('QUJDQUJD', 'QUJD QUJD'),
+    `${'QUJD'.repeat(800)}\nend\n${'QUJD'.repeat(800)}`
+  ];
+  ok.forEach((text, i) => assert.ok(releasable(tr(text)), `ok case ${i} must go out`));
+  const exact = 'Q'.repeat(MAX_OPAQUE_STRING);
+  assert.ok(!releasable(tr(exact.match(/.{1,16}/g).join('\n'))));
+  assert.ok(releasable(tr(exact.slice(1).match(/.{1,16}/g).join('\n'))));
+  const lines = (w, n) => Array(n).fill('Q'.repeat(w)).join('\n');
+  assert.ok(releasable(tr(lines(15, 600))));
+  assert.ok(!releasable(tr(lines(16, 300))));
+  assert.ok(!releasable(tr(wrap('\t', 76))));
+  assert.ok(!releasable(tr(`${b64}. done`)));
+  for (const sep of ['/', '=', '-', '_', '+']) {
+    assert.ok(!releasable(tr(Array(50).fill('Q'.repeat(90)).join(sep))), sep);
+  }
+  assert.ok(releasable(tr(Array(50).fill('Q'.repeat(90)).join('.'))));
+  assert.ok(releasable(tr(Array(50).fill('Q'.repeat(90)).join('é'))), 'a non-ASCII character ends a run');
+  const half = tr('QUJD'.repeat(600));
+  assert.ok(releasable(half) && releasable(half), 'each request scans afresh');
+});
+
+// The re-check's 18 c6 repros, through the real fetch hook, on a verdict
+// timeout and on a relay outage. Built here at full size.
+{
+  const B = 'JVBERi0xLjcK7b+IRl8Dre0pqxTCVufYUFZ5GjhDIMQ0lWhy'.repeat(16700);
+  const HEX = '255044462d312e370aedbf88465f03'.repeat(20000);
+  const wrap76 = (sep) => B.match(/.{1,76}/g).join(sep);
+  const chunks = B.slice(0, 800000).match(/.{1,4000}/g);
+  const tr = (c) => [CC_URL, jsonInit({ messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: c }] }] })];
+  const codex = (o) => [CODEX_URL, jsonInit({ type: 'response.create', input: [{ type: 'function_call_output', call_id: 'c', output: o }] })];
+  const toolRole = (c) => ['https://api.openai.com/v1/chat/completions', jsonInit({ messages: [{ role: 'tool', tool_call_id: '1', content: c }] })];
+  const C6 = {
+    'R1 gemini part 500k b64': () => [G3_URL, g3Call({ functionResponse: { name: 'r', response: {}, parts: [{ text: B.slice(0, 500000) }] } })],
+    'R2 tool_result 800k b64': () => tr(B),
+    'R3 tool_result prefix text': () => tr(`Here is the file:\n${B}`),
+    'R4 tool_result trailing newline': () => tr(`${B}\n`),
+    'R5 tool_result leading space': () => tr(` ${B}`),
+    'R6 tool_result mime wrapped': () => tr(`${wrap76('\n')}\n`),
+    'R7 tool_result wrapped 76 spaces': () => tr(wrap76(' ')),
+    'R8 tool_result text before data uri': () => tr(`see: data:application/pdf;base64,${B}`),
+    'R9 tool_result leading ws data uri': () => tr(`  \n data:application/pdf;base64,${B}`),
+    'R10 tool_result parts chunks': () => tr(chunks.map((c) => ({ type: 'text', text: c }))),
+    'R11 many tool results': () => [CC_URL, jsonInit({ messages: [{ role: 'user', content: chunks.map((c) => ({ type: 'tool_result', tool_use_id: 't', content: c })) }] })],
+    'R12 gemini parts chunks': () => [G3_URL, g3Call({ functionResponse: { name: 'r', response: {}, parts: chunks.map((c) => ({ text: c })) } })],
+    'R13 codex fco prefix': () => codex(`cat out:\n${B}`),
+    'R14 chat tool role prefix': () => toolRole(`out:\n${B}`),
+    'R15 codex fco pure': () => codex(B),
+    'R16 chat tool role pure': () => toolRole(B),
+    'R17 hex prefix': () => tr(`hex:\n${HEX}`),
+    'R18 hex pure': () => tr(HEX)
+  };
+  for (const [name, build] of Object.entries(C6)) {
+    test(`fail-open round 3b (c6): ${name} is HELD, on a verdict timeout and on a relay outage`, async () => {
+      const [url, init] = build();
+      for (const [oname, outage] of Object.entries(FO_OUTAGES)) {
+        const r = await foRun(outage, url, init);
+        assert.equal(r.outcome, 'BLOCKED', `${oname}: ${name}`);
+        assert.equal(r.w.netCalls.length, 0, `${oname}: ${name}`);
+        assert.equal(r.w.unchecked.length, 0, `${oname}: ${name}`);
+        assertBlocked(r.w.logs, 'fail-open-file-held', 'unavailable');
+      }
+    });
+  }
+}
