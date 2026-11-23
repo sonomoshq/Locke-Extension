@@ -7333,8 +7333,8 @@ test('fail-open round 4: ChatGPT web\'s real send goes out request by request; w
           const line = assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
           const u = new URL(url);
           assert.match(line, new RegExp(`\\bhost=${u.hostname.replace(/\./g, '\\.')}\\b`), line);
-          // The route, or none on the upload path (its path is the file's name).
-          assert.ok(/\broute=\//.test(line) || (/\bscope=upload\b/.test(line) && !/\broute=/.test(line)), line);
+          // The rule's template for a route it reads, else `-`.
+          assert.ok(/\broute=(\/|-(\s|$))/.test(line), line);
           assert.ok(!/sig=y|123-45-6789|notes\.csv|Ada/.test(line), line);
         }
       }
@@ -7342,40 +7342,117 @@ test('fail-open round 4: ChatGPT web\'s real send goes out request by request; w
   }
 });
 
-test('fail-open round 4: a hold\'s route is the guard\'s, ids as :x, never the query; an upload\'s is withheld', async () => {
+test('fail-open round 4b: a hold names its route only as the rule\'s own template, never any of the path', async () => {
   const w = makeWorld(() => ({ ok: false, code: 'bridge-error' }), realCatalogGlobals('https://chatgpt.com/'));
   w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
-  await assert.rejects(w.sandbox.fetch('https://chatgpt.com/backend-api/files/f250ee33-9087-8cf6-bcba-9da44104b379/uploaded?sig=SECRET',
-    jsonInit({ file_name: 'SECRET.txt' })), blockedError);
-  const line = assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
+  const routeOf = (line) => (/\broute=(\S+)/.exec(line) || [])[1];
+  const hold = async (url, init) => {
+    w.logs.length = 0;
+    await assert.rejects(w.sandbox.fetch(url, init), blockedError, url);
+    return assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
+  };
+  // A route the rule reads, held for its body: its template.
+  let line = await hold('https://chatgpt.com/backend-api/f/conversation?SECRET', jsonInit({ messages: [], file: 'SECRET' }));
   assert.match(line, /\bhost=chatgpt\.com\b/);
-  assert.match(line, /\broute=\/backend-api\/files\/:x\/uploaded\b/);
-  assert.ok(!line.includes('SECRET'), line);
-  // Guard's id test, arm by arm: 16 hex, 4 digits, a 22-byte token with a
-  // digit and a letter; not 15 hex, 3 digits, or 22 letters.
-  w.logs.length = 0;
-  await assert.rejects(w.sandbox.fetch('https://chatgpt.com/a/deadbeefdeadbeef/1234/abcdefghijklmnopqrstu1/deadbeefdeadbee/123/abcdefghijklmnopqrstuv/12345678-1234-1234-1234-123456789012/v1',
-    jsonInit({ x: 1 })), blockedError);
-  assert.match(assertBlocked(w.logs, 'fail-open-file-held'), /\broute=\/a\/:x\/:x\/:x\/deadbeefdeadbee\/123\/abcdefghijklmnopqrstuv\/:x\/v1\b/);
-  // The token arm's alphabet, member by member, and its length.
-  w.logs.length = 0;
-  await assert.rejects(w.sandbox.fetch('https://chatgpt.com/t/abcdefghijklmnopqrstu+1/abcdefghijklmnopqrstu=1/abcdefghijklmnopqrstu_1/abcdefghijklmnopqrst1/abcdefghijklmnopqrstu.1',
-    jsonInit({ x: 1 })), blockedError);
-  assert.match(assertBlocked(w.logs, 'fail-open-file-held'), /\broute="?\/t\/:x\/:x\/:x\/abcdefghijklmnopqrst1\/abcdefghijklmnopqrstu\.1"?(\s|$)/);
-  // Each arm's character classes, edge digits included; and the 512 clip.
-  w.logs.length = 0;
-  await assert.rejects(w.sandbox.fetch('https://chatgpt.com/e/00000000-0000-0000-0000-000000000000/0123456789abcdef/0909/abcdefghijklmnopqrstu9/abcdefghijklmnopqrstu0/0123456789abcde/090',
-    jsonInit({ x: 1 })), blockedError);
-  assert.match(assertBlocked(w.logs, 'fail-open-file-held'), /\broute=\/e\/:x\/:x\/:x\/:x\/:x\/0123456789abcde\/090(\s|$)/);
-  w.logs.length = 0;
-  await assert.rejects(w.sandbox.fetch(`https://chatgpt.com/${'a/'.repeat(400)}`, jsonInit({ x: 1 })), blockedError);
-  assert.equal(/\broute=(\S+)/.exec(assertBlocked(w.logs, 'fail-open-file-held'))[1].length, 512);
-  // A cross-origin upload's path is the file's name: no route.
-  w.logs.length = 0;
-  await assert.rejects(w.sandbox.fetch('https://sdmntprwestcentralus.oaiusercontent.com/files/x/my-secret-name.pdf?sig=1',
-    { method: 'PUT', headers: { 'content-type': 'application/pdf' }, body: '%PDF-1.7' }), blockedError);
-  const up = assertBlocked(w.logs, 'fail-open-file-held');
-  assert.ok(!/my-secret-name|route=\//.test(up), up);
+  assert.equal(routeOf(line), '/backend-api/f/conversation', line);
+  // A route it does not read: `-`.
+  line = await hold('https://chatgpt.com/backend-api/files/f250ee33-9087-8cf6-bcba-9da44104b379/uploaded?sig=SECRET',
+    jsonInit({ file_name: 'SECRET.txt' }));
+  assert.equal(routeOf(line), '-', line);
+  // zh#370 4b: the Graph upload repro, an e-mail address in a path, an
+  // SSN-shaped segment. The route names none of it. (The shim's own `path=`
+  // field, on every line it writes, is pre-existing and not the route.)
+  for (const [url, init] of [
+    ['https://graph.microsoft.com/v1.0/users/jane.doe@contoso.com/drive/root:/Documents/Jane%20Doe%20Tax%20Return%202025.pdf:/content',
+      { method: 'PUT', headers: { 'content-type': 'application/pdf' }, body: '%PDF-1.7' }],
+    ['https://mail.example.com/mail/u/0/jane.doe@contoso.com/send', jsonInit({ to: 'x' })],
+    ['https://api.anthropic.com/api/claude_code/123-45-6789', jsonInit({ x: 1 })]
+  ]) {
+    line = await hold(url, init);
+    assert.equal(routeOf(line), '-', line);
+  }
+  // A cross-origin upload names neither its path nor a route.
+  line = await hold('https://sdmntprwestcentralus.oaiusercontent.com/files/x/my-secret-name.pdf?sig=1',
+    { method: 'PUT', headers: { 'content-type': 'application/pdf' }, body: '%PDF-1.7' });
+  assert.ok(!/my-secret-name/.test(line), line);
+  assert.equal(routeOf(line), '-', line);
+});
+
+test('failOpenRouteTemplate: the rule\'s own route names, and `-` for everything else (a_hold_is_labelled_by_host_and_the_rules_own_route)', () => {
+  const m = /\/\/ <releasableUnderFailOpen>\n([\s\S]*?)\/\/ <\/releasableUnderFailOpen>/.exec(SHIM_SRC);
+  const tpl = new Function(m[1] + '; return failOpenRouteTemplate;')();
+  const named = [
+    ['POST', 'api.anthropic.com', '/v1/messages', '/v1/messages'],
+    ['POST', 'api.anthropic.com', '/v1/messages/count_tokens', '/v1/messages/count_tokens'],
+    ['GET', 'api.anthropic.com', '/api/claude_cli/bootstrap', '/api/claude_cli/bootstrap'],
+    ['GET', 'api.anthropic.com', '/api/claude_code/policy_limits', '/api/claude_code/policy_limits'],
+    ['GET', 'api.anthropic.com', '/api/claude_code/settings', '/api/claude_code/settings'],
+    ['GET', 'api.anthropic.com', '/api/claude_code_penguin_mode', '/api/claude_code_penguin_mode'],
+    ['GET', 'api.anthropic.com', '/api/organizations/jane/model_selector/cc', '/api/organizations/:x/model_selector/cc'],
+    ['GET', 'api.anthropic.com', `/api/organizations/${'o9'.repeat(32)}/model_selector/cc`, '/api/organizations/:x/model_selector/cc'],
+    ['POST', 'claude.ai', '/api/organizations/o/chat_conversations/c/completion', '/api/organizations/:x/chat_conversations/:x/completion'],
+    ['POST', 'claude.ai', '/api/organizations/o/chat_conversations/c/retry_completion', '/api/organizations/:x/chat_conversations/:x/retry_completion'],
+    ['POST', 'claude.ai', '/api/organizations/o/chat_conversations/c/title', '/api/organizations/:x/chat_conversations/:x/title'],
+    ['POST', 'chatgpt.com', '/backend-api/conversation', '/backend-api/conversation'],
+    ['POST', 'chatgpt.com:443', '/backend-api/conversation/prepare', '/backend-api/conversation/prepare'],
+    ['POST', 'chat.openai.com', '/backend-anon/f/conversation', '/backend-anon/f/conversation'],
+    ['POST', 'CHATGPT.COM', '/backend-anon/conversation/init', '/backend-anon/conversation/init'],
+    ['POST', 'chatgpt.com', '/backend-api/sentinel/chat-requirements/finalize', '/backend-api/sentinel/chat-requirements/finalize'],
+    ['POST', 'chatgpt.com', '/backend-api/codex/responses', '/backend-api/codex/responses'],
+    ['WS-SEND', 'chatgpt.com', '/backend-api/codex/responses', '/backend-api/codex/responses'],
+    ['WS-SEND', 'ws.chatgpt.com', '/ws/user/abc', '/ws/user/:x'],
+    ['WS-SEND', 'ws.chatgpt.com', '/p13/ws/user/gwoq-xA3yg4ebFrRtY0xZWRD3yfaf', '/:x/ws/user/:x'],
+    ['WS-SEND', 'ws.chatgpt.com', '/ws/ws/user/abc', '/:x/ws/user/:x'],
+    ['POST', 'gemini.google.com', GEMINI, GEMINI],
+    ['POST', 'gemini.google.com', '/_/BardChatUi/data/batchexecute', '/_/BardChatUi/data/batchexecute'],
+    ['POST', 'waa-pa.clients6.google.com', '/$rpc/google.internal.waa.v1.Waa/Create', '/$rpc/google.internal.waa.v1.Waa/Create'],
+    ['POST', 'accounts.google.com', '/RotateCookies', '/RotateCookies'],
+    ['POST', 'duck.ai', '/duckchat/v1/chat', '/duckchat/v1/chat'],
+    ['POST', 'duckduckgo.com', '/duckchat/v1/chat', '/duckchat/v1/chat'],
+    ['POST', 'api.openai.com', '/v1/chat/completions', '/v1/chat/completions'],
+    ['POST', 'api.openai.com', '/v1/responses', '/v1/responses'],
+    ['POST', 'generativelanguage.googleapis.com', '/v1beta/models/gemini-2.5-flash:generateContent', '/:x/models/:x:generateContent'],
+    ['POST', 'generativelanguage.googleapis.com', '/vJane/models/jane:streamGenerateContent', '/:x/models/:x:streamGenerateContent'],
+    ['POST', 'generativelanguage.googleapis.com', '/v1/models/g:countTokens', '/:x/models/:x:countTokens']
+  ];
+  for (const [mt, h, p, want] of named) assert.equal(tpl(mt, h, p), want, `${mt} ${h} ${p}`);
+  const dash = [
+    ['GET', 'api.anthropic.com', '/v1/messages'], ['POST', 'api.anthropic.com', '/v1/messages/x'],
+    ['POST', 'api.anthropic.com', '/api/claude_code/settings'], ['GET', 'api.anthropic.com', '/api/claude_code/metrics'],
+    ['GET', 'api.anthropic.com', '/api/organizations/a b/model_selector/cc'],
+    ['POST', 'claude.ai', '/api/organizations/o/chat_conversations/c/upload'],
+    ['POST', 'claude.ai', '/api/organizations//chat_conversations/c/completion'],
+    ['POST', 'claude.ai', '/api/organizations/o/conversations/c/completion'],
+    ['POST', 'chatgpt.com', '/backend-api/files'], ['POST', 'chatgpt.com', '/backend-apis/conversation'],
+    ['POST', 'chatgpt.com', '/unauth-mweb/conversation'], ['PUT', 'chatgpt.com', '/backend-api/conversation'],
+    ['WS-SEND', 'chat.openai.com', '/backend-api/codex/responses'], ['POST', 'ws.chatgpt.com', '/ws/user/abc'],
+    ['WS-SEND', 'ws.chatgpt.com', '/ws/user/a/b'], ['WS-SEND', 'ws.chatgpt.com', '/a b/ws/user/c'],
+    ['POST', 'gemini.google.com', '/_/BardChatUi/data/assistant.lamda.BardFrontendService/ProcessFile'],
+    ['POST', 'waa-pa.clients6.google.com', '/$rpc/google.internal.waa.v1.Waa/Ping'],
+    ['POST', 'accounts.google.com', '/RotateCookie'], ['POST', 'duck.ai', '/duckchat/v1/status'],
+    ['POST', 'api.openai.com', '/v1/files'], ['POST', 'generativelanguage.googleapis.com', '/v1/models/g:embedContent'],
+    ['POST', 'generativelanguage.googleapis.com', '/v1/models/:generateContent'],
+    ['POST', 'generativelanguage.googleapis.com', '/x1/models/g:generateContent'],
+    ['POST', 'example.com', '/v1/messages'],
+    ['GET', 'api.anthropic.com', `/api/organizations/${'o'.repeat(65)}/model_selector/cc`],
+    ['GET', 'example.com', '/api/claude_cli/bootstrap'],
+    ['POST', 'claude.ai', '/api/organizations/o/chat_conversations//completion'],
+    ['WS-SEND', 'ws.chatgpt.com', '/xx/user/abc'], ['WS-SEND', 'ws.chatgpt.com', '/ws/user/a b'],
+    ['PUT', 'graph.microsoft.com', '/v1.0/users/jane.doe@contoso.com/drive/root:/Documents/Jane%20Doe%20Tax%20Return%202025.pdf:/content'],
+    ['POST', 'api.anthropic.com', '/v1/users/jane.doe@contoso.com/messages'],
+    ['POST', 'api.anthropic.com', '/api/claude_code/123-45-6789']
+  ];
+  for (const [mt, h, p] of dash) assert.equal(tpl(mt, h, p), '-', `${mt} ${h} ${p}`);
+  // Every request of every real send has a name.
+  for (const { surface, steps } of R4.plain()) {
+    for (const [what, raw] of steps) {
+      const s = raw.toString('latin1');
+      const head = s.slice(0, s.indexOf('\r\n\r\n')).split('\r\n');
+      const [mt, target] = head[0].split(' ');
+      const h = head.slice(1).find((l) => /^host:/i.test(l)).slice(5).trim();
+      assert.notEqual(tpl(mt, h, target.split(/[?#]/)[0]), '-', `${surface}: ${what}`);
+    }
+  }
 });
 
 test('fail-open round 4: ChatGPT\'s live-update socket keeps its presence frames; another command closes it, named', async () => {
@@ -7401,7 +7478,7 @@ test('fail-open round 4: ChatGPT\'s live-update socket keeps its presence frames
   assert.equal(other.ws.closes.length, 1);
   const line = assertBlocked(other.w.logs, 'fail-open-file-held', 'unavailable');
   assert.match(line, /\bhost=ws\.chatgpt\.com\b/);
-  assert.match(line, /\broute=\/p13\/ws\/user\/:x\b/);
+  assert.match(line, /\broute=\/:x\/ws\/user\/:x(\s|$)/);
   assert.ok(!/verify=|the sky/.test(line), line);
 });
 

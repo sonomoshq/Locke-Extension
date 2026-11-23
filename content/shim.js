@@ -2438,6 +2438,89 @@
     };
     try { return releasable(); } catch { return false; }
   }
+
+  // The rule's own name for a route it reads — its template, the segments it
+  // matches by wildcard as `:x` — else '-'. Built only from the rule's
+  // literals: nothing of the path (an e-mail address, a file name, an id, a
+  // search term) ever comes out. For a fail-open hold's log line. A port of
+  // Proxy src/fail_open_shape.rs `route_template`.
+  function failOpenRouteTemplate(method, host, path) {
+    const m = String(method || '');
+    let h = String(host || '').trim().toLowerCase();
+    if (h.endsWith(':443')) h = h.slice(0, -4);
+    const p = String(path || '');
+    const seg = p.split('/');
+    const word = (s) => typeof s === 'string' && s.length <= 64 && /^[A-Za-z0-9._-]+$/.test(s);
+    if (m === 'POST' && h === 'api.anthropic.com') {
+      if (p === '/v1/messages') return '/v1/messages';
+      if (p === '/v1/messages/count_tokens') return '/v1/messages/count_tokens';
+      return '-';
+    }
+    if (m === 'GET' && h === 'api.anthropic.com') {
+      for (const r of ['/api/claude_cli/bootstrap', '/api/claude_code/policy_limits', '/api/claude_code/settings',
+        '/api/claude_code_penguin_mode']) {
+        if (p === r) return r;
+      }
+      if (seg.length === 6 && seg[0] === '' && seg[1] === 'api' && seg[2] === 'organizations' && word(seg[3]) &&
+        seg[4] === 'model_selector' && seg[5] === 'cc') return '/api/organizations/:x/model_selector/cc';
+      return '-';
+    }
+    if (m === 'POST' && h === 'claude.ai') {
+      if (seg.length === 7 && seg[0] === '' && seg[1] === 'api' && seg[2] === 'organizations' && seg[3] !== '' &&
+        seg[4] === 'chat_conversations' && seg[5] !== '') {
+        for (const leaf of ['completion', 'retry_completion', 'title']) {
+          if (seg[6] === leaf) return `/api/organizations/:x/chat_conversations/:x/${leaf}`;
+        }
+      }
+      return '-';
+    }
+    if (m === 'POST' && (h === 'chatgpt.com' || h === 'chat.openai.com')) {
+      if (p === '/backend-api/codex/responses') return '/backend-api/codex/responses';
+      for (const prefix of ['/backend-api', '/backend-anon']) {
+        for (const r of ['/conversation', '/f/conversation', '/conversation/prepare', '/f/conversation/prepare',
+          '/conversation/init', '/sentinel/chat-requirements/prepare', '/sentinel/chat-requirements/finalize']) {
+          if (p === prefix + r) return prefix + r;
+        }
+      }
+      return '-';
+    }
+    if (m === 'WS-SEND' && h === 'chatgpt.com' && p === '/backend-api/codex/responses') return '/backend-api/codex/responses';
+    if (m === 'WS-SEND' && h === 'ws.chatgpt.com') {
+      const sharded = seg.length === 5 && word(seg[1]);
+      const tail = sharded ? seg.slice(2) : seg.slice(1);
+      if (seg[0] === '' && tail.length === 3 && tail[0] === 'ws' && tail[1] === 'user' && word(tail[2])) {
+        return sharded ? '/:x/ws/user/:x' : '/ws/user/:x';
+      }
+      return '-';
+    }
+    if (m === 'POST' && h === 'gemini.google.com') {
+      for (const r of ['/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate', '/_/BardChatUi/data/batchexecute']) {
+        if (p === r) return r;
+      }
+      return '-';
+    }
+    if (m === 'POST' && h === 'waa-pa.clients6.google.com' && p === '/$rpc/google.internal.waa.v1.Waa/Create') {
+      return '/$rpc/google.internal.waa.v1.Waa/Create';
+    }
+    if (m === 'POST' && h === 'accounts.google.com' && p === '/RotateCookies') return '/RotateCookies';
+    if (m === 'POST' && (h === 'duck.ai' || h === 'duckduckgo.com') && p === '/duckchat/v1/chat') return '/duckchat/v1/chat';
+    if (m === 'POST' && h === 'api.openai.com') {
+      if (p === '/v1/chat/completions') return '/v1/chat/completions';
+      if (p === '/v1/responses') return '/v1/responses';
+      return '-';
+    }
+    if (m === 'POST' && h === 'generativelanguage.googleapis.com' && seg.length === 4 && seg[0] === '' &&
+      seg[1].startsWith('v') && seg[2] === 'models') {
+      const i = seg[3].indexOf(':');
+      if (i > 0) {
+        const verb = seg[3].slice(i + 1);
+        for (const v of ['generateContent', 'streamGenerateContent', 'countTokens']) {
+          if (verb === v) return `/:x/models/:x:${v}`;
+        }
+      }
+    }
+    return '-';
+  }
   // </releasableUnderFailOpen>
 
   // The ONE relay code that lets a request through: `locke-signed-out`. The
@@ -3860,26 +3943,14 @@
   // "Something went wrong" swallows the sentence whole. Logging it
   // unconditionally means every refusal this file makes is attributable to
   // Sonomos, on every transport, whatever the page does with the failure.
-  // Where a request was going, value-free, for a fail-open hold's line: its
-  // path with every id-like segment as `:x`, the way the guard logs routes
-  // (Spliicer-Guard RouteMemory::normalize_path; Proxy and Bridge
-  // fail_open_shape.rs route_of). Printable ASCII only, at most 512
-  // characters, `-` when empty.
-  function failOpenRoute(path) {
-    const idLike = (seg) => /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(seg) ||
-      /^[0-9a-fA-F]{16,}$/.test(seg) || /^[0-9]{4,}$/.test(seg) ||
-      (/^[A-Za-z0-9+/=_-]{22,}$/.test(seg) && /[0-9]/.test(seg) && /[A-Za-z]/.test(seg));
-    const route = String(path).split('/').map((seg) => (idLike(seg) ? ':x' : seg)).join('/');
-    if (route === '') return '-';
-    return Array.from(route).slice(0, 512).map((c) => (/^[\x21-\x7e]$/.test(c) ? c : '?')).join('');
-  }
-
   function reporter(shape, startedAt) {
     return (level, reason, extra) => {
       const line = { ...shape, ...(extra || {}), ms: Date.now() - startedAt };
-      // A fail-open hold names its route as the guard logs it (zh#370). Not
-      // on the upload path, whose path is the file's name (markUpload).
-      if (reason === FILE_HELD) line.route = shape.path == null ? null : failOpenRoute(shape.path);
+      // A fail-open hold names its route only as the rule's own template, `-`
+      // for one the rule does not read (zh#370) — never the path's own text.
+      if (reason === FILE_HELD) {
+        line.route = shape.path == null ? '-' : failOpenRouteTemplate(shape.method, shape.host, shape.path);
+      }
       if (line.action === 'block') line.kind = blockKind(reason);
       (level === 'warn' ? warn : debug)(reason, line);
       // The MERGED line, not just `extra`: the shape carries `bytes`, and the
