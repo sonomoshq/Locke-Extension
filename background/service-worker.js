@@ -128,33 +128,59 @@ async function everConnected() {
   } catch { return true; }
 }
 
+// Every write to the pairing state (EVER_CONNECTED_KEY and the pass-through
+// flag) runs through this one queue. Deciding "not set up" takes several
+// awaits (never connected? managed install?), and a decision begun before
+// Locke answered must not land after it: that would turn pass-through back on
+// for every page once screening had started. So the flag is only ever SET
+// inside the queue, after re-reading EVER_CONNECTED_KEY there.
+let pairingQueue = Promise.resolve();
+function pairingStep(fn) {
+  const run = pairingQueue.then(fn, fn);
+  pairingQueue = run.catch(() => {});
+  return run;
+}
+
 async function markEverConnected() {
-  // Locke has been seen: screening starts now, on every page.
-  await storeNotSetUp(false);
-  try {
-    const got = await ext.storage.local.get(EVER_CONNECTED_KEY);
-    if (got?.[EVER_CONNECTED_KEY] === true) return;
-    await ext.storage.local.set({ [EVER_CONNECTED_KEY]: true });
-  } catch { /* retried on the next connected check */ }
+  // Locke has been seen: screening starts now, on every page. Paired first,
+  // then the flag cleared, both inside the queue.
+  await pairingStep(async () => {
+    try {
+      const got = await ext.storage.local.get(EVER_CONNECTED_KEY);
+      if (got?.[EVER_CONNECTED_KEY] !== true) await ext.storage.local.set({ [EVER_CONNECTED_KEY]: true });
+    } catch { /* retried on the next connected check */ }
+    await writeNotSetUp(false);
+  });
 }
 
 // The "not set up" pass-through flag the content script hands to the shim
 // (shared/constants.js LOCKE_NOT_SET_UP_KEY). Written only when it changes, so
 // a heartbeat does not wake every tab's storage listener. A failed write
 // leaves the last value, and the shim's default is false (screen).
-async function storeNotSetUp(value) {
+function storeNotSetUp(value) {
+  return pairingStep(async () => {
+    // A stale "not set up" never outlives a connection: re-checked here,
+    // after every earlier pairing write has landed.
+    if (value === true && await everConnected()) value = false;
+    await writeNotSetUp(value === true);
+    return value === true;
+  });
+}
+
+async function writeNotSetUp(value) {
   try {
     const got = await ext.storage.local.get(LOCKE_NOT_SET_UP_KEY);
-    if (got?.[LOCKE_NOT_SET_UP_KEY] === (value === true)) return;
-    await ext.storage.local.set({ [LOCKE_NOT_SET_UP_KEY]: value === true });
+    if (got?.[LOCKE_NOT_SET_UP_KEY] === value) return;
+    await ext.storage.local.set({ [LOCKE_NOT_SET_UP_KEY]: value });
   } catch { /* the next health check retries */ }
 }
 
-async function recordNotSetUp(value) {
-  await storeNotSetUp(value);
+async function recordNotSetUp(requested) {
+  // What was actually stored, which a connection that landed first overrides.
+  const value = await storeNotSetUp(requested);
   await setActionTitle(value);
-  await maybeShowNotConnectedTab(value === true);
-  return value === true;
+  await maybeShowNotConnectedTab(value);
+  return value;
 }
 
 // The one-time "Locke isn't connected yet" tab (popup/welcome.html). Armed by
@@ -652,8 +678,7 @@ function runCheck(reason = 'alarm') {
 }
 
 async function consentRequiredState() {
-  const notSetUp = await notSetUpWithoutProbe();
-  await storeNotSetUp(notSetUp);
+  const notSetUp = await storeNotSetUp(await notSetUpWithoutProbe());
   const state = { ...initialState(), error: DATA_CONSENT_REQUIRED, screening: SCREENING.UNAVAILABLE, notSetUp };
   await setState(state);
   await ext.action.setBadgeText({ text: '!' });

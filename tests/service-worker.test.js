@@ -398,6 +398,41 @@ test('service-worker: a fresh install with no app opens the "not connected" tab 
   }
 });
 
+test('service-worker: a stale missing-host result cannot re-enable pass-through after Locke is reached (Codex P2)', async () => {
+  const saved = store.local.everConnectedToLocke;
+  const savedFlag = store.local.lockeNotSetUp;
+  const managedGet = chrome.storage.managed.get;
+  const settle = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r)); };
+  try {
+    delete store.local.everConnectedToLocke;
+    store.local.lockeNotSetUp = true;
+    // Hold the managed-install lookup so the missing-host capture stalls
+    // inside noBridgeCode() after it has read "never connected".
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    chrome.storage.managed.get = async () => { await gate; throw new Error('no policy'); };
+    nativeHandler = () => { throw new Error('Specified native messaging host not found.'); };
+    const stale = deliver(captureMsg, TRUSTED);
+    await settle();
+    // Locke comes up and answers a second request while the first is stalled.
+    chrome.storage.managed.get = managedGet;
+    nativeHandler = () => ({ type: 'receipt', receipt: { decision: 'allow' } });
+    await deliver(captureMsg, TRUSTED);
+    await settle();
+    release();
+    await stale;
+    await settle();
+    assert.equal(store.local.everConnectedToLocke, true);
+    assert.notEqual(store.local.lockeNotSetUp, true, 'screening must stay on once Locke has been reached');
+  } finally {
+    chrome.storage.managed.get = managedGet;
+    if (saved === undefined) delete store.local.everConnectedToLocke;
+    else store.local.everConnectedToLocke = saved;
+    if (savedFlag === undefined) delete store.local.lockeNotSetUp;
+    else store.local.lockeNotSetUp = savedFlag;
+  }
+});
+
 test('service-worker: a receipt marks this profile as paired', async () => {
   const saved = store.local.everConnectedToLocke;
   try {
