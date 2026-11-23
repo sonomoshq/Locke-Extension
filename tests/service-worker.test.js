@@ -433,6 +433,29 @@ test('service-worker: a stale missing-host result cannot re-enable pass-through 
   }
 });
 
+test('service-worker: an IT policy arriving clears pass-through at once (Codex P2)', async () => {
+  const savedFlag = store.local.lockeNotSetUp;
+  const managedGet = chrome.storage.managed.get;
+  const settle = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r)); };
+  try {
+    store.local.lockeNotSetUp = true;
+    // A change that is not a policy leaves it alone.
+    registered.storageChanged({ settings: {} }, 'local');
+    await settle();
+    assert.equal(store.local.lockeNotSetUp, true);
+    // Policy pushed: managed from now on, so screening starts without
+    // waiting for the health alarm.
+    chrome.storage.managed.get = async () => ({ debugLogging: false });
+    registered.storageChanged({ debugLogging: { newValue: false } }, 'managed');
+    await settle();
+    assert.equal(store.local.lockeNotSetUp, false);
+  } finally {
+    chrome.storage.managed.get = managedGet;
+    if (savedFlag === undefined) delete store.local.lockeNotSetUp;
+    else store.local.lockeNotSetUp = savedFlag;
+  }
+});
+
 test('service-worker: a receipt marks this profile as paired', async () => {
   const saved = store.local.everConnectedToLocke;
   try {

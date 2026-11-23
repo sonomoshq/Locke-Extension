@@ -1135,7 +1135,16 @@ async function captureViaHost(requestB64, provider, coverage) {
 // Keep the cached verbosity flag in step with settings/policy changes, so
 // flipping debugLogging takes effect without reloading the extension.
 try {
-  ext.storage.onChanged.addListener(() => { refreshDebugFlag(); });
+  ext.storage.onChanged.addListener((_changes, area) => {
+    refreshDebugFlag();
+    // IT policy arrived (or changed): a managed install never passes traffic
+    // through, so re-decide now rather than at the next health check. Only
+    // ever clears the flag — a policy change cannot make a profile un-managed
+    // into pass-through here; the health check re-derives that.
+    if (area === 'managed') {
+      void isManagedInstall().then((managed) => { if (managed) return recordNotSetUp(false); }).catch(() => {});
+    }
+  });
 } catch { /* storage events unavailable — the startup read still applies */ }
 refreshDebugFlag();
 

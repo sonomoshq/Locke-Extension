@@ -336,6 +336,15 @@
       // never change behaviour by failing — same rule as the service worker.
       Object.assign(config, pick(await api.storage.managed.get(SHIM_SETTING_KEYS)));
     } catch { /* no policy */ }
+    try {
+      // Any IT policy at all makes this a managed install, and a managed
+      // install never passes traffic through — decided here, from the policy
+      // itself, so a policy pushed after the worker raised `lockeNotSetUp`
+      // takes effect on the very next push instead of at the next health
+      // check. (The worker clears its flag on the same change.)
+      const policy = await api.storage.managed.get(null);
+      if (policy && typeof policy === 'object' && Object.keys(policy).length > 0) config.lockeNotSetUp = false;
+    } catch { /* no policy */ }
     return config;
   }
 

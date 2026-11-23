@@ -300,6 +300,15 @@ for (const dialect of ['chromium', 'firefox']) {
     }
   });
 
+  test(`content-script (${dialect}): any IT policy turns the not-set-up pass-through off (Codex P2)`, async () => {
+    const world = makeWorld({ dialect, local: { lockeNotSetUp: true }, managed: { enforceTimeoutMs: 20000 } });
+    await settle();
+    assert.equal(world.configs().at(-1).data.config.lockeNotSetUp, false);
+    const unmanaged = makeWorld({ dialect, local: { lockeNotSetUp: true }, managed: null });
+    await settle();
+    assert.equal(unmanaged.configs().at(-1).data.config.lockeNotSetUp, true, 'no policy: the worker flag stands');
+  });
+
   test(`content-script (${dialect}): an admin policy beats the local value`, async () => {
     const world = makeWorld({
       dialect,
