@@ -127,17 +127,31 @@ verdict means no send. The residuals we accept and document:
     gate. The `web_screening: "none"` search hosts no longer get their old
     passthrough on their own pages: they are `catalog_host`, classified,
     and blocked in an outage like everything else.
-  - *Before the desktop app has ever been set up, ordinary websites pass.*
-    A fresh install in a browser profile that has never reached Locke (no
-    connected health check and no screening receipt, ever), and that IT did
-    not install or configure by policy, reports `locke-not-set-up` instead
-    of `no-bridge`. On that code the shim applies the same narrow open-web
-    pass as `locke-signed-out`: logins, checkouts and other non-AI requests
-    go out; AI hosts, AI pages, catalog API hosts, uploads and local model
-    servers still block, with a message that names the missing desktop app.
-    Nothing is screened in this state and the popup says so ("Not set up").
-    Once this profile has reached Locke once, and on every install that
-    predates this rule, a missing host is an outage and blocks as above.
+  - *Before the desktop app has ever been seen, the extension screens
+    nothing — AI sites included.* A fresh install in a browser profile that
+    has never reached Locke (no connected health check and no screening
+    receipt, ever), and that IT did not install or configure by policy, is
+    **not set up**: no native host is registered, or (Firefox, Edge) data
+    sharing has not been allowed yet. In that state every request goes out
+    untouched — ChatGPT, Claude, Gemini, Google AI Mode, uploads, local
+    model servers, everything — and nothing is sent to the desktop app. This
+    is a product decision: without the app nothing can screen, and holding
+    AI traffic would only break the sites without protecting anything. The
+    extension says so instead: the popup reads **Not connected** / Screening
+    **Off**, says in words that nothing is being screened, AI sites
+    included, and links to sonomos.ai/downloads; the toolbar shows the
+    amber `!` and its tooltip says Locke is not connected. The worker
+    records the state as `lockeNotSetUp` and the shim reads it as a flag
+    (`content/shim.js` "NOT SET UP IS NOT SCREENING AT ALL"); a
+    `locke-not-set-up` relay answer for a request made before the flag
+    arrived is sent too, as `locke-not-set-up-pass`. **The cost:** a user
+    who installs the extension and never installs the app is unprotected
+    and is told so only by the popup and the toolbar mark, not on each
+    send. The moment this profile reaches Locke once, the flag is cleared
+    for good and everything above applies — a missing host is then an
+    outage and blocks. Installs that predate this rule (updated from an
+    earlier version), and admin- or policy-managed installs, are never in
+    this state and keep the full fail-closed posture from the first request.
   - *Latency on every bodied request.* Each one now makes a native-messaging
     round trip and a classification before it leaves, on every site.
   - *What cannot be held cannot be classified, so off a capture path it is

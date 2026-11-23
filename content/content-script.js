@@ -47,6 +47,10 @@
   // Desktop-owned fail-open window (shared/constants.js FAIL_OPEN_KEY), read
   // from storage.session. Never a setting here; absent or expired reads closed.
   const FAIL_OPEN_KEY = 'failOpenWindow';
+  // Worker-owned, never a setting (shared/constants.js LOCKE_NOT_SET_UP_KEY):
+  // true while this browser has never reached the desktop app. The shim then
+  // screens nothing. Absent or unreadable reads false — screen as usual.
+  const LOCKE_NOT_SET_UP_KEY = 'lockeNotSetUp';
   const UNCHECKED = 'SONOMOS_UNCHECKED';
   const COVERAGE_WORDS = new Set(['capture_path', 'catalog_host', 'open_web']);
 
@@ -300,7 +304,8 @@
       ...SHIM_DEFAULTS,
       ...(requiresConsent ? { dataSharingAllowed: false } : {}),
       failOpenActive: false,
-      failOpenUntilMs: 0
+      failOpenUntilMs: 0,
+      lockeNotSetUp: false
     };
     try {
       const w = (await api.storage.session.get(FAIL_OPEN_KEY))?.[FAIL_OPEN_KEY];
@@ -310,8 +315,9 @@
       }
     } catch { /* unreadable → closed */ }
     try {
-      const local = await api.storage.local.get([SETTINGS_KEY, DISABLED_WEB_HOSTS_KEY, DATA_CONSENT_KEY]);
+      const local = await api.storage.local.get([SETTINGS_KEY, DISABLED_WEB_HOSTS_KEY, DATA_CONSENT_KEY, LOCKE_NOT_SET_UP_KEY]);
       Object.assign(config, pick(local?.[SETTINGS_KEY]));
+      config.lockeNotSetUp = local?.[LOCKE_NOT_SET_UP_KEY] === true;
       if (requiresConsent) {
         const consent = local?.[DATA_CONSENT_KEY];
         config.dataSharingAllowed = consent?.version === DATA_CONSENT_VERSION && consent.granted === true;

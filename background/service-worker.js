@@ -17,6 +17,7 @@ import {
   EVER_CONNECTED_KEY,
   hostMatches,
   LOCKE_NOT_SET_UP,
+  LOCKE_NOT_SET_UP_KEY,
   MANAGED_KEYS,
   MSG,
   NATIVE_CALL_TIMEOUT_MS,
@@ -128,11 +129,52 @@ async function everConnected() {
 }
 
 async function markEverConnected() {
+  // Locke has been seen: screening starts now, on every page.
+  await storeNotSetUp(false);
   try {
     const got = await ext.storage.local.get(EVER_CONNECTED_KEY);
     if (got?.[EVER_CONNECTED_KEY] === true) return;
     await ext.storage.local.set({ [EVER_CONNECTED_KEY]: true });
   } catch { /* retried on the next connected check */ }
+}
+
+// The "not set up" pass-through flag the content script hands to the shim
+// (shared/constants.js LOCKE_NOT_SET_UP_KEY). Written only when it changes, so
+// a heartbeat does not wake every tab's storage listener. A failed write
+// leaves the last value, and the shim's default is false (screen).
+async function storeNotSetUp(value) {
+  try {
+    const got = await ext.storage.local.get(LOCKE_NOT_SET_UP_KEY);
+    if (got?.[LOCKE_NOT_SET_UP_KEY] === (value === true)) return;
+    await ext.storage.local.set({ [LOCKE_NOT_SET_UP_KEY]: value === true });
+  } catch { /* the next health check retries */ }
+}
+
+async function recordNotSetUp(value) {
+  await storeNotSetUp(value);
+  await setActionTitle(value);
+  return value === true;
+}
+
+// The toolbar tooltip. While Locke is not set up it says so in words, so the
+// state is visible on hover without opening the popup; otherwise it is the
+// manifest's own title. Cosmetic: never let it fail a check.
+async function setActionTitle(notSetUp) {
+  try {
+    const title = notSetUp === true
+      ? 'Locke Extension — not connected. Install the Locke desktop app to start screening (click for the link).'
+      : (ext.runtime.getManifest?.()?.action?.default_title ?? 'Locke Extension');
+    await ext.action.setTitle({ title });
+  } catch { /* the badge and popup still say it */ }
+}
+
+// Not set up, before any data-sharing consent (Firefox/Edge): the extension
+// may not talk to the app yet, so it cannot have seen it. Decided from local
+// state only — nothing is sent anywhere to find out.
+async function notSetUpWithoutProbe() {
+  if (await everConnected()) return false;
+  if (await isManagedInstall()) return false;
+  return true;
 }
 
 // An administrator-installed or policy-configured extension keeps the full
@@ -583,10 +625,13 @@ function runCheck(reason = 'alarm') {
 }
 
 async function consentRequiredState() {
-  const state = { ...initialState(), error: DATA_CONSENT_REQUIRED, screening: SCREENING.UNAVAILABLE };
+  const notSetUp = await notSetUpWithoutProbe();
+  await storeNotSetUp(notSetUp);
+  const state = { ...initialState(), error: DATA_CONSENT_REQUIRED, screening: SCREENING.UNAVAILABLE, notSetUp };
   await setState(state);
   await ext.action.setBadgeText({ text: '!' });
   await ext.action.setBadgeBackgroundColor({ color: '#f59e0b' });
+  await setActionTitle(notSetUp);
   broadcast(state);
   return state;
 }
@@ -661,7 +706,7 @@ async function performCheck(_reason) {
       // A browser that has never reached Locke, on an install IT didn't push:
       // the popup says the app is missing and links to it, and the shim lets
       // non-AI traffic through (LOCKE_NOT_SET_UP).
-      notSetUp: result.status === STATUS.NO_BRIDGE && (await noBridgeCode(result.hostMissing === true)) === LOCKE_NOT_SET_UP,
+      notSetUp: await recordNotSetUp(result.status === STATUS.NO_BRIDGE && (await noBridgeCode(result.hostMissing === true)) === LOCKE_NOT_SET_UP),
       // `result.screening` is the host's own live probe answer for THIS check
       // (shared/health-client.js::screeningFromStatus) — 'unavailable', or
       // null. There is deliberately no positive: the probe establishes
@@ -1024,7 +1069,10 @@ async function captureViaHost(requestB64, provider, coverage) {
       // request the health path fires; the internal throttle makes this a
       // no-op when one went out recently.
       void requestHostRegistration();
-      return { ok: false, code: await noBridgeCode(isHostMissing(detail)), message: e.message };
+      const code = await noBridgeCode(isHostMissing(detail));
+      // Flip every open page to pass-through now, not at the next heartbeat.
+      if (code === LOCKE_NOT_SET_UP) void recordNotSetUp(true);
+      return { ok: false, code, message: e.message };
     }
     relayWarn('native-call-failed', { ms, b64Bytes, detail: clip(detail) });
     noteScreening(evidenceFromRelayFailure('bridge-error'), null);

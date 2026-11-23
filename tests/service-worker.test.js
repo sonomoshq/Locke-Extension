@@ -292,6 +292,41 @@ test('service-worker: a missing host on a profile that never reached Locke reads
   }
 });
 
+test('service-worker: lockeNotSetUp is raised while never paired, and cleared the moment Locke is reached', async () => {
+  const saved = store.local.everConnectedToLocke;
+  const savedFlag = store.local.lockeNotSetUp;
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  try {
+    delete store.local.everConnectedToLocke;
+    delete store.local.lockeNotSetUp;
+    nativeHandler = () => { throw new Error('Specified native messaging host not found.'); };
+    assert.equal((await deliver(captureMsg, TRUSTED)).code, 'locke-not-set-up');
+    await settle();
+    assert.equal(store.local.lockeNotSetUp, true, 'pages are told to pass everything through');
+
+    // A paired profile whose host is missing is an outage, not "not set up".
+    store.local.everConnectedToLocke = true;
+    delete store.local.lockeNotSetUp;
+    assert.equal((await deliver(captureMsg, TRUSTED)).code, 'no-bridge');
+    await settle();
+    assert.notEqual(store.local.lockeNotSetUp, true, 'never raised once paired');
+
+    // The app is installed and answers: screening starts on every page.
+    delete store.local.everConnectedToLocke;
+    store.local.lockeNotSetUp = true;
+    nativeHandler = () => ({ type: 'receipt', receipt: { decision: 'allow' } });
+    await deliver(captureMsg, TRUSTED);
+    await settle(); await settle();
+    assert.equal(store.local.lockeNotSetUp, false, 'cleared');
+    assert.equal(store.local.everConnectedToLocke, true);
+  } finally {
+    if (saved === undefined) delete store.local.everConnectedToLocke;
+    else store.local.everConnectedToLocke = saved;
+    if (savedFlag === undefined) delete store.local.lockeNotSetUp;
+    else store.local.lockeNotSetUp = savedFlag;
+  }
+});
+
 test('service-worker: a receipt marks this profile as paired', async () => {
   const saved = store.local.everConnectedToLocke;
   try {

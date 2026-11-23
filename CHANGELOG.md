@@ -8,17 +8,19 @@ strict SemVer.
 
 ## [Unreleased]
 
-**Changed — a fresh install without the desktop app no longer breaks the
-web.** Installed from a store with no Locke desktop app behind it, the
-extension used to hold every request with a body on every site, and its
-error told people to open an app they didn't have. Until this browser
-profile has reached Locke once, and when IT did not install it, non-AI
-requests now pass on the same narrow rule used when Locke is signed out; AI
-traffic still blocks, with a message naming the missing app. The popup reads
-"Not set up" with a link to sonomos.ai/downloads, and the data-sharing page
-links there too. Admin-installed and policy-configured extensions, and every
-install updated from an earlier version, keep the full fail-closed posture.
-See `HONEST.md`.
+**Changed — until the desktop app is installed, the extension stays out of
+the way and says it isn't connected.** Installed from a store with no Locke
+desktop app behind it, the extension used to hold every request with a body
+on every site. Now, until this browser profile has reached Locke once (and
+when IT did not install it), the extension screens nothing: every request,
+AI sites included, goes out untouched, and nothing is sent anywhere. On
+Firefox and Edge this also holds before data sharing has been allowed. The
+popup reads "Not connected" with Screening "Off", says plainly that nothing
+is being screened, and links to sonomos.ai/downloads; the toolbar shows `!`
+and its tooltip says Locke is not connected. As soon as the desktop app is
+reached, screening turns on for good in that profile. Admin-installed and
+policy-configured extensions, and every install updated from an earlier
+version, keep the full fail-closed posture. See `HONEST.md`.
 
 **Fixed — fail-open is default deny (zh#370).** With the desktop app's
 fail-open window on, a request that could not be screened (the screener timed
