@@ -1623,7 +1623,22 @@
       [5, 'word'], [6, 'small'], [8, 'zone'], [15, 'small']]);
     const CAI_REPORT_VIEWING = one([[1, 'word'], [2, 'word'], [3, 'flag']]);
     const CAI_CREDENTIALS = one([[1, 'word']]);
-    return { CAI_PERFORM, CAI_TIMELINE, CAI_REPORT_VIEWING, CAI_CREDENTIALS };
+    const GPS_ONE = one([[1, 'small']]);
+    const GPS_META = one([[1, 'small'], [2, 'empty'], [3, 'word'], [4, 'word']]);
+    const GPS_PROMPT = one([[1, 'text'], [2, 'small'], [7, 'small']]);
+    const GPS_LANGUAGE = one([[1, 'word']]);
+    const GPS_NESTED_ONE = one([[1, GPS_ONE]]);
+    const GPS_CONVERSATION = one([[1, 'word'], [8, 'word']]);
+    const GPS_TURN = one([[1, GPS_PROMPT], [2, GPS_LANGUAGE], [4, 'attest'], [5, 'word'], [7, GPS_ONE], [8, 'small'],
+      [11, 'small'], [12, 'small'], [18, GPS_NESTED_ONE], [19, 'small'], [28, 'small'], [31, 'nonce'], [42, GPS_ONE],
+      [50, 'small'], [54, 'small'], [60, 'word'], [62, 'empty'], [68, 'small'], [69, 'small'], [72, GPS_CONVERSATION],
+      [92, 'small'], [97, 'small'], [99, 'small']]);
+    const GPS_INNER = one([[1, GPS_TURN], [4, 'small']]);
+    const GPS_OUTER = one([[5, GPS_INNER]]);
+    const GPS_REQUEST = one([[1, GPS_META], [2, 'small'], [8, GPS_OUTER]]);
+    const GPS_ECHO = one([[1, 'small'], [9, one([[1, 'text']])]]);
+    const GPS_FRAME = one([[1, GPS_REQUEST], [2, GPS_ECHO], [4, GPS_ONE]]);
+    return { CAI_PERFORM, CAI_TIMELINE, CAI_REPORT_VIEWING, CAI_CREDENTIALS, GPS_FRAME };
   })();
 
   // May the user's fail-open window send this raw request (head, CRLFCRLF,
@@ -2046,7 +2061,8 @@
     // else; the `f.req` text, or undefined.
     const geminiForm = (body) => {
       let freq;
-      for (const pair of body.split('&')) {
+      // The page ends its form with `&` (2026-11): an empty pair is no field.
+      for (const pair of body.split('&').filter((x) => x !== '')) {
         const eq = pair.indexOf('=');
         const k = formDecode(eq < 0 ? pair : pair.slice(0, eq));
         const v = formDecode(eq < 0 ? '' : pair.slice(eq + 1));
@@ -2393,6 +2409,8 @@
       if (kind === 'text') return utf8(v) !== undefined;
       if (kind === 'nonce') return v.length > 0 && v.length <= MAX_RPC_NONCE;
       if (kind === 'toolKey') return v.length > 0 && v.length <= MAX_TOOL_KEY && v.every(TOOL_KEY_BYTE);
+      if (kind === 'empty') return v.length === 0;
+      if (kind === 'attest') return v.length > 0 && v.length <= MAX_ATTEST && v.every(ATTEST_BYTE);
       return pbMsg(v, kind) !== undefined;
     };
     // `b` is a message of `schema`'s fields ([number, kind, repeated]); the
@@ -2448,11 +2466,91 @@
       return false;
     };
 
+    // ── Gemini web over WebChannel (since 2026-11) ──
+    // A WebChannel form to geminiweb-pa …/v1/processSession whose frames are
+    // base64 protobuf (FAIL_OPEN_RPC.GPS_FRAME): request, prompt echo,
+    // acknowledgement. The prompt is the only free text; an unlisted field —
+    // where a file or image reference would ride — holds it.
+    const GEMINI_PS_HOST = 'geminiweb-pa.clients6.google.com';
+    const GEMINI_PS_ROUTE = '/v1/processSession';
+    const SIGNALER_HOST = 'signaler-pa.clients6.google.com';
+    const MAX_WEBCHANNEL_QUERY = 4096;
+    const MAX_WC_FRAMES = 16;
+    const MAX_ATTEST = 8192;
+    const ATTEST_BYTE = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ||
+      c === 33 || c === 45 || c === 95;
+    // A WebChannel POST form: count, optionally ofs, req<i>___data__ for every
+    // i below count, each read by `frame`; an empty pair is no field.
+    const webchannelForm = (formBody, frame) => {
+      const digits = (x, max) => x.length > 0 && x.length <= max && /^[0-9]+$/.test(x);
+      let count;
+      let ofs = false;
+      const frames = [];
+      for (const pair of formBody.split('&').filter((x) => x !== '')) {
+        const eq = pair.indexOf('=');
+        const k = formDecode(eq < 0 ? pair : pair.slice(0, eq));
+        const v = formDecode(eq < 0 ? '' : pair.slice(eq + 1));
+        if (k === undefined || v === undefined) return false;
+        if (k === 'count' && count === undefined && digits(v, 2)) { count = Number(v); continue; }
+        if (k === 'ofs' && !ofs && digits(v, 9)) { ofs = true; continue; }
+        const mm = /^req(.*)___data__$/.exec(k);
+        if (!mm || !digits(mm[1], 2)) return false;
+        const i = Number(mm[1]);
+        if (frames.some(([j]) => j === i)) return false;
+        frames.push([i, v]);
+      }
+      return count !== undefined && count <= MAX_WC_FRAMES && frames.length === count &&
+        frames.every(([i, v]) => i < count && frame(v));
+    };
+    // Standard base64, padded to a multiple of 4, canonical.
+    const b64Std = (x) => {
+      if (x.length % 4 !== 0) return undefined;
+      const val = (c) => {
+        const n = c.charCodeAt(0);
+        if (n >= 65 && n <= 90) return n - 65;
+        if (n >= 97 && n <= 122) return n - 71;
+        if (n >= 48 && n <= 57) return n + 4;
+        if (c === '+') return 62;
+        if (c === '/') return 63;
+        return undefined;
+      };
+      const quads = x.length / 4;
+      const out = [];
+      for (let qi = 0; qi < quads; qi++) {
+        const q = x.slice(qi * 4, qi * 4 + 4);
+        let pad = 0;
+        while (pad < 4 && q[3 - pad] === '=') pad++;
+        if (pad > 2 || (pad > 0 && qi + 1 !== quads)) return undefined;
+        let n = 0;
+        for (let j = 0; j < 4; j++) {
+          const v = j >= 4 - pad ? 0 : val(q[j]);
+          if (v === undefined) return undefined;
+          n = n * 64 + v;
+        }
+        if ((pad === 1 && n % 256 !== 0) || (pad === 2 && n % 65536 !== 0)) return undefined;
+        const bytes = [Math.floor(n / 65536) % 256, Math.floor(n / 256) % 256, n % 256];
+        out.push(...bytes.slice(0, 3 - pad));
+      }
+      return new Uint8Array(out);
+    };
+    const geminiPsFrame = (v) => {
+      const b = b64Std(v);
+      if (b === undefined) return false;
+      const f = pbMsg(b, FAIL_OPEN_RPC.GPS_FRAME);
+      return f !== undefined && f.length === 1;
+    };
+    // A push-channel frame or body: settings-only JSON.
+    const signalerFrame = (v) => {
+      if (utf8Len(v) > MAX_RPC_ARGS) return false;
+      const r = parseJson(v);
+      return r !== undefined && settingsTree(r.v);
+    };
+
     // The query string is settings too: short, each value a setting, no
     // parameter named for an attachment.
-    const queryOk = (query) => {
+    const queryOk = (query, max) => {
       const q = query.split('#')[0];
-      return utf8Len(q) <= MAX_QUERY && q.split('&').filter((p) => p !== '').every((pair) => {
+      return utf8Len(q) <= max && q.split('&').filter((p) => p !== '').every((pair) => {
         const eq = pair.indexOf('=');
         const k = formDecode(eq < 0 ? pair : pair.slice(0, eq));
         const v = formDecode(eq < 0 ? '' : pair.slice(eq + 1));
@@ -2484,7 +2582,6 @@
       if (version !== 'HTTP/1.1' || !target.startsWith('/')) return false;
       const qi = target.indexOf('?');
       const path = (qi < 0 ? target : target.slice(0, qi)).split('#')[0];
-      if (!queryOk(qi < 0 ? '' : target.slice(qi + 1))) return false;
       let host;
       let ct;
       let ce = false;
@@ -2506,6 +2603,9 @@
       if (ce || host === undefined) return false;
       if (host.endsWith(':443')) host = host.slice(0, -4);
       if (host === '' || host.includes(':')) return false;
+      // Gemini's WebChannel handshake carries its auth headers in the query.
+      const maxQuery = `${host}${path}` === GEMINI_PS_HOST + GEMINI_PS_ROUTE ? MAX_WEBCHANNEL_QUERY : MAX_QUERY;
+      if (!queryOk(qi < 0 ? '' : target.slice(qi + 1), maxQuery)) return false;
       let media;
       if (ct !== undefined) {
         const it = ct.split(';');
@@ -2561,6 +2661,18 @@
         const form = media === 'application/x-www-form-urlencoded';
         if (p === GEMINI_PATH) return form && geminiWeb(body);
         if (p === '/_/BardChatUi/data/batchexecute') return form && geminiBatch(body);
+        return false;
+      }
+      if (method === 'POST' && h === GEMINI_PS_HOST && p === GEMINI_PS_ROUTE) {
+        return media === 'application/x-www-form-urlencoded' && webchannelForm(body, geminiPsFrame);
+      }
+      if (method === 'POST' && h === SIGNALER_HOST) {
+        if (p === '/punctual/multi-watch/channel') {
+          return media === 'application/x-www-form-urlencoded' && webchannelForm(body, signalerFrame);
+        }
+        if (p === '/punctual/v1/chooseServer' || p === '/punctual/v1/refreshCreds') {
+          return media === 'application/json+protobuf' && signalerFrame(body);
+        }
         return false;
       }
       if (method === 'POST' && h === 'waa-pa.clients6.google.com' && p === '/$rpc/google.internal.waa.v1.Waa/Create') {
@@ -2658,6 +2770,13 @@
       return '/$rpc/google.internal.waa.v1.Waa/Create';
     }
     if (m === 'POST' && h === 'accounts.google.com' && p === '/RotateCookies') return '/RotateCookies';
+    if (m === 'POST' && h === 'geminiweb-pa.clients6.google.com' && p === '/v1/processSession') return '/v1/processSession';
+    if (m === 'POST' && h === 'signaler-pa.clients6.google.com') {
+      for (const r of ['/punctual/multi-watch/channel', '/punctual/v1/chooseServer', '/punctual/v1/refreshCreds']) {
+        if (p === r) return r;
+      }
+      return '-';
+    }
     if (m === 'POST' && (h === 'duck.ai' || h === 'duckduckgo.com') && p === '/duckchat/v1/chat') return '/duckchat/v1/chat';
     if (m === 'POST' && h === 'api.openai.com') {
       if (p === '/v1/chat/completions') return '/v1/chat/completions';

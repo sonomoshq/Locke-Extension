@@ -7169,6 +7169,64 @@ const R4 = (() => {
       ['locale action', rpcReq(RPC + 'PerformAction', 'application/proto', localeAction), true],
       ['send (follow-up)', rpcReq(RPC + 'PerformAction', 'application/proto', followUp), !file]] };
   };
+  // Gemini web over WebChannel (since 2026-11; LibreWolf HAR 2026-11-23,
+  // ids, tokens and text replaced). Proxy `flows::gemini_web_ps`. The HAR has
+  // no file send: the file flow puts an image reference in the turn as a
+  // field the wire never showed.
+  const GPS = (() => {
+    const { pv, pl, cat } = PB;
+    const webchannel = (host, route, ofs, frames) => {
+      let body = `count=${frames.length}`;
+      if (ofs != null) body += `&ofs=${ofs}`;
+      frames.forEach((f, i) => { body += `&req${i}___data__=${formEnc(f)}`; });
+      return req('POST', host, `${route}?VER=8&gsessionid=UVvC2RU773Y0o_RQOn7COIOFumJxwMgsg5zop_9kpEM&SID=dRkOhyacwxs6tVtN-QQXaw&RID=56449&AID=0&zx=k3x9q2m7a1b4&t=1`,
+        'application/x-www-form-urlencoded', body);
+    };
+    const request = (prompt, followUp, extra) => {
+      const seed = 'FRalFnLNAAarFMS1ixRCcXqBZ-XNGCk7AEABjq4o3xGG_e98v';
+      const attest = '!' + seed.repeat(60).slice(0, 2628);
+      const parts = [pl(1, cat(pl(1, prompt), pv(2, 0), pv(7, 0))), pl(2, pl(1, 'en')), pl(4, attest),
+        pl(5, 'ae1e0005bada03b11f840000aaaa1111'), pl(7, pv(1, 1)), pv(8, 1), pv(11, 1), pv(12, 0), pl(18, pl(1, pv(1, 2))),
+        pv(19, 0), pv(28, 1), pl(31, Buffer.from([0x04, 0x1b, 0x1c, 0x10, 0x13, 0x0c])), pl(42, pv(1, 2)), pv(50, 0), pv(54, 0),
+        pl(60, 'B9629E3C-5AD6-436B-8000-000000000001'), pl(62, ''), pv(68, 0), pv(69, 2)];
+      if (followUp) parts.push(pl(72, cat(pl(1, 'c_0515992ff73cecd1'), pl(8, 'AwAAAAAAAAAQANM7mBjX0000000000a'))));
+      parts.push(pv(92, 0), pv(97, 0), pv(99, 1));
+      if (extra) parts.push(extra);
+      const meta = cat(pv(1, 1), pl(2, ''), pl(3, 'en'), pl(4, 'B9629E3C-5AD6-436B-8000-000000000001'));
+      return pl(1, cat(pl(1, meta), pv(2, 0), pl(8, pl(5, cat(pl(1, cat(...parts)), pv(4, 1))))));
+    };
+    const echo = (prompt) => pl(2, cat(pv(1, 1), pl(9, pl(1, prompt))));
+    const ps = (ofs, frames) => webchannel('geminiweb-pa.clients6.google.com', '/v1/processSession', ofs,
+      frames.map((f) => f.toString('base64')));
+    return { webchannel, request, echo, ps };
+  })();
+  const geminiWebPs = (file) => {
+    const { pv, pl, cat } = PB;
+    const settings = (id, args) => Buffer.concat([batch([[id, args]]), Buffer.from('&')]);
+    const handshake = req('POST', 'geminiweb-pa.clients6.google.com',
+      `/v1/processSession?VER=8&RID=56448&CVER=22&X-HTTP-Session-Id=gsessionid&%24httpHeaders=${formEnc(
+        `Authorization:SAPISIDHASH 1795423918_${'0'.repeat(40)}\r\nX-Goog-AuthUser:0\r\nX-Goog-Api-Key:AIzaSyA0000000000000000000000000000000\r\nX-Server-Token:${'CAESAB'.repeat(210)}\r\nx-goog-ext-525001261-bin:${'QUJD'.repeat(59)}\r\nX-WebChannel-Content-Type:application/json+protobuf\r\n`)}&zx=k3x9q2m7a1b4&t=1`,
+      'application/x-www-form-urlencoded', 'count=0');
+    const image = file ? pl(3, cat(pl(1, '/contrib_service/ttl_1d/abc/photo.png'), pl(2, 'image/png'))) : null;
+    const prompt = "what's the capital of France?";
+    return { surface: 'Gemini web (WebChannel)', steps: [
+      ['page settings', settings('L5adhe', '[[null,null,null,1],null,[87]]'), true],
+      ['feature flags', settings('otAQ7b', '[1]'), true],
+      ['push channel server', req('POST', 'signaler-pa.clients6.google.com', '/punctual/v1/chooseServer?key=AIzaSyA0000000000000000000000000000000',
+        'application/json+protobuf', '[[null,null,null,[9,5],null,[["assistant-bard"],[null,1],[[["bard-client-sync"]]]]],null,null,0,0]'), true],
+      ['push channel', GPS.webchannel('signaler-pa.clients6.google.com', '/punctual/multi-watch/channel', 0, [
+        '[[[1,[null,null,null,[9,5],null,[["assistant-bard"],[null,1],[[["bard-client-sync"]]]],null,null,1],null,3]]]',
+        '[[[2,[null,null,null,[9,5],null,[["assistant-bard"],[1],[[["108800000000000000001"],["async_bard"]]]],null,null,1],null,3]]]']), true],
+      ['notice settings', settings('L5adhe', '[[null,null,null,"FAST_TRACK_NOTICE"],null,[94]]'), true],
+      ['WebChannel handshake', handshake, true],
+      ['send (new chat)', GPS.ps(0, [GPS.request(prompt, false, image), GPS.echo(prompt)]), !file],
+      ['after the send', settings('PCck7e', '["r_05de0fe8463b0ef2"]'), true],
+      ['acknowledgement', GPS.ps(2, [pl(4, pv(1, 1))]), true],
+      ['send (follow-up)', GPS.ps(0, [GPS.request('and Germany?', true, null), GPS.echo('and Germany?')]), true],
+      ['push channel credentials', req('POST', 'signaler-pa.clients6.google.com',
+        '/punctual/v1/refreshCreds?key=AIzaSyA0000000000000000000000000000000&gsessionid=aiE9E1rAW1Jxvls9fIP92iTe0p05fSVOdwA5MmOnuHc',
+        'application/json+protobuf', '["VddsdreZ"]'), true]] };
+  };
   const geminiWeb = (file) => {
     const steps = [
       ['attestation', req('POST', 'waa-pa.clients6.google.com', '/$rpc/google.internal.waa.v1.Waa/Create', 'application/json+protobuf',
@@ -7187,7 +7245,7 @@ const R4 = (() => {
     steps.push(['StreamGenerate (the turn)', streamGenerate(turn), !file]);
     steps.push(['after the turn', batch([['PCck7e', '["r_2debe4fba6c6c5f5"]'], ['aPya6c', '[]']]), true]);
     steps.push(['cookie rotation', post('accounts.google.com', '/RotateCookies', [658, '2195969768263241828']), true]);
-    return { surface: 'Gemini web', steps };
+    return { surface: 'Gemini web (StreamGenerate, before 2026-11)', steps };
   };
   const duckAi = (file) => ({ surface: 'duck.ai', steps: [['chat (the turn)', post('duck.ai', '/duckchat/v1/chat', {
     model: 'gpt-5-mini', metadata: { toolChoice: { NewsSearch: false, WebSearch: false } },
@@ -7233,8 +7291,8 @@ const R4 = (() => {
       ['generate (the turn)', post('generativelanguage.googleapis.com', '/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse', body), !file]] };
   };
   const all = (file) => [chatgpt('ChatGPT web', '/backend-api', file), chatgpt('ChatGPT web, logged out (unverified)', '/backend-anon', file),
-    claudeAi(file), claudeAiRpc(file), geminiWeb(file), duckAi(file), claudeCode(file), codexWs(file), openaiApi(file), geminiApi(file)];
-  return { plain: () => all(false), withFile: () => all(true), token, PB };
+    claudeAi(file), claudeAiRpc(file), geminiWeb(file), geminiWebPs(file), duckAi(file), claudeCode(file), codexWs(file), openaiApi(file), geminiApi(file)];
+  return { plain: () => all(false), withFile: () => all(true), token, PB, GPS };
 })();
 
 test('releasableUnderFailOpen round 4: every request of a real send flow is released (every_request_of_a_real_send_flow_is_released)', () => {
@@ -7382,8 +7440,8 @@ test('fail-open round 4: ChatGPT web\'s real send goes out request by request; w
     return [`https://${host}${target}`, { method, headers: ct ? { 'content-type': ct[1] } : {}, body }];
   };
   for (const [file, flows] of [[false, R4.plain()], [true, R4.withFile()]]) {
-    for (const { surface, steps } of flows.filter((f) => f.surface === 'ChatGPT web' || f.surface === 'Gemini web' || f.surface.startsWith('claude.ai'))) {
-      const page = surface === 'Gemini web' ? 'https://gemini.google.com/app' : surface.startsWith('claude.ai') ? 'https://claude.ai/new' : 'https://chatgpt.com/';
+    for (const { surface, steps } of flows.filter((f) => f.surface === 'ChatGPT web' || f.surface.startsWith('Gemini web') || f.surface.startsWith('claude.ai'))) {
+      const page = surface.startsWith('Gemini web') ? 'https://gemini.google.com/app' : surface.startsWith('claude.ai') ? 'https://claude.ai/new' : 'https://chatgpt.com/';
       const w = makeWorld(outage.onCapture, realCatalogGlobals(page));
       w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
       for (const [what, raw, release] of steps) {
@@ -7758,4 +7816,128 @@ test('releasableUnderFailOpen round 5: the RPC schemas, pinned, and every field 
     nested(schema, (b) => send(top === 'perform' ? complete(b[0] >> 3, b) : b), top, top);
   }
   assert.equal(checked, 59, 'every scalar field of every message');
+});
+
+test('releasableUnderFailOpen round 6: Gemini WebChannel is exact (gemini_webchannel_is_exact, gemini_webchannel_schema_is_pinned)', () => {
+  const { pv, pl, cat } = R4.PB;
+  const { webchannel, request, echo } = R4.GPS;
+  const m = /\/\/ <releasableUnderFailOpen>\n([\s\S]*?)\/\/ <\/releasableUnderFailOpen>/.exec(SHIM_SRC);
+  const S = new Function(m[1] + '; return FAIL_OPEN_RPC;')();
+  const describe = (schema) => schema.map(([n, k, rep]) =>
+    `${n}:${Array.isArray(k) ? `(${describe(k)})` : k.toLowerCase()}${rep ? '*' : ''}`).join(' ');
+  assert.equal(describe(S.GPS_FRAME),
+    '1:(1:(1:small 2:empty 3:word 4:word) 2:small 8:(5:(1:(' +
+    '1:(1:text 2:small 7:small) 2:(1:word) 4:attest 5:word 7:(1:small) 8:small 11:small ' +
+    '12:small 18:(1:(1:small)) 19:small 28:small 31:nonce 42:(1:small) 50:small 54:small ' +
+    '60:word 62:empty 68:small 69:small 72:(1:word 8:word) 92:small 97:small 99:small) ' +
+    '4:small))) 2:(1:small 9:(1:text)) 4:(1:small)');
+  const H = 'geminiweb-pa.clients6.google.com';
+  const psBody = (body) => req('POST', H, '/v1/processSession?VER=8', 'application/x-www-form-urlencoded', body);
+  const frame = (f) => `req0___data__=${formEnc(Buffer.from(f).toString('base64'))}`;
+  const send = request('the sky is blue', false, null);
+  const okFrames = [send, echo('hi'), pl(4, pv(1, 1))];
+  for (const f of okFrames) assert.equal(releasable(psBody(`count=1&ofs=0&${frame(f)}`)), true);
+  const heldFrames = [request('x', false, pl(3, '/contrib_service/ttl_1d/abc/photo.png')), request('x', false, pv(100, 1)),
+    cat(send, echo('x')), pl(3, pv(1, 1)), Buffer.alloc(0), pl(2, pl(9, pl(1, Buffer.from([0xff])))), pl(2, pl(9, pl(2, 'x')))];
+  heldFrames.forEach((f, i) => assert.equal(releasable(psBody(`count=1&${frame(f)}`)), false, `held frame ${i}`));
+  const one = frame(okFrames[2]);
+  const many = (n) => Array.from({ length: n }, (_, i) => `req${i}___data__=${formEnc(okFrames[2].toString('base64'))}`).join('&');
+  for (const [body, want] of [
+    ['count=0', true], ['count=0&', true], [`count=1&${one}&`, true], [`count=01&ofs=000000002&${one}`, true], [`${one}&count=1`, true],
+    [`count=2&${one}&req1___data__=${formEnc(echo('x').toString('base64'))}`, true],
+    [`count=1&ofs=2&ofs=2&${one}`, false], [`count=1&count=1&${one}`, false], [`count=2&${one}`, false], [`count=0&${one}`, false],
+    [`count=1&${one}&${one}`, false], [`count=1&req1___data__=${formEnc(okFrames[2].toString('base64'))}`, false],
+    [`count=1&${one.replace('req0', 'req00a')}`, false], [`count=1&${one.replace('req0', 'req123')}`, false],
+    [`count=1&${one.replace('req0', 'rqe0')}`, false], [`count=1&${one}&x=1`, false], [`count=a&${one}`, false],
+    [`count=100&${one}`, false], [`count=1&ofs=1234567890&${one}`, false], [`count=1&ofs=x&${one}`, false],
+    [`count=17&${many(17)}`, false], [`count=16&${many(16)}`, true], ['count=1&req0___data__=%zz', false], ['', false],
+    [`count=1&${one.replace('req0', 'req000')}`, false], [`count=016&${many(16)}`, false]
+  ]) assert.equal(releasable(psBody(body)), want, body);
+  // Base64: standard, padded, canonical.
+  const b = (x) => releasable(psBody(`count=1&req0___data__=${formEnc(x)}`));
+  assert.equal(b('IgIIAQ=='), true); // {4: {1: 1}}
+  for (const x of ['IgIIAQ', 'IgIIAR==', 'IgIIAQ=', 'IgIIA===', 'IgII-Q==', 'IgII AQ==', 'Ig==IgIIAQ==', 'IgI=IgIIAQ==']) assert.equal(b(x), false, x);
+  // Media, method, route, host.
+  const f = `count=1&${one}`;
+  assert.equal(releasable(req('POST', H, '/v1/processSession', 'application/json', f)), false);
+  assert.equal(releasable(req('PUT', H, '/v1/processSession', 'application/x-www-form-urlencoded', f)), false);
+  assert.equal(releasable(req('POST', H, '/v1/processSessions', 'application/x-www-form-urlencoded', f)), false);
+  assert.equal(releasable(req('POST', 'geminiweb-pa.googleapis.com', '/v1/processSession', 'application/x-www-form-urlencoded', f)), false);
+  // The handshake's query may run to 4096 on this route only.
+  const q = (route, n) => `${route}?h=${'a.'.repeat(n).slice(0, n - 2)}`;
+  assert.equal(releasable(req('POST', H, q('/v1/processSession', 4096), 'application/x-www-form-urlencoded', 'count=0')), true);
+  assert.equal(releasable(req('POST', H, q('/v1/processSession', 4097), 'application/x-www-form-urlencoded', 'count=0')), false);
+  const turn = '{"messages":[{"role":"user","content":"hi"}]}';
+  assert.equal(releasable(req('POST', 'api.anthropic.com', q('/v1/messages', 2048), 'application/json', turn)), true);
+  assert.equal(releasable(req('POST', 'api.anthropic.com', q('/v1/messages', 2049), 'application/json', turn)), false);
+  // The push channel.
+  const SIG = 'signaler-pa.clients6.google.com';
+  const sig = (route, ct, body) => req('POST', SIG, route, ct, body);
+  assert.equal(releasable(sig('/punctual/v1/chooseServer', 'application/json+protobuf', '[[null,[9,5],["assistant-bard"]],0]')), true);
+  assert.equal(releasable(sig('/punctual/v1/refreshCreds', 'application/json+protobuf', '["VddsdreZ"]')), true);
+  assert.equal(releasable(webchannel(SIG, '/punctual/multi-watch/channel', 0, ['[[[1,[null,"async_bard"],3]]]'])), true);
+  for (const [route, ct, body] of [['/punctual/v1/chooseServer', 'application/json+protobuf', '["the sky is blue"]'],
+    ['/punctual/v1/chooseServer', 'application/json+protobuf', '[{"a":1}]'], ['/punctual/v1/chooseServer', 'application/json', '[1]'],
+    ['/punctual/v1/refreshCreds', 'application/x-www-form-urlencoded', '["a"]'], ['/punctual/v1/other', 'application/json+protobuf', '[1]'],
+    ['/punctual/multi-watch/channel', 'application/json+protobuf', '[1]'],
+    ['/punctual/v1/chooseServer', 'application/json+protobuf', `[${Array(1024).fill('1').join(',')}]`]]) {
+    assert.equal(releasable(sig(route, ct, body)), false, `${route} ${body.slice(0, 30)}`);
+  }
+  assert.equal(releasable(webchannel(SIG, '/punctual/multi-watch/channel', 0, ['["a b"]'])), false);
+  const atCap = `[11${',1'.repeat(1022)}]`;
+  assert.equal(atCap.length, 2048);
+  assert.equal(releasable(sig('/punctual/v1/chooseServer', 'application/json+protobuf', atCap)), true);
+  // Every scalar field of the frame, through the real route: its kind, not
+  // another, once.
+  const values = { small: [[pv, 2], [pv, 1023]], word: [[pl, 'a.b-c_9']], text: [[pl, 'a b/c:d é'], [pl, '']],
+    nonce: [[pl, Buffer.from([0xff, 0])]], empty: [[pl, '']], attest: [[pl, '!aZ09-_'], [pl, 'a'.repeat(8192)]] };
+  const wrong = { small: [[pv, 1024], [pl, '1']], word: [[pl, 'a b'], [pl, 'a/b'], [pl, ''], [pv, 1]],
+    text: [[pl, Buffer.from([0xff])], [pv, 1]], nonce: [[pl, ''], [pv, 1]], empty: [[pl, 'a'], [pv, 0]],
+    attest: [[pl, 'a.b'], [pl, 'a b'], [pl, ''], [pl, 'a'.repeat(8193)], [pv, 1]] };
+  const viaFrame = (b) => psBody(`count=1&${frame(b)}`);
+  let checked = 0;
+  const nested = (schema, build, path) => {
+    for (const [n, k] of schema) {
+      if (Array.isArray(k)) {
+        nested(k, (inner) => build(pl(n, inner)), `${path}.${n}`);
+        assert.equal(releasable(viaFrame(build(cat(pl(n, ''), pl(n, ''))))), false, `${path}.${n} twice`);
+        assert.equal(releasable(viaFrame(build(pv(n, 1)))), false, `${path}.${n} as a varint`);
+        continue;
+      }
+      checked++;
+      for (const [enc, v] of values[k]) {
+        const once = enc(n, v);
+        assert.equal(releasable(viaFrame(build(once))), true, `${path}.${n} takes ${k}`);
+        assert.equal(releasable(viaFrame(build(cat(once, once)))), false, `${path}.${n} twice`);
+      }
+      for (const [enc, v] of wrong[k]) assert.equal(releasable(viaFrame(build(enc(n, v)))), false, `${path}.${n} refuses ${k}`);
+    }
+  };
+  nested(S.GPS_FRAME, (b) => b, 'frame');
+  assert.equal(checked, 35, 'every scalar field of the frame');
+});
+
+test('fail-open round 6: Gemini\'s WebChannel send goes out through the fetch hook; an image reference holds, named', async () => {
+  const w = makeWorld(() => ({ ok: false, code: 'bridge-error' }), realCatalogGlobals('https://gemini.google.com/app'));
+  w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  const go = async (raw) => {
+    const i = raw.indexOf('\r\n\r\n');
+    const head = raw.subarray(0, i).toString('latin1');
+    const [method, target] = head.split('\r\n')[0].split(' ');
+    const host = /\r\nHost: ([^\r]+)/.exec(head)[1];
+    const ct = /\r\ncontent-type: ([^\r]+)/.exec(head)[1];
+    w.logs.length = 0;
+    try {
+      await w.sandbox.fetch(`https://${host}${target}`, { method, headers: { 'content-type': ct }, body: raw.subarray(i + 4).toString('latin1') });
+      return 'SENT';
+    } catch (e) { return blockedError(e) ? 'BLOCKED' : `ERR ${e.message}`; }
+  };
+  const flow = (f) => f.find((x) => x.surface === 'Gemini web (WebChannel)').steps;
+  for (const [what, raw] of flow(R4.plain())) assert.equal(await go(raw), 'SENT', what);
+  const [, withImage] = flow(R4.withFile()).find(([what]) => what === 'send (new chat)');
+  assert.equal(await go(withImage), 'BLOCKED');
+  const line = assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
+  assert.match(line, /\bhost=geminiweb-pa\.clients6\.google\.com\b/);
+  assert.match(line, /\broute=\/v1\/processSession(\s|$)/);
+  assert.ok(!/photo\.png|capital/.test(line), line);
 });
