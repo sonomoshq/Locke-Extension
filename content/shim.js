@@ -1656,7 +1656,9 @@
     const CAI_REPORT_VIEWING = one([[1, 'word'], [2, 'word'], [3, 'flag']]);
     const CAI_CREDENTIALS = one([[1, 'word']]);
     const GPS_ONE = one([[1, 'small']]);
-    const GPS_META = one([[1, 'small'], [2, 'empty'], [3, 'word'], [4, 'word']]);
+    // 2 is an id: empty in the HAR's sends, 16 letters and digits in dev.30's
+    // hold lines (2026-11-23).
+    const GPS_META = one([[1, 'small'], [2, 'optWord'], [3, 'word'], [4, 'word']]);
     const GPS_PROMPT = one([[1, 'text'], [2, 'small'], [7, 'small']]);
     const GPS_LANGUAGE = one([[1, 'word']]);
     const GPS_NESTED_ONE = one([[1, GPS_ONE]]);
@@ -2289,10 +2291,13 @@
     const MAX_RPC_ARGS = 2048;
     const MAX_RPC_CALLS = 16;
     const MAX_SHORT_LIST = 16;
+    // FQjvN, UQJUK, Ub3MPb, VVSn5c and VxUbXb: by name only, from the hold
+    // lines of a page load (dev.30, 2026-11-23). A listed call still carries
+    // settings only.
     const GEMINI_RPCS = [
-      'CNgdBe', 'DYBcR', 'ESY5D', 'GPRiHf', 'I4z33b', 'K4WWud', 'L5adhe', 'MaZiqc', 'PCck7e',
-      'Te6DCf', 'aPya6c', 'cCSu7', 'cYRIkd', 'ku4Jyf', 'maGuAc', 'o30O0e', 'otAQ7b', 'ozz5Z',
-      'sJBwce', 'whPPme'
+      'CNgdBe', 'DYBcR', 'ESY5D', 'FQjvN', 'GPRiHf', 'I4z33b', 'K4WWud', 'L5adhe', 'MaZiqc',
+      'PCck7e', 'Te6DCf', 'UQJUK', 'Ub3MPb', 'VVSn5c', 'VxUbXb', 'aPya6c', 'cCSu7', 'cYRIkd',
+      'ku4Jyf', 'maGuAc', 'o30O0e', 'otAQ7b', 'ozz5Z', 'sJBwce', 'whPPme'
     ];
     const absentNullOr = (v, f) => v === undefined || v === null || f(v);
     // An anti-abuse token: base64 (standard or URL-safe), padding, `~`.
@@ -2449,6 +2454,7 @@
       if (kind === 'nonce') return v.length > 0 && v.length <= MAX_RPC_NONCE;
       if (kind === 'toolKey') return v.length > 0 && v.length <= MAX_TOOL_KEY && v.every(TOOL_KEY_BYTE);
       if (kind === 'empty') return v.length === 0;
+      if (kind === 'optWord') return v.length === 0 || wordOk(utf8(v), false);
       if (kind === 'attest') return v.length > 0 && v.length <= MAX_ATTEST && v.every(ATTEST_BYTE);
       return Array.isArray(kind) && pbMsg(v, kind) !== undefined;
     };

@@ -7182,7 +7182,9 @@ const R4 = (() => {
       return req('POST', host, `${route}?VER=8&gsessionid=UVvC2RU773Y0o_RQOn7COIOFumJxwMgsg5zop_9kpEM&SID=dRkOhyacwxs6tVtN-QQXaw&RID=56449&AID=0&zx=k3x9q2m7a1b4&t=1`,
         'application/x-www-form-urlencoded', body);
     };
-    const request = (prompt, followUp, extra) => {
+    // `id` is the metadata's field 2: empty in the HAR's sends, 16 letters and
+    // digits in dev.30's hold lines (Proxy `flows::gps_request_meta`).
+    const request = (prompt, followUp, extra, id = '') => {
       const seed = 'FRalFnLNAAarFMS1ixRCcXqBZ-XNGCk7AEABjq4o3xGG_e98v';
       const attest = '!' + seed.repeat(60).slice(0, 2628);
       const parts = [pl(1, cat(pl(1, prompt), pv(2, 0), pv(7, 0))), pl(2, pl(1, 'en')), pl(4, attest),
@@ -7192,7 +7194,7 @@ const R4 = (() => {
       if (followUp) parts.push(pl(72, cat(pl(1, 'c_0515992ff73cecd1'), pl(8, 'AwAAAAAAAAAQANM7mBjX0000000000a'))));
       parts.push(pv(92, 0), pv(97, 0), pv(99, 1));
       if (extra) parts.push(extra);
-      const meta = cat(pv(1, 1), pl(2, ''), pl(3, 'en'), pl(4, 'B9629E3C-5AD6-436B-8000-000000000001'));
+      const meta = cat(pv(1, 1), pl(2, id), pl(3, 'en'), pl(4, 'B9629E3C-5AD6-436B-8000-000000000001'));
       return pl(1, cat(pl(1, meta), pv(2, 0), pl(8, pl(5, cat(pl(1, cat(...parts)), pv(4, 1))))));
     };
     const echo = (prompt) => pl(2, cat(pv(1, 1), pl(9, pl(1, prompt))));
@@ -7830,7 +7832,7 @@ test('releasableUnderFailOpen round 6: Gemini WebChannel is exact (gemini_webcha
   const describe = (schema) => schema.map(([n, k, rep]) =>
     `${n}:${Array.isArray(k) ? `(${describe(k)})` : k.toLowerCase()}${rep ? '*' : ''}`).join(' ');
   assert.equal(describe(S.GPS_FRAME),
-    '1:(1:(1:small 2:empty 3:word 4:word) 2:small 8:(5:(1:(' +
+    '1:(1:(1:small 2:optword 3:word 4:word) 2:small 8:(5:(1:(' +
     '1:(1:text 2:small 7:small) 2:(1:word) 4:attest 5:word 7:(1:small) 8:small 11:small ' +
     '12:small 18:(1:(1:small)) 19:small 28:small 31:nonce 42:(1:small) 50:small 54:small ' +
     '60:word 62:empty 68:small 69:small 72:(1:word 8:token) 92:small 97:small 99:small) ' +
@@ -7895,9 +7897,12 @@ test('releasableUnderFailOpen round 6: Gemini WebChannel is exact (gemini_webcha
   // another, once.
   const values = { small: [[pv, 2], [pv, 1023]], word: [[pl, 'a.b-c_9']], text: [[pl, 'a b/c:d é'], [pl, '']],
     nonce: [[pl, Buffer.from([0xff, 0])]], empty: [[pl, '']], attest: [[pl, '!aZ09-_'], [pl, 'a'.repeat(8192)], ...'09AZaz!-_'.split('').map((c) => [pl, c])],
+    optWord: [[pl, ''], [pl, 'a.b-c_9'], [pl, 'a'.repeat(64)], ...'09AZaz._-'.split('').map((c) => [pl, c])],
     token: [[pl, 'a.b-c_9'], [pl, 'Aw+/9a=='], [pl, 'a'.repeat(64)], ...'09AZaz._+/=-'.split('').map((c) => [pl, c])] };
   const wrong = { small: [[pv, 1024], [pl, '1']], word: [[pl, 'a b'], [pl, 'a/b'], [pl, ''], [pv, 1]],
     text: [[pl, Buffer.from([0xff])], [pv, 1]], nonce: [[pl, ''], [pv, 1]], empty: [[pl, 'a'], [pv, 0]],
+    optWord: [[pl, 'a b'], [pl, 'a/b'], [pl, 'a:b'], [pl, Buffer.from([0xff])], [pl, 'a'.repeat(65)], [pv, 1], [pv, 0],
+      ...'+/=,:@[`{!*~%"\n'.split('').map((c) => [pl, `a${c}`])],
     attest: [[pl, 'a.b'], [pl, 'a b'], [pl, ''], [pl, 'a'.repeat(8193)], [pv, 1], ...'/:@[`{+="'.split('').map((c) => [pl, `a${c}`])],
     token: [[pl, 'a b'], [pl, 'a:b'], [pl, 'a%2B'], [pl, ''], [pl, 'a'.repeat(65)], [pv, 1], ...',:@[`{!*~"\n'.split('').map((c) => [pl, `a${c}`])] };
   const viaFrame = (b) => psBody(`count=1&${frame(b)}`);
@@ -7975,6 +7980,39 @@ test('FAIL_OPEN_B64: strict standard base64, byte for byte (b64_std_is_strict)',
   assert.equal(hex(b64('AQ==')), '01');
   assert.equal(hex(b64('AAE=')), '0001');
   assert.equal(hex(b64('')), '');
+});
+
+test('releasableUnderFailOpen round 8: Gemini\'s request metadata takes an id or none (gemini_request_metadata_takes_an_id_or_none)', () => {
+  const { webchannel, request, echo } = R4.GPS;
+  const send = (followUp, id) => webchannel('geminiweb-pa.clients6.google.com', '/v1/processSession', 0,
+    [request('hi there', followUp, null, id), echo('hi there')].map((f) => f.toString('base64')));
+  for (const followUp of [false, true]) {
+    for (const id of ['', '0515992ff73cecd1', 'c_0515992ff73cecd1', 'a'.repeat(64)]) {
+      assert.equal(releasable(send(followUp, id)), true, `${followUp} ${id}`);
+    }
+    for (const id of ['0515992f f73cecd1', '/contrib_service/a.png', 'image/png', 'a:b', 'a'.repeat(65), Buffer.alloc(16, 0xff)]) {
+      assert.equal(releasable(send(followUp, id)), false, `${followUp} ${id}`);
+    }
+  }
+});
+
+test('releasableUnderFailOpen round 8: the calls dev.30 held as Gemini\'s page loaded are listed (gemini_page_load_calls_are_listed)', () => {
+  const FORM = 'application/x-www-form-urlencoded';
+  const be = (calls) => releasable(req('POST', 'gemini.google.com', '/_/BardChatUi/data/batchexecute?rpcids=x', FORM,
+    `f.req=${formEnc(JSON.stringify([calls]))}&at=x`));
+  for (const id of ['FQjvN', 'UQJUK', 'Ub3MPb', 'VVSn5c', 'VxUbXb']) {
+    assert.equal(be([[id, '[]', null, 'generic']]), true, id);
+    assert.equal(be([[id, '["the sky is blue"]', null, 'generic']]), false, `${id} with a sentence`);
+  }
+  assert.equal(be([['NkpXw', '[]', null, 'generic']]), false);
+  // One unlisted call holds the batch, wherever it sits.
+  assert.equal(be([['L5adhe', '[]', null, 'generic'], ['NkpXw', '[]', null, 'generic'], ['otAQ7b', '[1]', null, 'generic']]), false);
+  const m = /\/\/ <releasableUnderFailOpen>\n([\s\S]*?)\/\/ <\/releasableUnderFailOpen>/.exec(SHIM_SRC);
+  const listed = /const GEMINI_RPCS = \[([\s\S]*?)\];/.exec(m[1])[1].match(/'[^']+'/g).map((x) => x.slice(1, -1));
+  assert.deepEqual(listed, [
+    'CNgdBe', 'DYBcR', 'ESY5D', 'FQjvN', 'GPRiHf', 'I4z33b', 'K4WWud', 'L5adhe', 'MaZiqc', 'PCck7e', 'Te6DCf', 'UQJUK',
+    'Ub3MPb', 'VVSn5c', 'VxUbXb', 'aPya6c', 'cCSu7', 'cYRIkd', 'ku4Jyf', 'maGuAc', 'o30O0e', 'otAQ7b', 'ozz5Z', 'sJBwce', 'whPPme'
+  ]);
 });
 
 test('releasableUnderFailOpen round 6 review: Gemini\'s `at` at most once, as `f.req` (single_deviations_from_a_released_turn_are_held)', () => {
