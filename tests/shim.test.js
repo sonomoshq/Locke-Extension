@@ -7028,3 +7028,407 @@ test('releasableUnderFailOpen: a wrapped file inside line decorations is held (a
     });
   }
 }
+
+// ── zh#370 round 4: a real send goes out, request by request ────────────────
+// SP35: ChatGPT web under fail-open with the guard down showed "Unknown error":
+// its sentinel calls were held, so it never posted the turn. Each covered
+// surface's real send (2026-11 captures: routes, keys and sizes as seen; ids,
+// tokens and text replaced), mirrored from Proxy src/fail_open_shape.rs
+// `flows`, whose bytes the Rust and this rule judge alike (parity run).
+const R4 = (() => {
+  const token = (n) => 'gAAAAAB0x+Yz/9_Kq-W='.repeat(Math.ceil(n / 20)).slice(0, n);
+  const CONV = '73eba90a-0bc2-808a-a672-dbfd7ae862a8';
+  const ORG = '5c10de80-1b07-4305-bbd3-a4ff70118284';
+  const post = (host, path, body) => jreq('POST', host, path, body);
+  const ws = (host, path, body) => Buffer.from(`WS-SEND ${path} HTTP/1.1\r\nHost: ${host}\r\n\r\n${JSON.stringify(body)}`);
+  const form = (s) => formEnc(s);
+  const batch = (calls) => req('POST', 'gemini.google.com',
+    `/_/BardChatUi/data/batchexecute?rpcids=${calls.map((c) => c[0]).join(',')}&source-path=%2Fapp&bl=boq_assistant-bard-web-server_20251105.08_p0&f.sid=-6232847293947283&hl=en-US&_reqid=154321&rt=c`,
+    'application/x-www-form-urlencoded;charset=UTF-8',
+    `f.req=${form(JSON.stringify([calls.map(([id, args]) => [id, args, null, 'generic'])]))}&at=AJvLN6M3vJkZ%3A1794200025282`);
+  const streamGenerate = (turn) => req('POST', 'gemini.google.com',
+    '/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=boq_assistant-bard-web-server_20251105.08_p0&f.sid=-1&hl=en-US&_reqid=2&rt=c',
+    'application/x-www-form-urlencoded;charset=UTF-8',
+    `f.req=${form(JSON.stringify([null, JSON.stringify([turn, ['en-US'], ['c_1', 'r_2', 'rc_3'], ...Array(60).fill(null)])]))}&at=AJvLN6M3vJkZ%3A1794200025282`);
+  const chatgpt = (surface, base, file) => {
+    const steps = [
+      ['sentinel prepare', post('chatgpt.com', `${base}/sentinel/chat-requirements/prepare`, { p: token(611) }), true],
+      ['sentinel finalize', post('chatgpt.com', `${base}/sentinel/chat-requirements/finalize`,
+        { prepare_token: token(4280), proofofwork: `${token(631)}~S`, turnstile: token(3316) }), true],
+      ['conversation init', post('chatgpt.com', `${base}/conversation/init`, { conversation_id: CONV, conversation_origin: null,
+        gizmo_id: null, requested_default_model: null, system_hints: null, timezone: 'Atlantic/Reykjavik', timezone_offset_min: 0 }), true]
+    ];
+    const prepare = { client_prepare_state: 'sent', action: 'next', model: 'gpt-6', parent_message_id: 'client-created-root',
+      timezone: 'Atlantic/Reykjavik', timezone_offset_min: 0, is_do_not_remember: false,
+      local_function_names: ['local.continue_in_work'], client_prepare_dispatch: 'debounced', client_prepare_source: 'composer_editor_state' };
+    const message = { author: { metadata: {}, name: null, role: 'user' }, channel: null,
+      content: { content_type: 'text', parts: ['the sky is blue'] }, create_time: 1794200025.282, end_turn: null,
+      id: '8e07d1c2-0000-4000-8000-000000000001',
+      metadata: { automation_creation_attribution: { origin: 'conversation', flow_id: '8e07d1c2-0000-4000-8000-000000000002' } },
+      recipient: 'all', status: 'finished_successfully', update_time: null, weight: 1 };
+    if (file) {
+      steps.push(['file create (name and size)', post('chatgpt.com', `${base}/files`, { file_name: 'notes.txt', file_size: 34,
+        use_case: 'my_files', timezone_offset_min: 0, reset_rate_limits: false }), false]);
+      steps.push(['file bytes', req('PUT', 'sdmntprwestcentralus.oaiusercontent.com',
+        '/files/f250ee33-9087-8cf6-bcba-9da44104b379/raw?se=x&sig=y', 'text/csv', 'name,ssn\nAda,123-45-6789\n'), false]);
+      prepare.attachment_mime_types = ['text/csv'];
+      message.metadata.attachments = [{ id: 'file-1', mime_type: 'text/csv', name: 'notes.csv', size: 34, source: 'local' }];
+    }
+    steps.push(['conversation prepare', post('chatgpt.com', `${base}/f/conversation/prepare`, prepare), !file]);
+    steps.push(['conversation (the turn)', post('chatgpt.com', `${base}/f/conversation`, { turn_attribution: { turn_trigger: 'composer' },
+      action: 'next', model: 'gpt-6', parent_message_id: 'client-created-root', timezone: 'Atlantic/Reykjavik', timezone_offset_min: 0,
+      is_do_not_remember: false, client_contextual_info: { app_name: 'chatgpt.com', has_web_push_capabilities: true,
+        web_push_notification_permission: 'default' }, local_function_names: ['local.continue_in_work'], messages: [message],
+      supported_encodings: ['v1'], genui_state_snapshots: [], client_prepare_state: 'success' }), !file]);
+    steps.push(['live updates socket', ws('ws.chatgpt.com', '/p13/ws/user/gwoq-xA3yg4ebFrRtY0xZWRD3yfaf?verify=5948779522-5hruiFiLUkF', [
+      { command: { presence: { state: 'foreground', type: 'presence' }, type: 'connect' }, id: 1 },
+      { command: { topic_id: 'conversations', type: 'subscribe' }, id: 2 },
+      { command: { type: 'presence', state: 'background', metadata: { codex_usage_push: true, codex_usage_client: 'electron' } }, id: 3 }]), true]);
+    return { surface, steps };
+  };
+  const claudeAi = (file) => {
+    const steps = [];
+    let files = [];
+    if (file) {
+      steps.push(['attachment upload', req('POST', 'claude.ai', `/api/organizations/${ORG}/conversations/${CONV}/wiggle/upload-file`,
+        'multipart/form-data; boundary=b', '--b\r\nContent-Disposition: form-data; name="file"; filename="notes.txt"\r\nContent-Type: text/plain\r\n\r\nAda 123-45-6789\r\n--b--\r\n'), false]);
+      files = ['f1e2d3c4-0000-4000-8000-000000000003'];
+    }
+    steps.push(['completion (the turn)', post('claude.ai', `/api/organizations/${ORG}/chat_conversations/${CONV}/completion`, {
+      prompt: 'the sky is blue', timezone: 'Atlantic/Reykjavik', locale: 'en-US', model: 'claude-haiku-5-5', effort: 'high',
+      thinking_mode: 'auto', tools: [{ name: 'web_search', type: 'web_search_v0' }],
+      turn_message_uuids: { human_message_uuid: 'a', assistant_message_uuid: 'b' }, attachments: [], files, sync_sources: [],
+      completion_request_id: 'c', rendering_mode: 'messages', create_conversation_params: { name: '', model: 'claude-haiku-5-5',
+        include_conversation_preferences: true, paprika_mode: 'auto', compass_mode: null, tool_search_mode: 'auto',
+        is_temporary: false, enabled_imagine: true } }), !file]);
+    steps.push(['title', post('claude.ai', `/api/organizations/${ORG}/chat_conversations/${CONV}/title`,
+      { message_content: 'the sky is blue', recent_titles: [] }), true]);
+    return { surface: 'claude.ai', steps };
+  };
+  const geminiWeb = (file) => {
+    const steps = [
+      ['attestation', req('POST', 'waa-pa.clients6.google.com', '/$rpc/google.internal.waa.v1.Waa/Create', 'application/json+protobuf',
+        '["yo6lewEU9mzfRAj0FajJ"]'), true],
+      ['page settings RPCs', batch([['otAQ7b', '[1]'], ['ESY5D', '[null,[2,3,7,8,9,10,11,16]]'], ['CNgdBe', '[2,["en-US"],0]'],
+        ['o30O0e', '[["me"],[[["person.photo","person.name","person.email"]],null,[1,7]]]']]), true],
+      ['chat list', batch([['MaZiqc', '[13,null,[null,null,1,null,null,null,null,null,null,1]]'],
+        ['L5adhe', '[[null,null,null,"406f92de68d6a9a7"],null,[100]]']]), true]
+    ];
+    let turn = ['the sky is blue', 0, null, null, null, null, 0];
+    if (file) {
+      steps.push(['file bytes', req('POST', 'content-push.googleapis.com', '/upload', 'text/plain', 'Ada 123-45-6789'), false]);
+      turn = ['the sky is blue', 0, null, [[['/contrib_service/ttl_1d/abc/notes.txt', 1, null, 'text/plain',
+        '449a3540-d5fd-4cdf-0000-000000000004'], 'notes.txt']], null, null, 0];
+    }
+    steps.push(['StreamGenerate (the turn)', streamGenerate(turn), !file]);
+    steps.push(['after the turn', batch([['PCck7e', '["r_2debe4fba6c6c5f5"]'], ['aPya6c', '[]']]), true]);
+    steps.push(['cookie rotation', post('accounts.google.com', '/RotateCookies', [658, '2195969768263241828']), true]);
+    return { surface: 'Gemini web', steps };
+  };
+  const duckAi = (file) => ({ surface: 'duck.ai', steps: [['chat (the turn)', post('duck.ai', '/duckchat/v1/chat', {
+    model: 'gpt-5-mini', metadata: { toolChoice: { NewsSearch: false, WebSearch: false } },
+    messages: [{ role: 'user', content: file
+      ? [{ type: 'text', text: 'the sky is blue' }, { type: 'image', mimeType: 'image/png', image: `data:image/png;base64,${b64n(800)}` }]
+      : [{ type: 'text', text: 'the sky is blue' }] }], canUseTools: true, canUseApproxLocation: null }), !file]] });
+  const claudeCode = (file) => {
+    const user = file
+      ? [{ type: 'text', text: 'what is in this?' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64n(4000) } }]
+      : [{ type: 'text', text: 'the sky is blue' }];
+    const body = { model: 'claude-opus-5-5', max_tokens: 32000, stream: true, system: [{ type: 'text', text: 'You are Claude Code.' }],
+      tools: [{ name: 'Read', input_schema: { type: 'object', properties: { file_path: { type: 'string' } } } }],
+      metadata: { user_id: 'u' }, messages: [{ role: 'user', content: user }] };
+    const get = (what, path) => [what, req('GET', 'api.anthropic.com', path, null, ''), true];
+    return { surface: 'Claude Code', steps: [
+      get('bootstrap', '/api/claude_cli/bootstrap?entrypoint=cli&model=claude-opus-5-5'),
+      get('policy limits', '/api/claude_code/policy_limits'),
+      get('remote settings', '/api/claude_code/settings'),
+      get('fast mode', '/api/claude_code_penguin_mode'),
+      get('model selector', `/api/organizations/${ORG}/model_selector/cc`),
+      ['count tokens', post('api.anthropic.com', '/v1/messages/count_tokens?beta=true', { model: 'claude-opus-5-5', messages: body.messages }), !file],
+      ['messages (the turn)', post('api.anthropic.com', '/v1/messages?beta=true', body), !file]] };
+  };
+  const codexWs = (file) => ({ surface: 'Codex CLI (WebSocket)', steps: [['response.create (the turn)',
+    ws('chatgpt.com', '/backend-api/codex/responses', { type: 'response.create', model: 'gpt-6-codex', stream: true,
+      instructions: 'You are Codex.', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'the sky is blue' },
+        ...(file ? [{ type: 'input_image', image_url: `data:image/png;base64,${b64n(4000)}` }] : [])] }],
+      tool_choice: 'auto', parallel_tool_calls: false, reasoning: { effort: 'medium', summary: 'auto' }, store: false,
+      include: ['reasoning.encrypted_content'], prompt_cache_key: 'k', text: { verbosity: 'low' } }), !file]] });
+  const openaiApi = (file) => ({ surface: 'OpenAI API', steps: [
+    ['chat completions', post('api.openai.com', '/v1/chat/completions', { model: 'gpt-6-mini', messages: [{ role: 'user', content: file
+      ? [{ type: 'text', text: 'what is this?' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${b64n(800)}` } }]
+      : 'the sky is blue' }] }), !file],
+    ['responses', post('api.openai.com', '/v1/responses', { model: 'gpt-6-mini', input: file
+      ? [{ role: 'user', content: [{ type: 'input_text', text: 'summarise' }, { type: 'input_file', filename: 'notes.pdf',
+        file_data: `data:application/pdf;base64,${b64n(800)}` }] }]
+      : 'the sky is blue' }), !file]] });
+  const geminiApi = (file) => {
+    const body = { contents: [{ role: 'user', parts: [{ text: 'the sky is blue' },
+      ...(file ? [{ inlineData: { mimeType: 'application/pdf', data: b64n(800) } }] : [])] }] };
+    return { surface: 'Gemini API', steps: [
+      ['count tokens', post('generativelanguage.googleapis.com', '/v1beta/models/gemini-2.5-flash:countTokens', body), !file],
+      ['generate (the turn)', post('generativelanguage.googleapis.com', '/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse', body), !file]] };
+  };
+  const all = (file) => [chatgpt('ChatGPT web', '/backend-api', file), chatgpt('ChatGPT web, logged out (unverified)', '/backend-anon', file),
+    claudeAi(file), geminiWeb(file), duckAi(file), claudeCode(file), codexWs(file), openaiApi(file), geminiApi(file)];
+  return { plain: () => all(false), withFile: () => all(true), token };
+})();
+
+test('releasableUnderFailOpen round 4: every request of a real send flow is released (every_request_of_a_real_send_flow_is_released)', () => {
+  for (const { surface, steps } of R4.plain()) {
+    for (const [what, raw, release] of steps) {
+      assert.equal(release, true, `${surface}: ${what}`);
+      assert.equal(releasable(raw), true, `${surface}: ${what} must go out under fail-open`);
+    }
+  }
+});
+
+test('releasableUnderFailOpen round 4: the same flow with a file holds every file-bearing request (the_same_flow_with_a_file_holds_every_file_bearing_request)', () => {
+  for (const { surface, steps } of R4.withFile()) {
+    assert.ok(steps.some(([, , release]) => !release), surface);
+    for (const [what, raw, release] of steps) assert.equal(releasable(raw), release, `${surface}: ${what}`);
+  }
+});
+
+test('releasableUnderFailOpen round 4: content-free calls are exact (content_free_calls_are_exact)', () => {
+  const tok = (n) => 'Ab3+/_-='.repeat(Math.ceil(n / 8)).slice(0, n);
+  const sp = '/backend-api/sentinel/chat-requirements/prepare';
+  const sf = '/backend-api/sentinel/chat-requirements/finalize';
+  const init = '/backend-api/conversation/init';
+  const post = (h, p, b) => jreq('POST', h, p, b);
+  const fin = (b) => post('chatgpt.com', sf, b);
+  const baseInit = { conversation_id: null, conversation_origin: null, gizmo_id: 'g-p-6789abcdef', requested_default_model: 'gpt-6',
+    system_hints: ['search'], timezone: 'Etc/GMT+5', timezone_offset_min: 300 };
+  const withK = (k, v) => ({ ...baseInit, [k]: v });
+  const waa = (ct, body, path = '/$rpc/google.internal.waa.v1.Waa/Create') => req('POST', 'waa-pa.clients6.google.com', path, ct, body);
+  const released = [
+    post('chatgpt.com', sp, { p: tok(2048) }),
+    post('chat.openai.com', '/backend-anon/sentinel/chat-requirements/prepare', { p: 'x' }),
+    fin({ prepare_token: tok(12288), proofofwork: tok(2048), turnstile: tok(12288) }),
+    fin({ prepare_token: 't', proofofwork: null }),
+    fin({ prepare_token: 't~' }),
+    post('chatgpt.com', init, baseInit),
+    post('chatgpt.com', init, {}),
+    post('chatgpt.com', init, withK('system_hints', Array(16).fill('a'))),
+    post('chatgpt.com', init, withK('gizmo_id', 'g'.repeat(64))),
+    waa('application/json+protobuf', `["${tok(64)}"]`),
+    post('accounts.google.com', '/RotateCookies', [1, '-12']),
+    req('GET', 'api.anthropic.com', '/api/claude_code/settings', null, ''),
+    req('GET', 'api.anthropic.com', '/api/organizations/o-1/model_selector/cc', null, '')
+  ];
+  released.forEach((raw, i) => assert.equal(releasable(raw), true, `released ${i}: ${raw.toString('utf8').slice(0, 200)}`));
+  const held = [
+    post('chatgpt.com', sp, { p: 'x', file: 'y' }), post('chatgpt.com', sp, { p: tok(2049) }), post('chatgpt.com', sp, { p: 'two words' }),
+    post('chatgpt.com', sp, { p: '' }), post('chatgpt.com', sp, {}), post('chatgpt.com', sp, { p: 1 }), post('chatgpt.com', sp, ['x']),
+    fin({ proofofwork: 'x' }), fin({ prepare_token: tok(12289) }), fin({ prepare_token: 't', proofofwork: tok(2049) }),
+    fin({ prepare_token: 't', turnstile: tok(12289) }), fin({ prepare_token: 't', turnstile: 'a.b' }), fin({ prepare_token: 't', proofofwork: 'a b' }),
+    fin({ prepare_token: 't', x: null }), fin('t'),
+    post('chatgpt.com', '/backend-api/sentinel/chat-requirements', { p: 'x' }),
+    post('chatgpt.com', '/unauth-mweb/sentinel/chat-requirements/prepare', { p: 'x' }),
+    post('chatgpt.com', '/backend-apis/conversation/init', {}), post('chatgpt.net', init, {}),
+    req('PUT', 'chatgpt.com', init, 'application/json', '{}'), req('POST', 'chatgpt.com', init, 'text/plain', '{}'),
+    post('chatgpt.com', init, withK('attachments', [])), post('chatgpt.com', init, withK('conversation_id', 'a b')),
+    post('chatgpt.com', init, withK('conversation_origin', '')), post('chatgpt.com', init, withK('gizmo_id', 'g'.repeat(65))),
+    post('chatgpt.com', init, withK('requested_default_model', 1)), post('chatgpt.com', init, withK('system_hints', Array(17).fill('a'))),
+    post('chatgpt.com', init, withK('system_hints', 'search')), post('chatgpt.com', init, withK('system_hints', ['a b'])),
+    post('chatgpt.com', init, withK('timezone', 'America/New York')), post('chatgpt.com', init, withK('timezone', 'a\\b')),
+    post('chatgpt.com', init, withK('timezone_offset_min', '0')), post('chatgpt.com', init, []),
+    waa('application/json+protobuf', `["${tok(65)}"]`), waa('application/json+protobuf', '["a","b"]'), waa('application/json+protobuf', '["a b"]'),
+    waa('application/json', '["a"]'), waa('application/json+protobuf', '["a"]', '/$rpc/google.internal.waa.v1.Waa/Ping'),
+    post('accounts.google.com', '/RotateCookies', [1, '12a']), post('accounts.google.com', '/RotateCookies', [1, '']),
+    post('accounts.google.com', '/RotateCookies', [1, '1'.repeat(33)]), post('accounts.google.com', '/RotateCookies', ['1', '12']),
+    post('accounts.google.com', '/RotateCookies', [1, '12', 3]), post('accounts.google.com', '/RotateCookie', [1, '12']),
+    req('GET', 'api.anthropic.com', '/api/claude_code/settings', 'application/json', '{}'),
+    req('GET', 'api.anthropic.com', '/api/claude_code/metrics', null, ''), req('POST', 'api.anthropic.com', '/api/claude_code/settings', null, ''),
+    req('GET', 'api.anthropic.com', '/api/organizations/o%201/model_selector/cc', null, ''),
+    req('GET', 'api.anthropic.com', '/api/organizations/o/model_selector/cc/x', null, ''),
+    req('GET', 'api.anthropic.com', '/api/organizations/o/model_selector/xx', null, ''),
+    req('GET', 'api.anthropic.com', '/v1/messages', null, ''), req('GET', 'claude.ai', '/api/claude_code/settings', null, '')
+  ];
+  held.forEach((raw, i) => assert.equal(releasable(raw), false, `held ${i}: ${raw.toString('utf8').slice(0, 200)}`));
+});
+
+test('releasableUnderFailOpen round 4: Gemini web settings RPCs are exact (gemini_settings_rpcs_are_exact)', () => {
+  const batch = (fReq) => req('POST', 'gemini.google.com', '/_/BardChatUi/data/batchexecute?rpcids=x&rt=c',
+    'application/x-www-form-urlencoded;charset=UTF-8', `f.req=${formEnc(fReq)}&at=AJvLN6M`);
+  const call = (id, args, tag) => [id, args, null, tag];
+  const one = (c) => batch(JSON.stringify([[c]]));
+  const maxArgs = `[${Array(1023).fill('1').join(',')}]`;
+  assert.equal(maxArgs.length, 2047);
+  const released = [
+    one(call('otAQ7b', '[1]', 'generic')), one(call('ESY5D', maxArgs, 'generic')),
+    one(call('PCck7e', '["r_2debe4fba6c6c5f5",true,-1.5,null]', '1')), one(call('cCSu7', `["${'a'.repeat(64)}"]`, '1234')),
+    batch(JSON.stringify([Array(16).fill(call('aPya6c', '[]', 'generic'))]))
+  ];
+  released.forEach((raw, i) => assert.equal(releasable(raw), true, `released ${i}`));
+  const formReq = (ct, body, path = '/_/BardChatUi/data/batchexecute') => req('POST', 'gemini.google.com', path, ct, body);
+  const held = [
+    one(call('hNvQHb', '[]', 'generic')), one(call('otaq7b', '[1]', 'generic')), one(call('otAQ7b', '["the sky is blue"]', 'generic')),
+    one(call('otAQ7b', '[{"a":1}]', 'generic')), one(call('otAQ7b', `["${'a'.repeat(65)}"]`, 'generic')),
+    one(call('otAQ7b', '["/contrib_service/x"]', 'generic')), one(call('ESY5D', `[${Array(1024).fill('1').join(',')}]`, 'generic')),
+    one(call('otAQ7b', '[1', 'generic')), one(call('otAQ7b', '[1]', 'custom')), one(call('otAQ7b', '[1]', '12345')),
+    one(call('otAQ7b', '[1]', '')), one(['otAQ7b', '[1]', 0, 'generic']), one(['otAQ7b', '[1]', null]),
+    one(['otAQ7b', [1], null, 'generic']), batch(JSON.stringify([Array(17).fill(call('aPya6c', '[]', 'generic'))])),
+    batch('[[]]'), batch(JSON.stringify([[call('aPya6c', '[]', 'generic')], []])), batch(JSON.stringify([call('aPya6c', '[]', 'generic')])),
+    formReq('application/x-www-form-urlencoded', `f.req=${formEnc('[[["aPya6c","[]",null,"generic"]]]')}&x=1`),
+    formReq('application/json', '[[["aPya6c","[]",null,"generic"]]]'),
+    formReq('application/x-www-form-urlencoded', `f.req=${formEnc('[[["aPya6c","[]",null,"generic"]]]')}`, '/_/BardChatUi/data/batchexecutes')
+  ];
+  held.forEach((raw, i) => assert.equal(releasable(raw), false, `held ${i}`));
+});
+
+test('releasableUnderFailOpen round 4: ChatGPT live-update frames are exact (chatgpt_live_update_frames_are_exact)', () => {
+  const frame = (path, v) => req('WS-SEND', 'ws.chatgpt.com', path, null, JSON.stringify(v));
+  const path = '/p13/ws/user/gwoq-xA3yg4ebFrRtY0xZWRD3yfaf';
+  const cmd = (c) => frame(path, [{ command: c, id: 7 }]);
+  const p1 = { command: { type: 'presence' }, id: 1 };
+  const released = [
+    cmd({ type: 'presence', state: 'foreground', metadata: null }), cmd({ type: 'unsubscribe', topic_id: 'alder-conversations' }),
+    cmd({ type: 'connect', presence: { state: 'background' } }), frame('/ws/user/abc', [p1]), frame(path, Array(16).fill(p1))
+  ];
+  released.forEach((raw, i) => assert.equal(releasable(raw), true, `released ${i}`));
+  const held = [
+    cmd({ type: 'message', text: 'hi' }), cmd({ type: 'send' }), cmd({ state: 'foreground' }), cmd({ type: 'presence', state: 'away' }),
+    cmd({ type: 'presence', state: 1 }), cmd({ type: 'subscribe', topic_id: 'a b' }), cmd({ type: 'connect', presence: { state: 'away' } }),
+    cmd({ type: 'connect', presence: { type: 'other' } }), cmd({ type: 'connect', presence: { note: 'x' } }),
+    cmd({ type: 'connect', presence: 'foreground' }), cmd({ type: 'presence', metadata: { note: 'x' } }),
+    cmd({ type: 'presence', metadata: { codex_usage_push: 'yes' } }), cmd({ type: 'presence', metadata: { codex_usage_client: 'a b' } }),
+    cmd({ type: 'presence', metadata: 'x' }), frame(path, [{ command: { type: 'presence' }, id: '1' }]),
+    frame(path, [{ command: { type: 'presence' } }]), frame(path, [{ ...p1, x: 1 }]), frame(path, [{ id: 1 }]), frame(path, [1]),
+    frame(path, []), frame(path, p1), frame(path, Array(17).fill(p1)), frame('/p13/ws/user/a/b', [p1]), frame('/a/b/ws/user/c', [p1]),
+    frame('/p%201/ws/user/c', [p1]), frame('/ws/user/', [p1]), frame('/ws/users/c', [p1]),
+    req('WS-SEND', 'chatgpt.com', path, null, JSON.stringify([p1]))
+  ];
+  held.forEach((raw, i) => assert.equal(releasable(raw), false, `held ${i}`));
+});
+
+// Through the real fetch hook, on the page itself: ChatGPT web's send with
+// the bridge down and the window open. Every request goes out; with a file the
+// file-bearing ones are held, and each hold names its host and value-free
+// route (never the query or body).
+test('fail-open round 4: ChatGPT web\'s real send goes out request by request; with a file the file calls are held and named', async () => {
+  const outage = { onCapture: () => ({ ok: false, code: 'bridge-error' }) };
+  const toInit = (raw) => {
+    const s = raw.toString('utf8');
+    const i = s.indexOf('\r\n\r\n');
+    const [method, target] = s.slice(0, i).split('\r\n')[0].split(' ');
+    const host = /\r\nHost: ([^\r]+)/.exec(s.slice(0, i))[1];
+    const ct = /\r\ncontent-type: ([^\r]+)/.exec(s.slice(0, i));
+    return [`https://${host}${target}`, { method, headers: ct ? { 'content-type': ct[1] } : {}, body: s.slice(i + 4) }];
+  };
+  for (const [file, flows] of [[false, R4.plain()], [true, R4.withFile()]]) {
+    for (const { surface, steps } of flows.filter((f) => f.surface === 'ChatGPT web' || f.surface === 'Gemini web' || f.surface === 'claude.ai')) {
+      const page = surface === 'Gemini web' ? 'https://gemini.google.com/app' : surface === 'claude.ai' ? 'https://claude.ai/new' : 'https://chatgpt.com/';
+      const w = makeWorld(outage.onCapture, realCatalogGlobals(page));
+      w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+      for (const [what, raw, release] of steps) {
+        if (raw.toString('latin1').startsWith('WS-SEND')) continue; // frames: the extractor tests above
+        const [url, init] = toInit(raw);
+        const sent = w.netCalls.length;
+        w.logs.length = 0;
+        let outcome = 'SENT';
+        try { await w.sandbox.fetch(url, init); } catch (e) { outcome = blockedError(e) ? 'BLOCKED' : `ERR ${e.message}`; }
+        assert.equal(outcome, release ? 'SENT' : 'BLOCKED', `${surface}${file ? ' + file' : ''}: ${what}`);
+        assert.equal(w.netCalls.length, sent + (release ? 1 : 0), `${surface}: ${what}`);
+        if (!release) {
+          const line = assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
+          const u = new URL(url);
+          assert.match(line, new RegExp(`\\bhost=${u.hostname.replace(/\./g, '\\.')}\\b`), line);
+          // The route, or none on the upload path (its path is the file's name).
+          assert.ok(/\broute=\//.test(line) || (/\bscope=upload\b/.test(line) && !/\broute=/.test(line)), line);
+          assert.ok(!/sig=y|123-45-6789|notes\.csv|Ada/.test(line), line);
+        }
+      }
+    }
+  }
+});
+
+test('fail-open round 4: a hold\'s route is the guard\'s, ids as :x, never the query; an upload\'s is withheld', async () => {
+  const w = makeWorld(() => ({ ok: false, code: 'bridge-error' }), realCatalogGlobals('https://chatgpt.com/'));
+  w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  await assert.rejects(w.sandbox.fetch('https://chatgpt.com/backend-api/files/f250ee33-9087-8cf6-bcba-9da44104b379/uploaded?sig=SECRET',
+    jsonInit({ file_name: 'SECRET.txt' })), blockedError);
+  const line = assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
+  assert.match(line, /\bhost=chatgpt\.com\b/);
+  assert.match(line, /\broute=\/backend-api\/files\/:x\/uploaded\b/);
+  assert.ok(!line.includes('SECRET'), line);
+  // Guard's id test, arm by arm: 16 hex, 4 digits, a 22-byte token with a
+  // digit and a letter; not 15 hex, 3 digits, or 22 letters.
+  w.logs.length = 0;
+  await assert.rejects(w.sandbox.fetch('https://chatgpt.com/a/deadbeefdeadbeef/1234/abcdefghijklmnopqrstu1/deadbeefdeadbee/123/abcdefghijklmnopqrstuv/12345678-1234-1234-1234-123456789012/v1',
+    jsonInit({ x: 1 })), blockedError);
+  assert.match(assertBlocked(w.logs, 'fail-open-file-held'), /\broute=\/a\/:x\/:x\/:x\/deadbeefdeadbee\/123\/abcdefghijklmnopqrstuv\/:x\/v1\b/);
+  // The token arm's alphabet, member by member, and its length.
+  w.logs.length = 0;
+  await assert.rejects(w.sandbox.fetch('https://chatgpt.com/t/abcdefghijklmnopqrstu+1/abcdefghijklmnopqrstu=1/abcdefghijklmnopqrstu_1/abcdefghijklmnopqrst1/abcdefghijklmnopqrstu.1',
+    jsonInit({ x: 1 })), blockedError);
+  assert.match(assertBlocked(w.logs, 'fail-open-file-held'), /\broute="?\/t\/:x\/:x\/:x\/abcdefghijklmnopqrst1\/abcdefghijklmnopqrstu\.1"?(\s|$)/);
+  // Each arm's character classes, edge digits included; and the 512 clip.
+  w.logs.length = 0;
+  await assert.rejects(w.sandbox.fetch('https://chatgpt.com/e/00000000-0000-0000-0000-000000000000/0123456789abcdef/0909/abcdefghijklmnopqrstu9/abcdefghijklmnopqrstu0/0123456789abcde/090',
+    jsonInit({ x: 1 })), blockedError);
+  assert.match(assertBlocked(w.logs, 'fail-open-file-held'), /\broute=\/e\/:x\/:x\/:x\/:x\/:x\/0123456789abcde\/090(\s|$)/);
+  w.logs.length = 0;
+  await assert.rejects(w.sandbox.fetch(`https://chatgpt.com/${'a/'.repeat(400)}`, jsonInit({ x: 1 })), blockedError);
+  assert.equal(/\broute=(\S+)/.exec(assertBlocked(w.logs, 'fail-open-file-held'))[1].length, 512);
+  // A cross-origin upload's path is the file's name: no route.
+  w.logs.length = 0;
+  await assert.rejects(w.sandbox.fetch('https://sdmntprwestcentralus.oaiusercontent.com/files/x/my-secret-name.pdf?sig=1',
+    { method: 'PUT', headers: { 'content-type': 'application/pdf' }, body: '%PDF-1.7' }), blockedError);
+  const up = assertBlocked(w.logs, 'fail-open-file-held');
+  assert.ok(!/my-secret-name|route=\//.test(up), up);
+});
+
+test('fail-open round 4: ChatGPT\'s live-update socket keeps its presence frames; another command closes it, named', async () => {
+  const run = async (frames) => {
+    const WebSocket = fakeWebSocketClass();
+    const w = makeWorld(() => ({ ok: false, code: 'bridge-error' }), { ...realCatalogGlobals('https://chatgpt.com/'), WebSocket });
+    w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+    const ws = new w.sandbox.WebSocket('wss://ws.chatgpt.com/p13/ws/user/gwoq-xA3yg4ebFrRtY0xZWRD3yfaf?verify=5948779522-5hruiFiLUkF');
+    for (const f of frames) { try { ws.send(JSON.stringify(f)); } catch { /* refused */ } }
+    await waitFor(() => ws.wire.length + ws.closes.length >= 1);
+    await new Promise((r) => setTimeout(r, 50));
+    return { w, ws };
+  };
+  const ok = await run([
+    [{ command: { presence: { state: 'foreground', type: 'presence' }, type: 'connect' }, id: 1 }, { command: { topic_id: 'conversations', type: 'subscribe' }, id: 2 }],
+    [{ command: { type: 'presence', state: 'background', metadata: { codex_usage_push: true, codex_usage_client: 'electron' } }, id: 3 }]
+  ]);
+  assert.equal(ok.ws.wire.length, 2, 'both frames go out');
+  assert.equal(ok.ws.closes.length, 0);
+  assert.ok(!findLine(ok.w.logs, 'fail-open-file-held'));
+  const other = await run([[{ command: { type: 'message', text: 'the sky is blue' }, id: 4 }]]);
+  assert.equal(other.ws.wire.length, 0);
+  assert.equal(other.ws.closes.length, 1);
+  const line = assertBlocked(other.w.logs, 'fail-open-file-held', 'unavailable');
+  assert.match(line, /\bhost=ws\.chatgpt\.com\b/);
+  assert.match(line, /\broute=\/p13\/ws\/user\/:x\b/);
+  assert.ok(!/verify=|the sky/.test(line), line);
+});
+
+test('releasableUnderFailOpen round 4: the caps, at their boundaries (content_free_caps_are_pinned)', () => {
+  const at = (n) => req('POST', 'gemini.google.com', GEMINI, 'application/x-www-form-urlencoded',
+    `${geminiBody(['hi']).split('&')[0]}&at=${'a'.repeat(n)}`);
+  assert.equal(releasable(at(4096)), true);
+  assert.equal(releasable(at(4097)), false);
+  const rot = (n) => jreq('POST', 'accounts.google.com', '/RotateCookies', [1, '1'.repeat(n)]);
+  assert.equal(releasable(rot(32)), true);
+  assert.equal(releasable(rot(33)), false);
+  const args = `[11${',1'.repeat(1022)}]`;
+  assert.equal(args.length, 2048);
+  const fReq = JSON.stringify([[['ESY5D', args, null, 'generic']]]);
+  assert.equal(releasable(req('POST', 'gemini.google.com', '/_/BardChatUi/data/batchexecute', 'application/x-www-form-urlencoded',
+    `f.req=${formEnc(fReq)}`)), true);
+  assert.equal(releasable(req('WS-SEND', 'ws.chatgpt.com', 'ws/user/abc', null, '[{"command":{"type":"presence"},"id":1}]')), false);
+  // Edges each check decides: a one-digit cookie, a timezone with a 9, a
+  // numbered tag with a 0 and a 9; and array-like objects where arrays are.
+  assert.equal(releasable(rot(1)), true);
+  const init = (tz) => jreq('POST', 'chatgpt.com', '/backend-api/conversation/init', { timezone: tz });
+  assert.equal(releasable(init('Etc/GMT+9')), true);
+  const bx = (fr) => req('POST', 'gemini.google.com', '/_/BardChatUi/data/batchexecute', 'application/x-www-form-urlencoded',
+    `f.req=${formEnc(fr)}`);
+  assert.equal(releasable(bx('[[["otAQ7b","[1]",null,"09"]]]')), true);
+  assert.equal(releasable(bx('{"0":[["aPya6c","[]",null,"generic"]],"length":1}')), false);
+  assert.equal(releasable(bx('[[{"0":"aPya6c","1":"[]","2":null,"3":"generic","length":4}]]')), false);
+  assert.equal(releasable(bx('[[')), false, 'an f.req that is not JSON');
+  assert.equal(releasable(jreq('POST', 'accounts.google.com', '/RotateCookies', [1, '1000'])), true);
+});

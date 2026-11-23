@@ -2013,7 +2013,9 @@
       if (isObj(v)) return Object.keys(v).some((k) => geminiUploadRef(v[k]));
       return false;
     };
-    const geminiWeb = (body) => {
+    // A Gemini web form: `f.req` once and `at` (the page's own token), nothing
+    // else; the `f.req` text, or undefined.
+    const geminiForm = (body) => {
       let freq;
       for (const pair of body.split('&')) {
         const eq = pair.indexOf('=');
@@ -2021,8 +2023,12 @@
         const v = formDecode(eq < 0 ? '' : pair.slice(eq + 1));
         if (k === 'f.req' && v !== undefined && freq === undefined) freq = v;
         else if (k === 'at' && v !== undefined && utf8Len(v) <= MAX_OPAQUE_STRING) { /* token */ }
-        else return false;
+        else return undefined;
       }
+      return freq;
+    };
+    const geminiWeb = (body) => {
+      const freq = geminiForm(body);
       if (freq === undefined) return false;
       const po = parseJson(freq);
       if (!po || !Array.isArray(po.v) || po.v.length < 2) return false;
@@ -2189,6 +2195,118 @@
         restOpaque(o, ['contents', 'systemInstruction', 'tools']);
     };
 
+    // ── content-free page calls (round 4) ──
+    // Calls a chat page or client makes around a send that carry no user
+    // content (anti-abuse tokens, ids, settings), read off real traffic. Each
+    // exact: one host and route, a closed key list, every value a setting or a
+    // token of a fixed alphabet and a bounded size. The tokens are opaque, so
+    // each is a bounded side channel, at most its cap per call.
+    const SENTINEL_P = 2048;
+    const SENTINEL_PREPARE_TOKEN = 12 * 1024;
+    const SENTINEL_POW = 2048;
+    const SENTINEL_TURNSTILE = 12 * 1024;
+    const MAX_WORD = 64;
+    const MAX_RPC_ARGS = 2048;
+    const MAX_RPC_CALLS = 16;
+    const MAX_SHORT_LIST = 16;
+    const GEMINI_RPCS = [
+      'CNgdBe', 'DYBcR', 'ESY5D', 'GPRiHf', 'I4z33b', 'K4WWud', 'L5adhe', 'MaZiqc', 'PCck7e',
+      'Te6DCf', 'aPya6c', 'cCSu7', 'cYRIkd', 'ku4Jyf', 'maGuAc', 'o30O0e', 'otAQ7b', 'ozz5Z',
+      'sJBwce', 'whPPme'
+    ];
+    const absentNullOr = (v, f) => v === undefined || v === null || f(v);
+    // An anti-abuse token: base64 (standard or URL-safe), padding, `~`.
+    const tokenOk = (v, max) => typeof v === 'string' && v.length <= max && /^[A-Za-z0-9+/=_~-]+$/.test(v);
+    // A short id or setting word: letters, digits, `-`, `_`, `.` (a timezone
+    // also `/` and `+`); at most MAX_WORD bytes.
+    const wordOk = (v, tz) => typeof v === 'string' && v.length <= MAX_WORD &&
+      (tz ? /^[A-Za-z0-9._/+-]+$/ : /^[A-Za-z0-9._-]+$/).test(v);
+    const word = (v) => wordOk(v, false);
+    const sentinelPrepare = (v) => isObj(v) && onlyKeys(v, ['p']) && tokenOk(get(v, 'p'), SENTINEL_P);
+    const sentinelFinalize = (v) => isObj(v) &&
+      onlyKeys(v, ['prepare_token', 'proofofwork', 'turnstile']) &&
+      tokenOk(get(v, 'prepare_token'), SENTINEL_PREPARE_TOKEN) &&
+      absentNullOr(get(v, 'proofofwork'), (x) => tokenOk(x, SENTINEL_POW)) &&
+      absentNullOr(get(v, 'turnstile'), (x) => tokenOk(x, SENTINEL_TURNSTILE));
+    const chatgptInit = (v) => isObj(v) &&
+      onlyKeys(v, ['conversation_id', 'conversation_origin', 'gizmo_id', 'requested_default_model',
+        'system_hints', 'timezone', 'timezone_offset_min']) &&
+      absentNullOr(get(v, 'conversation_id'), word) &&
+      absentNullOr(get(v, 'conversation_origin'), word) &&
+      absentNullOr(get(v, 'gizmo_id'), word) &&
+      absentNullOr(get(v, 'requested_default_model'), word) &&
+      absentNullOr(get(v, 'system_hints'), (x) => Array.isArray(x) && x.length <= MAX_SHORT_LIST && x.every(word)) &&
+      absentNullOr(get(v, 'timezone'), (x) => wordOk(x, true)) &&
+      absentNullOr(get(v, 'timezone_offset_min'), (x) => typeof x === 'number');
+    // ChatGPT's live-update socket: /ws/user/<id>, or behind one shard segment.
+    const chatgptWsRoute = (p) => {
+      const seg = p.split('/');
+      const tail = seg.length === 5 && word(seg[1]) ? seg.slice(2) : seg.slice(1);
+      return seg[0] === '' && tail.length === 3 && tail[0] === 'ws' && tail[1] === 'user' && word(tail[2]);
+    };
+    const presenceState = (x) => x === 'foreground' || x === 'background';
+    const chatgptWs = (v) => Array.isArray(v) && v.length > 0 && v.length <= MAX_SHORT_LIST && v.every((c) => {
+      if (!isObj(c)) return false;
+      const cmd = get(c, 'command');
+      if (!isObj(cmd)) return false;
+      const type = get(cmd, 'type');
+      return onlyKeys(c, ['command', 'id']) && typeof get(c, 'id') === 'number' &&
+        onlyKeys(cmd, ['type', 'state', 'presence', 'topic_id', 'metadata']) &&
+        (type === 'connect' || type === 'subscribe' || type === 'unsubscribe' || type === 'presence') &&
+        absentNullOr(get(cmd, 'state'), presenceState) &&
+        absentNullOr(get(cmd, 'topic_id'), word) &&
+        absentNullOr(get(cmd, 'presence'), (pr) => isObj(pr) && onlyKeys(pr, ['state', 'type']) &&
+          absentNullOr(get(pr, 'state'), presenceState) && absentNullOr(get(pr, 'type'), (t) => t === 'presence')) &&
+        absentNullOr(get(cmd, 'metadata'), (m) => isObj(m) &&
+          onlyKeys(m, ['codex_usage_push', 'codex_usage_client']) &&
+          absentNullOr(get(m, 'codex_usage_push'), (x) => typeof x === 'boolean') &&
+          absentNullOr(get(m, 'codex_usage_client'), word));
+    });
+    // Nulls, booleans, numbers and short words, in arrays.
+    const settingsTree = (v) => {
+      if (v === null || typeof v === 'boolean' || typeof v === 'number') return true;
+      if (typeof v === 'string') return word(v);
+      if (Array.isArray(v)) return v.every(settingsTree);
+      return false;
+    };
+    // Gemini web's listed settings RPCs: f.req=[[[rpcid, "<args>", null, "generic"], …]].
+    const geminiBatch = (body) => {
+      const freq = geminiForm(body);
+      if (freq === undefined) return false;
+      const po = parseJson(freq);
+      if (po === undefined) return false;
+      const outer = po.v;
+      if (!Array.isArray(outer) || outer.length !== 1 || !Array.isArray(outer[0])) return false;
+      const calls = outer[0];
+      return calls.length > 0 && calls.length <= MAX_RPC_CALLS && calls.every((c) => {
+        if (!Array.isArray(c) || c.length !== 4) return false;
+        const id = c[0];
+        const args = c[1];
+        const tag = c[3];
+        if (!GEMINI_RPCS.includes(id) || typeof args !== 'string' || c[2] !== null || typeof tag !== 'string') return false;
+        if (!(tag === 'generic' || /^[0-9]{1,4}$/.test(tag))) return false;
+        if (utf8Len(args) > MAX_RPC_ARGS) return false;
+        const pa = parseJson(args);
+        return pa !== undefined && settingsTree(pa.v);
+      });
+    };
+    // Gemini web's attestation handshake: ["<client id>"].
+    const waaCreate = (body) => {
+      const r = parseJson(body);
+      return r !== undefined && Array.isArray(r.v) && r.v.length === 1 && tokenOk(r.v[0], MAX_WORD);
+    };
+    // Google's cookie rotation: [<n>, "<digits>"].
+    const rotateCookies = (v) => Array.isArray(v) && v.length === 2 && typeof v[0] === 'number' &&
+      typeof v[1] === 'string' && v[1].length <= 32 && /^[0-9-]+$/.test(v[1]);
+    // Claude Code's bodyless configuration reads (the proxy's; parity only).
+    const claudeCodeConfigRoute = (p) => {
+      if (p === '/api/claude_cli/bootstrap' || p === '/api/claude_code/policy_limits' ||
+        p === '/api/claude_code/settings' || p === '/api/claude_code_penguin_mode') return true;
+      const seg = p.split('/');
+      return seg.length === 6 && seg[0] === '' && seg[1] === 'api' && seg[2] === 'organizations' &&
+        word(seg[3]) && seg[4] === 'model_selector' && seg[5] === 'cc';
+    };
+
     // The query string is settings too: short, each value a setting, no
     // parameter named for an attachment.
     const queryOk = (query) => {
@@ -2271,16 +2389,39 @@
         return route !== null && j((v) => claudeAi(route, v));
       }
       if (method === 'POST' && (h === 'chatgpt.com' || h === 'chat.openai.com')) {
-        if (p === '/backend-api/conversation' || p === '/backend-api/f/conversation') return j((v) => chatgpt(v, true));
-        if (p === '/backend-api/conversation/prepare' || p === '/backend-api/f/conversation/prepare') return j((v) => chatgpt(v, false));
         if (p === '/backend-api/codex/responses') return j((v) => responses(v, false));
+        // Logged in (/backend-api) and logged out (/backend-anon) send the same calls.
+        let route;
+        if (p.startsWith('/backend-api')) route = p.slice('/backend-api'.length);
+        else if (p.startsWith('/backend-anon')) route = p.slice('/backend-anon'.length);
+        else return false;
+        if (route === '/conversation' || route === '/f/conversation') return j((v) => chatgpt(v, true));
+        if (route === '/conversation/prepare' || route === '/f/conversation/prepare') return j((v) => chatgpt(v, false));
+        if (route === '/conversation/init') return j(chatgptInit);
+        if (route === '/sentinel/chat-requirements/prepare') return j(sentinelPrepare);
+        if (route === '/sentinel/chat-requirements/finalize') return j(sentinelFinalize);
         return false;
       }
       if (method === 'WS-SEND' && h === 'chatgpt.com' && p === '/backend-api/codex/responses') {
         return j((v) => responses(v, true));
       }
-      if (method === 'POST' && h === 'gemini.google.com' && p === GEMINI_PATH) {
-        return media === 'application/x-www-form-urlencoded' && geminiWeb(body);
+      if (method === 'WS-SEND' && h === 'ws.chatgpt.com' && chatgptWsRoute(p)) {
+        return j(chatgptWs);
+      }
+      if (method === 'POST' && h === 'gemini.google.com') {
+        const form = media === 'application/x-www-form-urlencoded';
+        if (p === GEMINI_PATH) return form && geminiWeb(body);
+        if (p === '/_/BardChatUi/data/batchexecute') return form && geminiBatch(body);
+        return false;
+      }
+      if (method === 'POST' && h === 'waa-pa.clients6.google.com' && p === '/$rpc/google.internal.waa.v1.Waa/Create') {
+        return media === 'application/json+protobuf' && waaCreate(body);
+      }
+      if (method === 'POST' && h === 'accounts.google.com' && p === '/RotateCookies') {
+        return j(rotateCookies);
+      }
+      if (method === 'GET' && h === 'api.anthropic.com') {
+        return body === '' && claudeCodeConfigRoute(p);
       }
       if (method === 'POST' && (h === 'duck.ai' || h === 'duckduckgo.com') && p === '/duckchat/v1/chat') {
         return j(duck);
@@ -3719,9 +3860,26 @@
   // "Something went wrong" swallows the sentence whole. Logging it
   // unconditionally means every refusal this file makes is attributable to
   // Sonomos, on every transport, whatever the page does with the failure.
+  // Where a request was going, value-free, for a fail-open hold's line: its
+  // path with every id-like segment as `:x`, the way the guard logs routes
+  // (Spliicer-Guard RouteMemory::normalize_path; Proxy and Bridge
+  // fail_open_shape.rs route_of). Printable ASCII only, at most 512
+  // characters, `-` when empty.
+  function failOpenRoute(path) {
+    const idLike = (seg) => /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(seg) ||
+      /^[0-9a-fA-F]{16,}$/.test(seg) || /^[0-9]{4,}$/.test(seg) ||
+      (/^[A-Za-z0-9+/=_-]{22,}$/.test(seg) && /[0-9]/.test(seg) && /[A-Za-z]/.test(seg));
+    const route = String(path).split('/').map((seg) => (idLike(seg) ? ':x' : seg)).join('/');
+    if (route === '') return '-';
+    return Array.from(route).slice(0, 512).map((c) => (/^[\x21-\x7e]$/.test(c) ? c : '?')).join('');
+  }
+
   function reporter(shape, startedAt) {
     return (level, reason, extra) => {
       const line = { ...shape, ...(extra || {}), ms: Date.now() - startedAt };
+      // A fail-open hold names its route as the guard logs it (zh#370). Not
+      // on the upload path, whose path is the file's name (markUpload).
+      if (reason === FILE_HELD) line.route = shape.path == null ? null : failOpenRoute(shape.path);
       if (line.action === 'block') line.kind = blockKind(reason);
       (level === 'warn' ? warn : debug)(reason, line);
       // The MERGED line, not just `extra`: the shape carries `bytes`, and the

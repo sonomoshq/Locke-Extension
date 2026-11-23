@@ -28,6 +28,14 @@ base64 query string, non-ASCII keys, inline-data and `{mimeType, data}` blobs
 inside tool inputs, tool definitions and Gemini function calls, and bounds
 each message's settings separately; Codex tool outputs carrying
 `internal_chat_message_metadata_passthrough` are no longer held.
+A plain-text send now goes through end to end under fail-open: the
+content-free calls around the turn are released under exact shapes too
+(ChatGPT's sentinel `prepare` / `finalize`, `conversation/init` and its
+`ws.chatgpt.com` presence frames; Gemini web's settings RPCs, `Waa/Create` and
+`RotateCookies`). Before, ChatGPT showed "Unknown error" because its sentinel
+calls were held. Every `fail-open-file-held` console line now carries the
+request's `route` as the desktop app logs it (ids as `:x`, no query; none on
+the upload path).
 
 **Added — Google AI Mode from the search bar is screened.** Typing a prompt
 into Google's search box in AI Mode and pressing enter loads
