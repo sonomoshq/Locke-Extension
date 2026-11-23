@@ -1597,6 +1597,38 @@
   // re-applies the rule to it.
   //
   // <releasableUnderFailOpen>
+  // Standard base64, padded to a multiple of 4, canonical.
+  const FAIL_OPEN_B64 = (x) => {
+    if (x.length % 4 !== 0) return undefined;
+    const val = (c) => {
+      const n = c.charCodeAt(0);
+      if (n >= 65 && n <= 90) return n - 65;
+      if (n >= 97 && n <= 122) return n - 71;
+      if (n >= 48 && n <= 57) return n + 4;
+      if (c === '+') return 62;
+      if (c === '/') return 63;
+      return undefined;
+    };
+    const quads = x.length / 4;
+    const out = [];
+    for (let qi = 0; qi < quads; qi++) {
+      const q = x.slice(qi * 4, qi * 4 + 4);
+      let pad = 0;
+      while (pad < 4 && q[3 - pad] === '=') pad++;
+      if (pad > 2 || (pad > 0 && qi + 1 !== quads)) return undefined;
+      let n = 0;
+      for (let j = 0; j < 4; j++) {
+        const v = j >= 4 - pad ? 0 : val(q[j]);
+        if (v === undefined) return undefined;
+        n = n * 64 + v;
+      }
+      if ((pad === 1 && n % 256 !== 0) || (pad === 2 && n % 65536 !== 0)) return undefined;
+      const bytes = [Math.floor(n / 65536) % 256, Math.floor(n / 256) % 256, n % 256];
+      out.push(...bytes.slice(0, 3 - pad));
+    }
+    return new Uint8Array(out);
+  };
+
   // claude.ai Connect RPC message schemas, field by field as seen on the wire
   // (LibreWolf HAR, 2026-11-22): [number, kind, repeated]. Proxy and Bridge
   // fail_open_shape.rs state the same table (claude_ai_rpc_schemas_are_pinned).
@@ -2061,13 +2093,15 @@
     // else; the `f.req` text, or undefined.
     const geminiForm = (body) => {
       let freq;
+      let at = false;
       // The page ends its form with `&` (2026-11): an empty pair is no field.
+      // Each field at most once: a repeated `at` would be an unbounded channel.
       for (const pair of body.split('&').filter((x) => x !== '')) {
         const eq = pair.indexOf('=');
         const k = formDecode(eq < 0 ? pair : pair.slice(0, eq));
         const v = formDecode(eq < 0 ? '' : pair.slice(eq + 1));
         if (k === 'f.req' && v !== undefined && freq === undefined) freq = v;
-        else if (k === 'at' && v !== undefined && utf8Len(v) <= MAX_OPAQUE_STRING) { /* token */ }
+        else if (k === 'at' && v !== undefined && !at && utf8Len(v) <= MAX_OPAQUE_STRING) at = true;
         else return undefined;
       }
       return freq;
@@ -2411,7 +2445,7 @@
       if (kind === 'toolKey') return v.length > 0 && v.length <= MAX_TOOL_KEY && v.every(TOOL_KEY_BYTE);
       if (kind === 'empty') return v.length === 0;
       if (kind === 'attest') return v.length > 0 && v.length <= MAX_ATTEST && v.every(ATTEST_BYTE);
-      return pbMsg(v, kind) !== undefined;
+      return Array.isArray(kind) && pbMsg(v, kind) !== undefined;
     };
     // `b` is a message of `schema`'s fields ([number, kind, repeated]); the
     // field numbers it holds.
@@ -2482,7 +2516,7 @@
     // A WebChannel POST form: count, optionally ofs, req<i>___data__ for every
     // i below count, each read by `frame`; an empty pair is no field.
     const webchannelForm = (formBody, frame) => {
-      const digits = (x, max) => x.length > 0 && x.length <= max && /^[0-9]+$/.test(x);
+      const digits = (x, max) => x.length <= max && /^[0-9]+$/.test(x);
       let count;
       let ofs = false;
       const frames = [];
@@ -2502,39 +2536,8 @@
       return count !== undefined && count <= MAX_WC_FRAMES && frames.length === count &&
         frames.every(([i, v]) => i < count && frame(v));
     };
-    // Standard base64, padded to a multiple of 4, canonical.
-    const b64Std = (x) => {
-      if (x.length % 4 !== 0) return undefined;
-      const val = (c) => {
-        const n = c.charCodeAt(0);
-        if (n >= 65 && n <= 90) return n - 65;
-        if (n >= 97 && n <= 122) return n - 71;
-        if (n >= 48 && n <= 57) return n + 4;
-        if (c === '+') return 62;
-        if (c === '/') return 63;
-        return undefined;
-      };
-      const quads = x.length / 4;
-      const out = [];
-      for (let qi = 0; qi < quads; qi++) {
-        const q = x.slice(qi * 4, qi * 4 + 4);
-        let pad = 0;
-        while (pad < 4 && q[3 - pad] === '=') pad++;
-        if (pad > 2 || (pad > 0 && qi + 1 !== quads)) return undefined;
-        let n = 0;
-        for (let j = 0; j < 4; j++) {
-          const v = j >= 4 - pad ? 0 : val(q[j]);
-          if (v === undefined) return undefined;
-          n = n * 64 + v;
-        }
-        if ((pad === 1 && n % 256 !== 0) || (pad === 2 && n % 65536 !== 0)) return undefined;
-        const bytes = [Math.floor(n / 65536) % 256, Math.floor(n / 256) % 256, n % 256];
-        out.push(...bytes.slice(0, 3 - pad));
-      }
-      return new Uint8Array(out);
-    };
     const geminiPsFrame = (v) => {
-      const b = b64Std(v);
+      const b = FAIL_OPEN_B64(v);
       if (b === undefined) return false;
       const f = pbMsg(b, FAIL_OPEN_RPC.GPS_FRAME);
       return f !== undefined && f.length === 1;

@@ -7562,6 +7562,10 @@ test('failOpenRouteTemplate: the rule\'s own route names, and `-` for everything
     ['GET', 'example.com', '/api/claude_cli/bootstrap'],
     ['POST', 'claude.ai', '/api/organizations/o/chat_conversations//completion'],
     ['WS-SEND', 'ws.chatgpt.com', '/xx/user/abc'], ['WS-SEND', 'ws.chatgpt.com', '/ws/user/a b'],
+    ['POST', 'gemini.google.com', '/v1/processSession'], ['POST', 'signaler-pa.clients6.google.com', '/v1/processSession'],
+    ['GET', 'geminiweb-pa.clients6.google.com', '/v1/processSession'], ['POST', 'geminiweb-pa.clients6.google.com', '/v1/processSessions'],
+    ['POST', 'signaler-pa.clients6.google.com', '/punctual/multi-watch/channels'], ['POST', 'signaler-pa.clients6.google.com', '/punctual/v1/register'],
+    ['GET', 'signaler-pa.clients6.google.com', '/punctual/v1/chooseServer'], ['POST', 'geminiweb-pa.clients6.google.com', '/punctual/v1/refreshCreds'],
     ['PUT', 'graph.microsoft.com', '/v1.0/users/jane.doe@contoso.com/drive/root:/Documents/Jane%20Doe%20Tax%20Return%202025.pdf:/content'],
     ['POST', 'api.anthropic.com', '/v1/users/jane.doe@contoso.com/messages'],
     ['POST', 'api.anthropic.com', '/api/claude_code/123-45-6789']
@@ -7890,10 +7894,10 @@ test('releasableUnderFailOpen round 6: Gemini WebChannel is exact (gemini_webcha
   // Every scalar field of the frame, through the real route: its kind, not
   // another, once.
   const values = { small: [[pv, 2], [pv, 1023]], word: [[pl, 'a.b-c_9']], text: [[pl, 'a b/c:d é'], [pl, '']],
-    nonce: [[pl, Buffer.from([0xff, 0])]], empty: [[pl, '']], attest: [[pl, '!aZ09-_'], [pl, 'a'.repeat(8192)]] };
+    nonce: [[pl, Buffer.from([0xff, 0])]], empty: [[pl, '']], attest: [[pl, '!aZ09-_'], [pl, 'a'.repeat(8192)], ...'09AZaz!-_'.split('').map((c) => [pl, c])] };
   const wrong = { small: [[pv, 1024], [pl, '1']], word: [[pl, 'a b'], [pl, 'a/b'], [pl, ''], [pv, 1]],
     text: [[pl, Buffer.from([0xff])], [pv, 1]], nonce: [[pl, ''], [pv, 1]], empty: [[pl, 'a'], [pv, 0]],
-    attest: [[pl, 'a.b'], [pl, 'a b'], [pl, ''], [pl, 'a'.repeat(8193)], [pv, 1]] };
+    attest: [[pl, 'a.b'], [pl, 'a b'], [pl, ''], [pl, 'a'.repeat(8193)], [pv, 1], ...'/:@[`{+="'.split('').map((c) => [pl, `a${c}`])] };
   const viaFrame = (b) => psBody(`count=1&${frame(b)}`);
   let checked = 0;
   const nested = (schema, build, path) => {
@@ -7940,4 +7944,55 @@ test('fail-open round 6: Gemini\'s WebChannel send goes out through the fetch ho
   assert.match(line, /\bhost=geminiweb-pa\.clients6\.google\.com\b/);
   assert.match(line, /\broute=\/v1\/processSession(\s|$)/);
   assert.ok(!/photo\.png|capital/.test(line), line);
+});
+
+test('FAIL_OPEN_B64: strict standard base64, byte for byte (b64_std_is_strict)', () => {
+  const m = /\/\/ <releasableUnderFailOpen>\n([\s\S]*?)\/\/ <\/releasableUnderFailOpen>/.exec(SHIM_SRC);
+  const b64 = new Function(m[1] + '; return FAIL_OPEN_B64;')();
+  const hex = (u) => (u === undefined ? 'undefined' : Buffer.from(u).toString('hex'));
+  let seed = 7;
+  for (let len = 0; len < 70; len++) {
+    const bytes = Buffer.alloc(len);
+    for (let i = 0; i < len; i++) { seed = (seed * 1103515245 + 12345) % 2147483648; bytes[i] = seed % 256; }
+    assert.equal(hex(b64(bytes.toString('base64'))), bytes.toString('hex'), `len ${len}`);
+  }
+  const all = Buffer.from([...Array(256).keys()]);
+  assert.equal(hex(b64(all.toString('base64'))), all.toString('hex'));
+  for (const t of [[0xff, 0xff, 0xff], [0x01, 0xff, 0xff], [0x00, 0xff, 0xff], [0xfe, 0xff, 0xfe]]) {
+    const bytes = Buffer.from(t);
+    assert.equal(hex(b64(bytes.toString('base64'))), bytes.toString('hex'), bytes.toString('hex'));
+  }
+  assert.equal(hex(b64('AZaz09+/')), Buffer.from('AZaz09+/', 'base64').toString('hex'));
+  for (const c of ['@', '[', '`', '{', ':', '-', '_', '.', ' ', '\n', 'é']) {
+    assert.equal(b64(`AA${c}A`), undefined, JSON.stringify(c));
+  }
+  for (const x of ['A', 'AA', 'AAA', 'AAAAA', '=AAA', 'A=AA', 'AA=A', 'A===', '====', 'AA==AAAA', 'AAA=AAAA',
+    'AB==', 'AAB=', 'AA=B']) assert.equal(b64(x), undefined, x);
+  assert.equal(hex(b64('AA==')), '00');
+  assert.equal(hex(b64('AAA=')), '0000');
+  assert.equal(hex(b64('AQ==')), '01');
+  assert.equal(hex(b64('AAE=')), '0001');
+  assert.equal(hex(b64('')), '');
+});
+
+test('releasableUnderFailOpen round 6 review: Gemini\'s `at` at most once, as `f.req` (single_deviations_from_a_released_turn_are_held)', () => {
+  const FORM = 'application/x-www-form-urlencoded';
+  const freq = geminiBody(['hi']).split('&')[0];
+  const sg = (body) => releasable(req('POST', 'gemini.google.com', GEMINI, FORM, body));
+  assert.equal(sg(freq), true);
+  assert.equal(sg(`${freq}&at=AJvLN6M`), true);
+  assert.equal(sg(`${freq}&at=AJvLN6M&at=AJvLN6M`), false);
+  assert.equal(sg(`${freq}&at=a&at=b`), false);
+  assert.equal(sg(`at=a&at=b&${freq}`), false);
+  const otaq = `f.req=${formEnc(JSON.stringify([[['otAQ7b', '[1]', null, 'generic']]]))}`;
+  const be = (body) => releasable(req('POST', 'gemini.google.com', '/_/BardChatUi/data/batchexecute?rpcids=otAQ7b&rt=c', FORM, body));
+  assert.equal(be(otaq), true);
+  assert.equal(be(`${otaq}&at=a&`), true);
+  assert.equal(be(`at=a&${otaq}`), true);
+  assert.equal(be(`${otaq}&at=a&at=a`), false);
+  assert.equal(be(`at=a&${otaq}&at=b&`), false);
+  // The reviewer's repro: 200 tokens of 4000 base64 each on batchexecute.
+  const chunk = 'QUJD'.repeat(1000);
+  assert.equal(be(`${otaq}${`&at=${chunk}`.repeat(200)}`), false);
+  assert.equal(sg(`${freq}${`&at=${'x'.repeat(4000)}`.repeat(100)}`), false);
 });

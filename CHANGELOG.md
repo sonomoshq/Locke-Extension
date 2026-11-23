@@ -43,7 +43,9 @@ unlisted field, or sent as JSON is held. Gemini web's WebChannel send
 (`processSession`, since 2026-11) goes through too: its base64 protobuf
 frames are read field by field (the prompt the only free text; a file or
 image reference holds), its push channel and settings RPCs go out, and the
-trailing `&` Gemini now puts on its forms no longer holds them.
+trailing `&` Gemini now puts on its forms no longer holds them. A Gemini
+form with more than one `at` token is held (repeated, it could carry any
+amount of text).
 
 **Added — Google AI Mode from the search bar is screened.** Typing a prompt
 into Google's search box in AI Mode and pressing enter loads
