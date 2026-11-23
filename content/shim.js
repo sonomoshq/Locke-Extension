@@ -1660,7 +1660,8 @@
     const GPS_PROMPT = one([[1, 'text'], [2, 'small'], [7, 'small']]);
     const GPS_LANGUAGE = one([[1, 'word']]);
     const GPS_NESTED_ONE = one([[1, GPS_ONE]]);
-    const GPS_CONVERSATION = one([[1, 'word'], [8, 'word']]);
+    // 8 is the server's context token: base64, so it may hold `+`, `/`, `=`.
+    const GPS_CONVERSATION = one([[1, 'word'], [8, 'token']]);
     const GPS_TURN = one([[1, GPS_PROMPT], [2, GPS_LANGUAGE], [4, 'attest'], [5, 'word'], [7, GPS_ONE], [8, 'small'],
       [11, 'small'], [12, 'small'], [18, GPS_NESTED_ONE], [19, 'small'], [28, 'small'], [31, 'nonce'], [42, GPS_ONE],
       [50, 'small'], [54, 'small'], [60, 'word'], [62, 'empty'], [68, 'small'], [69, 'small'], [72, GPS_CONVERSATION],
@@ -2301,6 +2302,9 @@
     const wordOk = (v, tz) => typeof v === 'string' && v.length <= MAX_WORD &&
       (tz ? /^[A-Za-z0-9._/+-]+$/ : /^[A-Za-z0-9._-]+$/).test(v);
     const word = (v) => wordOk(v, false);
+    // A short opaque token the server minted: a word that may also hold
+    // standard base64's `+`, `/` and `=`.
+    const tokenWordOk = (v) => typeof v === 'string' && v.length <= MAX_WORD && /^[A-Za-z0-9._+/=-]+$/.test(v);
     const sentinelPrepare = (v) => isObj(v) && onlyKeys(v, ['p']) && tokenOk(get(v, 'p'), SENTINEL_P);
     const sentinelFinalize = (v) => isObj(v) &&
       onlyKeys(v, ['prepare_token', 'proofofwork', 'turnstile']) &&
@@ -2440,6 +2444,7 @@
       if (w !== 'l') return false;
       if (kind === 'word') return wordOk(utf8(v), false);
       if (kind === 'zone') return wordOk(utf8(v), true);
+      if (kind === 'token') return tokenWordOk(utf8(v));
       if (kind === 'text') return utf8(v) !== undefined;
       if (kind === 'nonce') return v.length > 0 && v.length <= MAX_RPC_NONCE;
       if (kind === 'toolKey') return v.length > 0 && v.length <= MAX_TOOL_KEY && v.every(TOOL_KEY_BYTE);

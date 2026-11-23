@@ -7833,7 +7833,7 @@ test('releasableUnderFailOpen round 6: Gemini WebChannel is exact (gemini_webcha
     '1:(1:(1:small 2:empty 3:word 4:word) 2:small 8:(5:(1:(' +
     '1:(1:text 2:small 7:small) 2:(1:word) 4:attest 5:word 7:(1:small) 8:small 11:small ' +
     '12:small 18:(1:(1:small)) 19:small 28:small 31:nonce 42:(1:small) 50:small 54:small ' +
-    '60:word 62:empty 68:small 69:small 72:(1:word 8:word) 92:small 97:small 99:small) ' +
+    '60:word 62:empty 68:small 69:small 72:(1:word 8:token) 92:small 97:small 99:small) ' +
     '4:small))) 2:(1:small 9:(1:text)) 4:(1:small)');
   const H = 'geminiweb-pa.clients6.google.com';
   const psBody = (body) => req('POST', H, '/v1/processSession?VER=8', 'application/x-www-form-urlencoded', body);
@@ -7894,10 +7894,12 @@ test('releasableUnderFailOpen round 6: Gemini WebChannel is exact (gemini_webcha
   // Every scalar field of the frame, through the real route: its kind, not
   // another, once.
   const values = { small: [[pv, 2], [pv, 1023]], word: [[pl, 'a.b-c_9']], text: [[pl, 'a b/c:d é'], [pl, '']],
-    nonce: [[pl, Buffer.from([0xff, 0])]], empty: [[pl, '']], attest: [[pl, '!aZ09-_'], [pl, 'a'.repeat(8192)], ...'09AZaz!-_'.split('').map((c) => [pl, c])] };
+    nonce: [[pl, Buffer.from([0xff, 0])]], empty: [[pl, '']], attest: [[pl, '!aZ09-_'], [pl, 'a'.repeat(8192)], ...'09AZaz!-_'.split('').map((c) => [pl, c])],
+    token: [[pl, 'a.b-c_9'], [pl, 'Aw+/9a=='], [pl, 'a'.repeat(64)], ...'09AZaz._+/=-'.split('').map((c) => [pl, c])] };
   const wrong = { small: [[pv, 1024], [pl, '1']], word: [[pl, 'a b'], [pl, 'a/b'], [pl, ''], [pv, 1]],
     text: [[pl, Buffer.from([0xff])], [pv, 1]], nonce: [[pl, ''], [pv, 1]], empty: [[pl, 'a'], [pv, 0]],
-    attest: [[pl, 'a.b'], [pl, 'a b'], [pl, ''], [pl, 'a'.repeat(8193)], [pv, 1], ...'/:@[`{+="'.split('').map((c) => [pl, `a${c}`])] };
+    attest: [[pl, 'a.b'], [pl, 'a b'], [pl, ''], [pl, 'a'.repeat(8193)], [pv, 1], ...'/:@[`{+="'.split('').map((c) => [pl, `a${c}`])],
+    token: [[pl, 'a b'], [pl, 'a:b'], [pl, 'a%2B'], [pl, ''], [pl, 'a'.repeat(65)], [pv, 1], ...',:@[`{!*~"\n'.split('').map((c) => [pl, `a${c}`])] };
   const viaFrame = (b) => psBody(`count=1&${frame(b)}`);
   let checked = 0;
   const nested = (schema, build, path) => {
