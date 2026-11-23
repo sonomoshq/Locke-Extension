@@ -1597,6 +1597,35 @@
   // re-applies the rule to it.
   //
   // <releasableUnderFailOpen>
+  // claude.ai Connect RPC message schemas, field by field as seen on the wire
+  // (LibreWolf HAR, 2026-11-22): [number, kind, repeated]. Proxy and Bridge
+  // fail_open_shape.rs state the same table (claude_ai_rpc_schemas_are_pinned).
+  const FAIL_OPEN_RPC = (() => {
+    const one = (pairs) => pairs.map(([n, k]) => [n, k, false]);
+    const CAI_MUTATION = one([[1, 'word'], [2, 'count']]);
+    const CAI_CAPABILITIES = one([1, 2, 3, 6, 8, 10, 22, 24, 28, 33, 57].map((n) => [n, 'flag']));
+    const CAI_HEADER = one([[1, CAI_MUTATION], [2, 'word'], [3, 'small'], [7, CAI_CAPABILITIES], [14, 'word'],
+      [15, 'nonce'], [19, 'flag']]);
+    const CAI_MODEL = one([[2, 'word']]);
+    const CAI_TOOL = one([[1, 'toolKey'], [2, 'flag']]);
+    const CAI_TOOLS = [[1, CAI_TOOL, true]];
+    const CAI_SETTINGS = one([[1, 'flag'], [7, 'flag'], [8, CAI_TOOLS], [10, 'small'], [14, 'small'], [16, 'word'],
+      [17, 'word']]);
+    const CAI_SETTINGS_UPDATE = one([[1, CAI_SETTINGS]]);
+    const CAI_SEND = one([[1, 'word'], [2, 'word'], [3, 'text'], [7, CAI_MODEL], [8, CAI_SETTINGS_UPDATE],
+      [12, 'zone'], [13, 'word'], [18, 'small'], [21, 'small'], [54, 'flag'], [57, CAI_MODEL], [59, 'flag']]);
+    const CAI_LOCALE = one([[12, 'zone'], [13, 'word'], [18, 'small']]);
+    const CAI_LOCALE_ACTION = one([[1, CAI_LOCALE]]);
+    const CAI_PERFORM = one([[1, CAI_HEADER], [2, CAI_SEND], [15, CAI_LOCALE_ACTION]]);
+    const CAI_CURSOR = one([[1, 'word']]);
+    const CAI_TIMELINE_CAPABILITIES = one([6, 22, 24, 28, 33, 46, 47, 61].map((n) => [n, 'small']));
+    const CAI_TIMELINE = one([[1, 'word'], [2, CAI_CURSOR], [3, 'small'], [4, CAI_TIMELINE_CAPABILITIES],
+      [5, 'word'], [6, 'small'], [8, 'zone'], [15, 'small']]);
+    const CAI_REPORT_VIEWING = one([[1, 'word'], [2, 'word'], [3, 'flag']]);
+    const CAI_CREDENTIALS = one([[1, 'word']]);
+    return { CAI_PERFORM, CAI_TIMELINE, CAI_REPORT_VIEWING, CAI_CREDENTIALS };
+  })();
+
   // May the user's fail-open window send this raw request (head, CRLFCRLF,
   // body — the synthesizeRequest output) unscreened? DEFAULT DENY: true only
   // for a known, prompt-only chat turn (catalogued host + route, body parses
@@ -2307,6 +2336,118 @@
         word(seg[3]) && seg[4] === 'model_selector' && seg[5] === 'cc';
     };
 
+    // ── claude.ai Connect RPC (since 2026-11-11) ──
+    // A protobuf PerformActionRequest, its reply over StreamTimeline. Every
+    // field is one seen on the wire (LibreWolf HAR, 2026-11-22): a message
+    // holds only its listed fields, each once (a repeated one at most
+    // MAX_RPC_REPEATED times), with its kind's wire type and value. A field
+    // nobody listed — sendMessage field 15, the attachment — holds it.
+    const MAX_RPC_REPEATED = 256;
+    const MAX_TOOL_KEY = 160;
+    const MAX_RPC_NONCE = 64;
+    // A canonical varint of at most 5 bytes and 2^32-1.
+    const pbVarint = (b, st) => {
+      let x = 0;
+      for (let k = 0; k < 5; k++) {
+        if (st.i >= b.length) return undefined;
+        const c = b[st.i++];
+        x += (c & 0x7f) * 2 ** (7 * k);
+        if ((c & 0x80) === 0) return (k === 0 || c !== 0) && x <= 0xffffffff ? x : undefined;
+      }
+      return undefined;
+    };
+    // A message's fields; undefined for anything but well-formed varint and
+    // length-delimited fields numbered from 1.
+    const pbFields = (b) => {
+      const out = [];
+      const st = { i: 0 };
+      while (st.i < b.length) {
+        const tag = pbVarint(b, st);
+        if (tag === undefined) return undefined;
+        const field = Math.floor(tag / 8);
+        const wire = tag % 8;
+        if (field === 0) return undefined;
+        if (wire === 0) {
+          const v = pbVarint(b, st);
+          if (v === undefined) return undefined;
+          out.push([field, 'v', v]);
+        } else if (wire === 2) {
+          const n = pbVarint(b, st);
+          if (n === undefined || st.i + n > b.length) return undefined;
+          out.push([field, 'l', b.subarray(st.i, st.i + n)]);
+          st.i += n;
+        } else return undefined;
+      }
+      return out;
+    };
+    const utf8 = (b) => { try { return fatal.decode(b); } catch { return undefined; } };
+    const TOOL_KEY_BYTE = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ||
+      c === 45 || c === 95 || c === 46 || c === 58;
+    const pbKindOk = (kind, w, v) => {
+      if (kind === 'flag') return w === 'v' && v <= 1;
+      if (kind === 'small') return w === 'v' && v <= 1023;
+      if (kind === 'count') return w === 'v';
+      if (w !== 'l') return false;
+      if (kind === 'word') return wordOk(utf8(v), false);
+      if (kind === 'zone') return wordOk(utf8(v), true);
+      if (kind === 'text') return utf8(v) !== undefined;
+      if (kind === 'nonce') return v.length > 0 && v.length <= MAX_RPC_NONCE;
+      if (kind === 'toolKey') return v.length > 0 && v.length <= MAX_TOOL_KEY && v.every(TOOL_KEY_BYTE);
+      return pbMsg(v, kind) !== undefined;
+    };
+    // `b` is a message of `schema`'s fields ([number, kind, repeated]); the
+    // field numbers it holds.
+    const pbMsg = (b, schema) => {
+      const fs = pbFields(b);
+      if (fs === undefined) return undefined;
+      const seen = [];
+      for (const [n, w, v] of fs) {
+        const f = schema.find((x) => x[0] === n);
+        if (!f) return undefined;
+        const times = seen.filter((x) => x === n).length;
+        if (times >= (f[2] ? MAX_RPC_REPEATED : 1)) return undefined;
+        if (!pbKindOk(f[1], w, v)) return undefined;
+        seen.push(n);
+      }
+      return seen;
+    };
+    const { CAI_PERFORM, CAI_TIMELINE, CAI_REPORT_VIEWING, CAI_CREDENTIALS } = FAIL_OPEN_RPC;
+    const CAI_RPC = '/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/';
+    const CAI_CREDENTIALS_ROUTE = '/claudeai-rpc/anthropic.claudeai_b2b.v1.ConsoleService/ListAgentCredentialApprovalRequests';
+    // A Connect streaming request's one message: one envelope, flags 0, its
+    // length exactly the rest.
+    const connectMessage = (b) => {
+      if (b.length < 5) return undefined;
+      const len = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint32(1);
+      return b[0] === 0 && len === b.length - 5 ? b.subarray(5) : undefined;
+    };
+    // A claude.ai Connect RPC request: true/false on one of its routes,
+    // undefined on any other. Only protobuf is read: the browser sends JSON
+    // only as a retry after a protobuf send the server refused.
+    const claudeRpc = (method, host, path, media, bytes) => {
+      if (method !== 'POST' || host !== 'claude.ai') return undefined;
+      const proto = media === 'application/proto';
+      if (path === CAI_CREDENTIALS_ROUTE) {
+        const f = pbMsg(bytes, CAI_CREDENTIALS);
+        return proto && f !== undefined && f.length === 1 && f[0] === 1;
+      }
+      if (!path.startsWith(CAI_RPC)) return undefined;
+      const m = path.slice(CAI_RPC.length);
+      if (m === 'PerformAction') {
+        if (!proto) return false;
+        const f = pbMsg(bytes, CAI_PERFORM);
+        return f !== undefined && f.includes(1) && (f.includes(2) !== f.includes(15));
+      }
+      if (m === 'StreamTimeline') {
+        if (media !== 'application/connect+proto') return false;
+        const msg = connectMessage(bytes);
+        return msg !== undefined && pbMsg(msg, CAI_TIMELINE) !== undefined;
+      }
+      if (m === 'GetNewConversationDefaults') return proto && bytes.length === 0;
+      if (m === 'ReportViewing') return proto && pbMsg(bytes, CAI_REPORT_VIEWING) !== undefined;
+      return false;
+    };
+
     // The query string is settings too: short, each value a setting, no
     // parameter named for an attachment.
     const queryOk = (query) => {
@@ -2331,7 +2472,11 @@
       if (split < 0) return false;
       const head = fatal.decode(raw.subarray(0, split));
       if (raw.length - (split + 4) > MAX_RELEASABLE_BODY) return false;
-      const body = fatal.decode(raw.subarray(split + 4));
+      const bytes = raw.subarray(split + 4);
+      // The body as text; undefined when it is not UTF-8 (only a protobuf
+      // route reads such a body — every other shape holds it).
+      let body;
+      try { body = fatal.decode(bytes); } catch { body = undefined; }
       const lines = head.split('\r\n');
       const parts = lines[0].split(' ');
       if (parts.length !== 3) return false;
@@ -2370,6 +2515,10 @@
           return false;
         }
       }
+      // claude.ai's Connect RPC reads bytes; every other route reads text.
+      const rpc = claudeRpc(method, host, path, media, bytes);
+      if (rpc !== undefined) return rpc;
+      if (body === undefined) return false;
       const json = () => {
         let declared;
         if (media !== undefined) declared = media === 'application/json';
@@ -2466,6 +2615,12 @@
       return '-';
     }
     if (m === 'POST' && h === 'claude.ai') {
+      const cred = '/claudeai-rpc/anthropic.claudeai_b2b.v1.ConsoleService/ListAgentCredentialApprovalRequests';
+      if (p === cred) return cred;
+      const rpcBase = '/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/';
+      for (const r of ['PerformAction', 'StreamTimeline', 'GetNewConversationDefaults', 'ReportViewing']) {
+        if (p === rpcBase + r) return rpcBase + r;
+      }
       if (seg.length === 7 && seg[0] === '' && seg[1] === 'api' && seg[2] === 'organizations' && seg[3] !== '' &&
         seg[4] === 'chat_conversations' && seg[5] !== '') {
         for (const leaf of ['completion', 'retry_completion', 'title']) {

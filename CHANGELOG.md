@@ -34,8 +34,12 @@ content-free calls around the turn are released under exact shapes too
 `ws.chatgpt.com` presence frames; Gemini web's settings RPCs, `Waa/Create` and
 `RotateCookies`). Before, ChatGPT showed "Unknown error" because its sentinel
 calls were held. Every `fail-open-file-held` console line now carries the
-request's `route` as the desktop app logs it (ids as `:x`, no query; none on
-the upload path).
+request's `route` as the rule names it (its own template, `-` for a route it
+does not read; never the path's text). claude.ai's Connect RPC send (since
+2026-11-11) now goes through under fail-open too: a protobuf `PerformAction`
+carrying only the prompt, its reply stream and the page's content-free calls
+are read field by field and released; one carrying an attachment, any
+unlisted field, or sent as JSON is held.
 
 **Added — Google AI Mode from the search bar is screened.** Typing a prompt
 into Google's search box in AI Mode and pressing enter loads

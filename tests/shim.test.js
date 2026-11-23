@@ -7103,7 +7103,71 @@ const R4 = (() => {
         is_temporary: false, enabled_imagine: true } }), !file]);
     steps.push(['title', post('claude.ai', `/api/organizations/${ORG}/chat_conversations/${CONV}/title`,
       { message_content: 'the sky is blue', recent_titles: [] }), true]);
-    return { surface: 'claude.ai', steps };
+    return { surface: 'claude.ai (JSON completion, before 2026-11-11)', steps };
+  };
+  // Protobuf, for claude.ai's Connect RPC (Proxy `flows::pv`/`pl`).
+  const PB = (() => {
+    const varint = (x) => { const o = []; for (;;) { const b = x % 128; x = Math.floor(x / 128); if (x === 0) { o.push(b); return Buffer.from(o); } o.push(b | 0x80); } };
+    const pv = (n, x) => Buffer.concat([varint(n * 8), varint(x)]);
+    const pl = (n, b) => { const v = Buffer.isBuffer(b) ? b : Buffer.from(b); return Buffer.concat([varint(n * 8 + 2), varint(v.length), v]); };
+    const cat = (...xs) => Buffer.concat(xs.map((x) => (Buffer.isBuffer(x) ? x : Buffer.from(x))));
+    const RPC = '/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/';
+    const CRED = '/claudeai-rpc/anthropic.claudeai_b2b.v1.ConsoleService/ListAgentCredentialApprovalRequests';
+    const rpcReq = (path, ct, body) => req('POST', 'claude.ai', path, ct, Buffer.from(body));
+    const envelope = (m) => { const h = Buffer.alloc(5); h.writeUInt32BE(m.length, 1); return Buffer.concat([h, m]); };
+    const header = (version, followUp) => {
+      const caps = cat(...[1, 2, 3, 6, 8, 10, 22, 24, 28, 33, 57].map((n) => pv(n, 1)));
+      const parts = [];
+      if (version != null) parts.push(pl(1, cat(pl(1, 'sess_0123456789abcdef'), pv(2, version))));
+      parts.push(pl(2, CONV), pv(3, 3), pl(7, caps), pl(14, 'en-US'));
+      if (version != null) parts.push(pl(15, Buffer.from(Array.from({ length: 32 }, (_, i) => ((i * 37) & 0xff) ^ 0xa5))));
+      if (followUp) parts.push(pv(19, 1));
+      return cat(...parts);
+    };
+    const settings = () => {
+      const tools = cat(...['0d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6:web_fetch-0123456789abcdef0123456789abcdef',
+        '0d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6:search_papers-fedcba9876543210fedcba9876543210',
+        '6f7e8d9c-aba9-4c8d-9e7f-605142332415:create_file-00112233445566778899aabbccddeeff'].map((k) => pl(1, cat(pl(1, k), pv(2, 1)))));
+      return pl(1, cat(pv(1, 1), pv(7, 1), pl(8, tools), pv(10, 0), pv(14, 1), pl(16, 'auto'), pl(17, 'low')));
+    };
+    return { varint, pv, pl, cat, RPC, CRED, rpcReq, envelope, header, settings };
+  })();
+  // claude.ai's send over Connect RPC, in the page's order (LibreWolf HAR,
+  // 2026-11-22; ids, nonce, tool keys and text replaced). With a file, the
+  // follow-up carries the .txt inline as sendMessage field 15.
+  const claudeAiRpc = (file) => {
+    const { pv, pl, cat, RPC, CRED, rpcReq, envelope, header, settings } = PB;
+    const first = cat(pl(1, header(1, false)), pl(2, cat(pl(1, '2c5526fd-0000-4000-8000-000000000001'),
+      pl(2, '2c5526fd-0000-4000-8000-000000000002'), pl(3, 'the sky is blue — ¿sí?'), pl(7, pl(2, 'claude-haiku-5-5')),
+      pl(8, settings()), pl(12, 'America/Los_Angeles'), pl(13, 'en-US'), pv(18, 1), pv(21, 1), pv(54, 1))));
+    const follow = [pl(1, '2c5526fd-0000-4000-8000-000000000003'), pl(2, '2c5526fd-0000-4000-8000-000000000004'),
+      pl(3, 'and Germany?'), pl(12, 'America/Los_Angeles'), pl(13, 'en-US')];
+    if (file) {
+      follow.push(pl(15, cat(pl(1, 'notes.txt'), pv(2, 70), pl(3, 'text/plain'),
+        pl(4, 'Meeting notes: Ada Lovelace, 123-45-6789, budget review Friday.'))));
+    }
+    follow.push(pv(18, 1), pv(54, 1), pl(57, pl(2, 'claude-haiku-5-5')), pv(59, 1));
+    const followUp = cat(pl(1, header(2, true)), pl(2, cat(...follow)));
+    const timeline = (resume) => {
+      const caps = cat(...[[6, 1], [22, 1], [24, 1], [28, 1], [33, 1], [46, 3], [47, 1], [61, 1]].map(([n, v]) => pv(n, v)));
+      const parts = [pl(1, CONV)];
+      if (resume) parts.push(pl(2, pl(1, '1795417603410-0')));
+      parts.push(pv(3, 1), pl(4, caps), pl(5, 'en-US'), pv(6, 1), pl(8, 'America/Los_Angeles'));
+      if (resume) parts.push(pv(15, 1));
+      return envelope(cat(...parts));
+    };
+    const viewing = (read) => cat(pl(1, CONV), pl(2, 'ae3c3b36-0000-4000-8000-000000000005'), ...(read ? [pv(3, 1)] : []));
+    const localeAction = cat(pl(1, header(null, false)), pl(15, pl(1, cat(pl(12, 'America/Los_Angeles'), pl(13, 'en-US'), pv(18, 1)))));
+    return { surface: 'claude.ai (Connect RPC)', steps: [
+      ['new-chat defaults', rpcReq(RPC + 'GetNewConversationDefaults', 'application/proto', Buffer.alloc(0)), true],
+      ['credential approvals', rpcReq(CRED, 'application/proto', pl(1, ORG)), true],
+      ['send (new chat)', rpcReq(RPC + 'PerformAction', 'application/proto', first), true],
+      ['viewing', rpcReq(RPC + 'ReportViewing', 'application/proto', viewing(false)), true],
+      ['reply stream', rpcReq(RPC + 'StreamTimeline', 'application/connect+proto', timeline(false)), true],
+      ['reply stream, resumed', rpcReq(RPC + 'StreamTimeline', 'application/connect+proto', timeline(true)), true],
+      ['viewing, read', rpcReq(RPC + 'ReportViewing', 'application/proto', viewing(true)), true],
+      ['locale action', rpcReq(RPC + 'PerformAction', 'application/proto', localeAction), true],
+      ['send (follow-up)', rpcReq(RPC + 'PerformAction', 'application/proto', followUp), !file]] };
   };
   const geminiWeb = (file) => {
     const steps = [
@@ -7169,8 +7233,8 @@ const R4 = (() => {
       ['generate (the turn)', post('generativelanguage.googleapis.com', '/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse', body), !file]] };
   };
   const all = (file) => [chatgpt('ChatGPT web', '/backend-api', file), chatgpt('ChatGPT web, logged out (unverified)', '/backend-anon', file),
-    claudeAi(file), geminiWeb(file), duckAi(file), claudeCode(file), codexWs(file), openaiApi(file), geminiApi(file)];
-  return { plain: () => all(false), withFile: () => all(true), token };
+    claudeAi(file), claudeAiRpc(file), geminiWeb(file), duckAi(file), claudeCode(file), codexWs(file), openaiApi(file), geminiApi(file)];
+  return { plain: () => all(false), withFile: () => all(true), token, PB };
 })();
 
 test('releasableUnderFailOpen round 4: every request of a real send flow is released (every_request_of_a_real_send_flow_is_released)', () => {
@@ -7308,16 +7372,18 @@ test('releasableUnderFailOpen round 4: ChatGPT live-update frames are exact (cha
 test('fail-open round 4: ChatGPT web\'s real send goes out request by request; with a file the file calls are held and named', async () => {
   const outage = { onCapture: () => ({ ok: false, code: 'bridge-error' }) };
   const toInit = (raw) => {
-    const s = raw.toString('utf8');
-    const i = s.indexOf('\r\n\r\n');
-    const [method, target] = s.slice(0, i).split('\r\n')[0].split(' ');
-    const host = /\r\nHost: ([^\r]+)/.exec(s.slice(0, i))[1];
-    const ct = /\r\ncontent-type: ([^\r]+)/.exec(s.slice(0, i));
-    return [`https://${host}${target}`, { method, headers: ct ? { 'content-type': ct[1] } : {}, body: s.slice(i + 4) }];
+    const i = raw.indexOf('\r\n\r\n');
+    const head = raw.subarray(0, i).toString('latin1');
+    const [method, target] = head.split('\r\n')[0].split(' ');
+    const host = /\r\nHost: ([^\r]+)/.exec(head)[1];
+    const ct = /\r\ncontent-type: ([^\r]+)/.exec(head);
+    // The body's own bytes (a protobuf one is not text).
+    const body = new Uint8Array(raw.subarray(i + 4));
+    return [`https://${host}${target}`, { method, headers: ct ? { 'content-type': ct[1] } : {}, body }];
   };
   for (const [file, flows] of [[false, R4.plain()], [true, R4.withFile()]]) {
-    for (const { surface, steps } of flows.filter((f) => f.surface === 'ChatGPT web' || f.surface === 'Gemini web' || f.surface === 'claude.ai')) {
-      const page = surface === 'Gemini web' ? 'https://gemini.google.com/app' : surface === 'claude.ai' ? 'https://claude.ai/new' : 'https://chatgpt.com/';
+    for (const { surface, steps } of flows.filter((f) => f.surface === 'ChatGPT web' || f.surface === 'Gemini web' || f.surface.startsWith('claude.ai'))) {
+      const page = surface === 'Gemini web' ? 'https://gemini.google.com/app' : surface.startsWith('claude.ai') ? 'https://claude.ai/new' : 'https://chatgpt.com/';
       const w = makeWorld(outage.onCapture, realCatalogGlobals(page));
       w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
       for (const [what, raw, release] of steps) {
@@ -7508,4 +7574,188 @@ test('releasableUnderFailOpen round 4: the caps, at their boundaries (content_fr
   assert.equal(releasable(bx('[[{"0":"aPya6c","1":"[]","2":null,"3":"generic","length":4}]]')), false);
   assert.equal(releasable(bx('[[')), false, 'an f.req that is not JSON');
   assert.equal(releasable(jreq('POST', 'accounts.google.com', '/RotateCookies', [1, '1000'])), true);
+});
+
+test('releasableUnderFailOpen round 5: claude.ai Connect RPC is exact (claude_ai_rpc_is_exact)', () => {
+  const { varint, pv, pl, cat, RPC, CRED, rpcReq, envelope, header, settings } = R4.PB;
+  const perform = (b) => rpcReq(RPC + 'PerformAction', 'application/proto', b);
+  const rpc = (m, ct, b) => rpcReq(RPC + m, ct, b);
+  const send = (extra) => perform(cat(pl(1, header(7, true)), pl(2, cat(pl(1, 'm1'), pl(2, 'm2'), pl(3, 'the sky is blue'),
+    pl(7, pl(2, 'claude-haiku-5-5')), pl(8, settings()), pl(12, 'Etc/GMT+9'), pl(13, 'en-US'), pv(18, 1), pv(21, 1), pv(54, 1),
+    pl(57, pl(2, 'm')), pv(59, 1), extra))));
+  const withHeader = (h) => perform(cat(pl(1, h), pl(2, pl(3, 'x'))));
+  const set = (extra) => perform(cat(pl(1, header(null, false)), pl(2, pl(8, pl(1, extra)))));
+  const tool = (key, on) => set(pl(8, pl(1, cat(pl(1, key), pv(2, on)))));
+  const timeline = (m) => rpc('StreamTimeline', 'application/connect+proto', envelope(m));
+  const tlOk = cat(pl(1, 'c'), pl(2, pl(1, '1795417603410-0')), pv(3, 1), pl(4, cat(pv(46, 1023), pv(61, 0))), pl(5, 'en'), pv(6, 2),
+    pl(8, 'UTC'), pv(15, 1));
+  const cred = (b, ct = 'application/proto') => rpcReq(CRED, ct, b);
+  const maxKey = `${'a'.repeat(80)}:${'b'.repeat(160 - 81)}`;
+  const manyTools = cat(...Array.from({ length: 256 }, () => pl(1, cat(pl(1, 'k:t-1'), pv(2, 1)))));
+  const released = [
+    send(Buffer.alloc(0)),
+    withHeader(cat(pl(2, 'c'), pv(3, 1023), pl(15, Buffer.alloc(64, 7)))),
+    withHeader(pl(1, cat(pl(1, 's'), pv(2, 0xffffffff)))),
+    perform(cat(pl(1, ''), pl(15, ''))),
+    tool(maxKey, 0), set(pl(8, manyTools)), timeline(tlOk), timeline(Buffer.alloc(0)),
+    rpc('GetNewConversationDefaults', 'application/proto', Buffer.alloc(0)),
+    rpc('ReportViewing', 'application/proto', cat(pl(1, 'c'), pl(2, 'm'), pv(3, 0))),
+    rpc('ReportViewing', 'application/proto', Buffer.alloc(0)),
+    cred(pl(1, '5c10de80-1b07-4305-bbd3-a4ff70118284'))
+  ];
+  released.forEach((raw, i) => assert.equal(releasable(raw), true, `released ${i}`));
+  const held = [
+    send(pl(15, cat(pl(1, 'notes.txt'), pv(2, 3), pl(3, 'text/plain'), pl(4, 'abc')))),
+    send(pl(4, 'x')), send(pv(60, 1)), withHeader(pv(4, 1)), withHeader(pl(7, pv(4, 1))), withHeader(pl(1, pv(3, 1))),
+    set(pv(2, 1)), set(pl(8, pl(2, 'x'))),
+    perform(cat(pl(1, header(null, false)), pl(3, 'x'))), perform(cat(pl(1, header(null, false)), pl(2, ''), pl(15, ''))),
+    perform(pl(1, header(null, false))), perform(pl(2, pl(3, 'x'))), perform(Buffer.alloc(0)),
+    send(pl(3, 'again')), withHeader(cat(pl(2, 'c'), pl(2, 'd'))),
+    withHeader(pl(7, pv(1, 2))), withHeader(pv(3, 1024)), withHeader(pl(2, 'a b')), withHeader(pl(2, 'é')),
+    withHeader(pl(14, 'a'.repeat(65))),
+    perform(cat(pl(1, ''), pl(2, pl(12, 'America/New York')))), perform(cat(pl(1, ''), pl(2, pl(3, Buffer.from([0xff, 0xfe]))))),
+    withHeader(pl(15, '')), withHeader(pl(15, Buffer.alloc(65, 7))),
+    tool(`${maxKey}x`, 1), tool('k t', 1), tool('', 1), tool('k', 2), set(pl(8, cat(manyTools, pl(1, pl(1, 'k'))))),
+    withHeader(pv(2, 1)), withHeader(pl(3, 'x')),
+    perform(cat(pl(1, ''), Buffer.from([0x12, 0x05, 0x78]))),
+    perform(cat(pl(1, ''), Buffer.from([0x10, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]))),
+    perform(cat(pl(1, ''), varint(10), varint(0x100000000))),
+    perform(cat(pl(1, ''), Buffer.from([0x10, 0x81, 0x00]))),
+    perform(cat(pl(1, ''), Buffer.from([0x02, 0x00]))),
+    perform(cat(pl(1, ''), Buffer.from([0x11, 0, 0, 0, 0, 0, 0, 0, 0]))),
+    perform(cat(pl(1, ''), Buffer.from([0x15, 0, 0, 0, 0]))),
+    perform(cat(pl(1, ''), Buffer.from([0x13, 0x14]))),
+    rpcReq(RPC + 'PerformAction', 'application/json', Buffer.from('{"header":{"conversationId":"c"},"sendMessage":{"text":"the sky is blue"}}')),
+    rpcReq(RPC + 'PerformAction', 'application/connect+proto', envelope(pl(1, ''))),
+    rpc('StreamTimeline', 'application/proto', tlOk),
+    rpc('StreamTimeline', 'application/connect+proto', cat(Buffer.from([1]), envelope(tlOk).subarray(1))),
+    rpc('StreamTimeline', 'application/connect+proto', cat(envelope(tlOk), envelope(Buffer.alloc(0)))),
+    rpc('StreamTimeline', 'application/connect+proto', envelope(tlOk).subarray(0, envelope(tlOk).length - 1)),
+    rpc('StreamTimeline', 'application/connect+proto', Buffer.from([0, 0, 0, 0])),
+    rpc('StreamTimeline', 'application/connect+proto', Buffer.from([0, 0, 0, 0, 1])),
+    timeline(pl(4, pv(7, 1))), timeline(pv(7, 1)),
+    rpc('GetNewConversationDefaults', 'application/proto', pv(1, 1)), rpc('GetNewConversationDefaults', 'application/json', Buffer.alloc(0)),
+    rpc('ReportViewing', 'application/proto', pv(4, 1)), rpc('ReportViewing', 'application/json', Buffer.from('{}')),
+    cred(Buffer.alloc(0)), cred(cat(pl(1, 'o'), pl(2, 'x'))), cred(pv(1, 1)), cred(Buffer.from('{"organizationUuid":"o"}'), 'application/json'),
+    rpc('DeleteConversation', 'application/proto', pl(1, 'c')), rpc('PerformActions', 'application/proto', pl(1, '')),
+    rpcReq('/claudeai-rpc/anthropic.claudeai_b2b.v1.ConsoleService/Other', 'application/proto', pl(1, 'o')),
+    req('PUT', 'claude.ai', RPC + 'GetNewConversationDefaults', 'application/proto', Buffer.alloc(0)),
+    req('POST', 'claude.com', RPC + 'GetNewConversationDefaults', 'application/proto', Buffer.alloc(0))
+  ];
+  held.forEach((raw, i) => assert.equal(releasable(raw), false, `held ${i}: ${raw.toString('latin1').slice(0, 160)}`));
+  // The reader's edges: a varint cut off, a counter past 2^32-1, a length
+  // past the end; a tool key's alphabet at each boundary; the shortest
+  // nonce and key; an envelope past 256 bytes; credentials not as proto.
+  const view = (b) => rpc('ReportViewing', 'application/proto', Buffer.from(b));
+  assert.equal(releasable(view([0x18, 0x01])), true);
+  assert.equal(releasable(view([0x18, 0x81])), false);
+  assert.equal(releasable(view([0x0a, 0x05, 0x61])), false);
+  assert.equal(releasable(withHeader(pl(1, cat(pl(1, 's'), varint(16), varint(2 ** 32))))), false);
+  assert.equal(releasable(tool('09AZaz.:-_', 1)), true);
+  assert.equal(releasable(tool('k', 1)), true);
+  for (const c of ['/', '@', '[', '`', '{']) assert.equal(releasable(tool(`k${c}t`, 1)), false, c);
+  assert.equal(releasable(withHeader(pl(15, Buffer.from([0xff])))), true);
+  const long = cat(pl(1, 'c'.repeat(64)), pl(2, pl(1, '1'.repeat(64))), pl(5, 'e'.repeat(64)), pl(8, 'z'.repeat(64)),
+    pl(4, cat(...[[6, 1], [22, 1], [24, 1], [28, 1], [33, 1], [46, 3], [47, 1], [61, 1]].map(([n, v]) => pv(n, v)))));
+  assert.ok(long.length > 256);
+  assert.equal(releasable(timeline(long)), true);
+  const short = envelope(long);
+  short[3] = 0;
+  assert.equal(releasable(rpc('StreamTimeline', 'application/connect+proto', short)), false);
+  assert.equal(releasable(cred(pl(1, 'o'), 'application/json')), false);
+});
+
+// The live failure (dev.27): claude.ai looped "Can't connect. Retrying…" under
+// fail-open. Through the real fetch hook, each RPC call the page makes goes
+// out with the bridge down, a .txt send is held and named by its template.
+test('fail-open round 5: claude.ai\'s Connect RPC send goes out; the attachment send is held, named', async () => {
+  const w = makeWorld(() => ({ ok: false, code: 'bridge-error' }), realCatalogGlobals('https://claude.ai/new'));
+  w.deliver({ type: 'SONOMOS_CONFIG', config: openWindow() });
+  const go = async (raw) => {
+    const i = raw.indexOf('\r\n\r\n');
+    const head = raw.subarray(0, i).toString('latin1');
+    const [method, target] = head.split('\r\n')[0].split(' ');
+    const ct = /\r\ncontent-type: ([^\r]+)/.exec(head)[1];
+    w.logs.length = 0;
+    try {
+      await w.sandbox.fetch(`https://claude.ai${target}`, { method, headers: { 'content-type': ct, 'connect-protocol-version': '1' },
+        body: new Uint8Array(raw.subarray(i + 4)) });
+      return 'SENT';
+    } catch (e) { return blockedError(e) ? 'BLOCKED' : `ERR ${e.message}`; }
+  };
+  const flow = (f) => f.find((x) => x.surface === 'claude.ai (Connect RPC)').steps;
+  for (const [what, raw] of flow(R4.plain())) assert.equal(await go(raw), 'SENT', what);
+  const [, attached] = flow(R4.withFile()).find(([what]) => what === 'send (follow-up)');
+  assert.equal(await go(attached), 'BLOCKED');
+  const line = assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
+  assert.match(line, /\broute=\/claudeai-rpc\/anthropic\.bard\.api\.v1alpha\.ConversationService\/PerformAction(\s|$)/);
+  assert.ok(!/Ada|123-45-6789|notes\.txt/.test(line), line);
+});
+
+test('releasableUnderFailOpen round 5: the RPC schemas, pinned, and every field held to its kind once (claude_ai_rpc_schemas_are_pinned, each_rpc_field_holds_its_kind_once)', () => {
+  const m = /\/\/ <releasableUnderFailOpen>\n([\s\S]*?)\/\/ <\/releasableUnderFailOpen>/.exec(SHIM_SRC);
+  const S = new Function(m[1] + '; return FAIL_OPEN_RPC;')();
+  const describe = (schema) => schema.map(([n, k, rep]) =>
+    `${n}:${Array.isArray(k) ? `(${describe(k)})` : k.toLowerCase()}${rep ? '*' : ''}`).join(' ');
+  assert.equal(describe(S.CAI_PERFORM),
+    '1:(1:(1:word 2:count) 2:word 3:small ' +
+    '7:(1:flag 2:flag 3:flag 6:flag 8:flag 10:flag 22:flag 24:flag 28:flag 33:flag 57:flag) ' +
+    '14:word 15:nonce 19:flag) ' +
+    '2:(1:word 2:word 3:text 7:(2:word) ' +
+    '8:(1:(1:flag 7:flag 8:(1:(1:toolkey 2:flag)*) 10:small 14:small 16:word 17:word)) ' +
+    '12:zone 13:word 18:small 21:small 54:flag 57:(2:word) 59:flag) ' +
+    '15:(1:(12:zone 13:word 18:small))');
+  assert.equal(describe(S.CAI_TIMELINE),
+    '1:word 2:(1:word) 3:small 4:(6:small 22:small 24:small 28:small 33:small 46:small 47:small 61:small) ' +
+    '5:word 6:small 8:zone 15:small');
+  assert.equal(describe(S.CAI_REPORT_VIEWING), '1:word 2:word 3:flag');
+  assert.equal(describe(S.CAI_CREDENTIALS), '1:word');
+
+  // Every field, through its real route: its kind's values pass, another
+  // kind's do not, and twice holds (the tools map's entries excepted).
+  const { pv, pl, cat, RPC, CRED, rpcReq, envelope } = R4.PB;
+  const values = {
+    flag: [[pv, 0], [pv, 1]], small: [[pv, 2], [pv, 1023]], count: [[pv, 1024], [pv, 0xffffffff]],
+    word: [[pl, 'a.b-c_9']], zone: [[pl, 'Etc/GMT+9']], text: [[pl, 'a b/c:d é'], [pl, '']],
+    nonce: [[pl, Buffer.from([0xff, 0])]], toolKey: [[pl, 'k.t:x-1_2']]
+  };
+  const wrong = {
+    flag: [[pv, 2], [pl, '1']], small: [[pv, 1024], [pl, '1']], count: [[pl, '1']],
+    word: [[pl, 'a b'], [pl, 'a/b'], [pl, 'a:b'], [pl, ''], [pv, 1]], zone: [[pl, 'a b'], [pl, 'a:b'], [pv, 1]],
+    text: [[pl, Buffer.from([0xff])], [pv, 1]], nonce: [[pl, ''], [pv, 1]],
+    toolKey: [[pl, 'k t'], [pl, 'k/t'], [pl, ''], [pv, 1]]
+  };
+  const routes = [
+    [S.CAI_PERFORM, (b) => rpcReq(RPC + 'PerformAction', 'application/proto', b), 'perform'],
+    [S.CAI_TIMELINE, (b) => rpcReq(RPC + 'StreamTimeline', 'application/connect+proto', envelope(b)), 'timeline'],
+    [S.CAI_REPORT_VIEWING, (b) => rpcReq(RPC + 'ReportViewing', 'application/proto', b), 'viewing'],
+    [S.CAI_CREDENTIALS, (b) => rpcReq(CRED, 'application/proto', b), 'credentials']
+  ];
+  // PerformAction takes the header and exactly one action.
+  const complete = (field, b) => (field === 1 ? cat(b, pl(15, '')) : cat(pl(1, ''), b));
+  let checked = 0;
+  const nested = (schema, build, top, path) => {
+    for (const [n, k, rep] of schema) {
+      if (Array.isArray(k)) {
+        nested(k, (inner) => build(pl(n, inner)), top, `${path}.${n}`);
+        // A message field: empty passes, a varint does not, twice only if repeated.
+        assert.equal(releasable(build(pl(n, ''))), true, `${path}.${n} empty`);
+        assert.equal(releasable(build(cat(pl(n, ''), pl(n, '')))), !!rep, `${path}.${n} twice`);
+        assert.equal(releasable(build(pv(n, 1))), false, `${path}.${n} as a varint`);
+        continue;
+      }
+      checked++;
+      for (const [enc, v] of values[k]) {
+        const one = enc(n, v);
+        assert.equal(releasable(build(one)), true, `${path}.${n} takes ${k}`);
+        assert.equal(releasable(build(cat(one, one))), !!rep, `${path}.${n} twice`);
+      }
+      for (const [enc, v] of wrong[k]) assert.equal(releasable(build(enc(n, v))), false, `${path}.${n} refuses ${k}`);
+    }
+  };
+  for (const [schema, send, top] of routes) {
+    // The field number at the top decides how a PerformAction is completed.
+    nested(schema, (b) => send(top === 'perform' ? complete(b[0] >> 3, b) : b), top, top);
+  }
+  assert.equal(checked, 59, 'every scalar field of every message');
 });
