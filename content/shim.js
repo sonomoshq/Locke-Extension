@@ -1557,14 +1557,27 @@
   // Verdict shape (the SW's reply): { ok, receipt: { decision, reason,
   // redactedCount, unchecked, unscreened, requestB64?, … } }, or
   // { ok: false, code, message } when the relay itself failed.
+  // Reason for a block that fail-open would otherwise have released.
+  const FILE_HELD = 'fail-open-file-held';
+  // Exactly what the native host / bridge puts in the receipt (blockCause
+  // 'infrastructure') it answers a not-releasable capture with under fail-open
+  // (em dash U+2014). A block receipt carrying it maps to FILE_HELD.
+  const FILE_HELD_REASON = 'Locke could not screen this request and it is not a plain chat message — held back (fail-open only sends recognised prompt-only chat messages unchecked)';
+
   // Relay codes that mean "screening could not complete" (an outage), as
   // opposed to a malformed answer (our/guard bug) or consent. Under the
-  // desktop app's fail-open window these send the original; otherwise they
+  // desktop app's fail-open window these send the original (known chat turns only — see FILE_HELD); otherwise they
   // block as before. Absent codes fall to `native-call-failed` = unavailable.
   const RELAY_CODES_KEEP_BLOCKING = new Set([
     'data-consent-required', 'bridge-empty', 'bridge-unknown-response',
-    'bridge-protocol-mismatch', 'capture-error', 'bad-request'
+    'bridge-protocol-mismatch', 'capture-error', 'bad-request',
+    // A host that ever sends the file-held answer as a code: never a release.
+    FILE_HELD
   ]);
+  // Is the request a redaction rebuilt (base64) one a fail-open window may send?
+  function rebuiltReleasable(b64) {
+    try { return releasableUnderFailOpen(bytesFromB64(b64)); } catch { return false; }
+  }
   function failOpenSend(cause, waitedMs) {
     noteUncheckedSend(cause);
     return {
@@ -1573,6 +1586,1230 @@
       fields: { waitedMs, cause, because: 'user-fail-open-window' }
     };
   }
+
+  // ── fail-open is default deny (zh#370) ───────────────────────────────────
+  //
+  // The fail-open window lets a KNOWN, PROMPT-ONLY CHAT TURN out when
+  // screening cannot answer. Everything else is held on every fail-open path,
+  // with its own reason so the user is told why. The rule is stated once per
+  // component (Proxy and Bridge fail_open_shape.rs, this function); change all
+  // three together. No hop trusts an "unchecked" allow it is handed: decide()
+  // re-applies the rule to it.
+  //
+  // <releasableUnderFailOpen>
+  // Standard base64, padded to a multiple of 4, canonical.
+  const FAIL_OPEN_B64 = (x) => {
+    if (x.length % 4 !== 0) return undefined;
+    const val = (c) => {
+      const n = c.charCodeAt(0);
+      if (n >= 65 && n <= 90) return n - 65;
+      if (n >= 97 && n <= 122) return n - 71;
+      if (n >= 48 && n <= 57) return n + 4;
+      if (c === '+') return 62;
+      if (c === '/') return 63;
+      return undefined;
+    };
+    const quads = x.length / 4;
+    const out = [];
+    for (let qi = 0; qi < quads; qi++) {
+      const q = x.slice(qi * 4, qi * 4 + 4);
+      let pad = 0;
+      while (pad < 4 && q[3 - pad] === '=') pad++;
+      if (pad > 2 || (pad > 0 && qi + 1 !== quads)) return undefined;
+      let n = 0;
+      for (let j = 0; j < 4; j++) {
+        const v = j >= 4 - pad ? 0 : val(q[j]);
+        if (v === undefined) return undefined;
+        n = n * 64 + v;
+      }
+      if ((pad === 1 && n % 256 !== 0) || (pad === 2 && n % 65536 !== 0)) return undefined;
+      const bytes = [Math.floor(n / 65536) % 256, Math.floor(n / 256) % 256, n % 256];
+      out.push(...bytes.slice(0, 3 - pad));
+    }
+    return new Uint8Array(out);
+  };
+
+  // claude.ai Connect RPC message schemas, field by field as seen on the wire
+  // (LibreWolf HAR, 2026-11-22): [number, kind, repeated]. Proxy and Bridge
+  // fail_open_shape.rs state the same table (claude_ai_rpc_schemas_are_pinned).
+  const FAIL_OPEN_RPC = (() => {
+    const one = (pairs) => pairs.map(([n, k]) => [n, k, false]);
+    const CAI_MUTATION = one([[1, 'word'], [2, 'count']]);
+    const CAI_CAPABILITIES = one([1, 2, 3, 6, 8, 10, 22, 24, 28, 33, 57].map((n) => [n, 'flag']));
+    const CAI_HEADER = one([[1, CAI_MUTATION], [2, 'word'], [3, 'small'], [7, CAI_CAPABILITIES], [14, 'word'],
+      [15, 'nonce'], [19, 'flag']]);
+    const CAI_MODEL = one([[2, 'word']]);
+    const CAI_TOOL = one([[1, 'toolKey'], [2, 'flag']]);
+    const CAI_TOOLS = [[1, CAI_TOOL, true]];
+    const CAI_SETTINGS = one([[1, 'flag'], [7, 'flag'], [8, CAI_TOOLS], [10, 'small'], [14, 'small'], [16, 'word'],
+      [17, 'word']]);
+    const CAI_SETTINGS_UPDATE = one([[1, CAI_SETTINGS]]);
+    const CAI_SEND = one([[1, 'word'], [2, 'word'], [3, 'text'], [7, CAI_MODEL], [8, CAI_SETTINGS_UPDATE],
+      [12, 'zone'], [13, 'word'], [18, 'small'], [21, 'small'], [54, 'flag'], [57, CAI_MODEL], [59, 'flag']]);
+    const CAI_LOCALE = one([[12, 'zone'], [13, 'word'], [18, 'small']]);
+    const CAI_LOCALE_ACTION = one([[1, CAI_LOCALE]]);
+    const CAI_PERFORM = one([[1, CAI_HEADER], [2, CAI_SEND], [15, CAI_LOCALE_ACTION]]);
+    const CAI_CURSOR = one([[1, 'word']]);
+    const CAI_TIMELINE_CAPABILITIES = one([6, 22, 24, 28, 33, 46, 47, 61].map((n) => [n, 'small']));
+    const CAI_TIMELINE = one([[1, 'word'], [2, CAI_CURSOR], [3, 'small'], [4, CAI_TIMELINE_CAPABILITIES],
+      [5, 'word'], [6, 'small'], [8, 'zone'], [15, 'small']]);
+    const CAI_REPORT_VIEWING = one([[1, 'word'], [2, 'word'], [3, 'flag']]);
+    const CAI_CREDENTIALS = one([[1, 'word']]);
+    const GPS_ONE = one([[1, 'small']]);
+    // 2 is an id: empty in the HAR's sends, 16 letters and digits in dev.30's
+    // hold lines (2026-11-23).
+    const GPS_META = one([[1, 'small'], [2, 'optWord'], [3, 'word'], [4, 'word']]);
+    const GPS_PROMPT = one([[1, 'text'], [2, 'small'], [7, 'small']]);
+    const GPS_LANGUAGE = one([[1, 'word']]);
+    const GPS_NESTED_ONE = one([[1, GPS_ONE]]);
+    // 8 is the server's context token: base64, so it may hold `+`, `/`, `=`.
+    const GPS_CONVERSATION = one([[1, 'word'], [8, 'token']]);
+    const GPS_TURN = one([[1, GPS_PROMPT], [2, GPS_LANGUAGE], [4, 'attest'], [5, 'word'], [7, GPS_ONE], [8, 'small'],
+      [11, 'small'], [12, 'small'], [18, GPS_NESTED_ONE], [19, 'small'], [28, 'small'], [31, 'nonce'], [42, GPS_ONE],
+      [50, 'small'], [54, 'small'], [60, 'word'], [62, 'empty'], [68, 'small'], [69, 'small'], [72, GPS_CONVERSATION],
+      [92, 'small'], [97, 'small'], [99, 'small']]);
+    const GPS_INNER = one([[1, GPS_TURN], [4, 'small']]);
+    const GPS_OUTER = one([[5, GPS_INNER]]);
+    const GPS_REQUEST = one([[1, GPS_META], [2, 'small'], [8, GPS_OUTER]]);
+    const GPS_ECHO = one([[1, 'small'], [9, one([[1, 'text']])]]);
+    const GPS_FRAME = one([[1, GPS_REQUEST], [2, GPS_ECHO], [4, GPS_ONE]]);
+    return { CAI_PERFORM, CAI_TIMELINE, CAI_REPORT_VIEWING, CAI_CREDENTIALS, GPS_FRAME };
+  })();
+
+  // May the user's fail-open window send this raw request (head, CRLFCRLF,
+  // body — the synthesizeRequest output) unscreened? DEFAULT DENY: true only
+  // for a known, prompt-only chat turn (catalogued host + route, body parses
+  // into that surface's chat schema, no attachment anywhere). A port of
+  // Proxy src/fail_open_shape.rs `releasable` and Bridge's copy — one rule,
+  // three copies; change all together. The generic checks (opaque, denyKey)
+  // can only turn a release into a hold.
+  function releasableUnderFailOpen(raw) {
+    const MAX_RELEASABLE_BODY = 6 * 1024 * 1024;
+    const MAX_OPAQUE_STRING = 4096;
+    const MAX_OPAQUE_ARRAY = 64;
+    const MAX_OPAQUE_TOTAL = 8 * 1024;
+    const MAX_ITEM_OPAQUE = 4 * 1024;
+    const MAX_OPAQUE_BASE64 = 512;
+    const MAX_MODEL_TOKEN = 256 * 1024;
+    const MAX_AUTHORED = 1024 * 1024;
+    const MAX_QUERY = 2048;
+    const ANTHROPIC_PARAMS = [
+      'model', 'messages', 'system', 'max_tokens', 'metadata', 'stop_sequences', 'stream',
+      'temperature', 'top_k', 'top_p', 'tools', 'tool_choice', 'thinking', 'context_management',
+      'output_config', 'output_format', 'service_tier', 'safeguards', 'thread', 'diagnostics'
+    ];
+    const CHAT_PARAMS = [
+      'model', 'messages', 'stream', 'stream_options', 'temperature', 'top_p', 'n', 'stop',
+      'max_tokens', 'max_completion_tokens', 'presence_penalty', 'frequency_penalty', 'logit_bias',
+      'logprobs', 'top_logprobs', 'user', 'seed', 'tools', 'tool_choice', 'parallel_tool_calls',
+      'response_format', 'reasoning_effort', 'metadata', 'store', 'service_tier', 'functions',
+      'function_call', 'verbosity', 'safety_identifier', 'prompt_cache_key'
+    ];
+    const RESPONSES_PARAMS = [
+      'type', 'model', 'input', 'instructions', 'tools', 'tool_choice', 'parallel_tool_calls',
+      'reasoning', 'store', 'include', 'prompt_cache_key', 'prompt_cache_retention', 'text',
+      'stream', 'generate', 'client_metadata', 'access_programs', 'previous_response_id',
+      'temperature', 'top_p', 'max_output_tokens', 'max_tool_calls', 'metadata', 'service_tier',
+      'truncation', 'user', 'safety_identifier', 'background', 'top_logprobs'
+    ];
+    const GEMINI_PARAMS = [
+      'contents', 'systemInstruction', 'tools', 'toolConfig', 'generationConfig', 'safetySettings',
+      'labels'
+    ];
+    const DENY = ['attach', 'file', 'image', 'upload', 'extracted', 'inline', 'document', 'blob',
+      'audio', 'video', 'media', 'base64', 'dataurl', 'data_url', 'asset_pointer', 'selected_sources'];
+    const INLINE = ['inlinedata', 'inline_data', 'filedata', 'file_data', 'image_url', 'imageurl',
+      'input_image', 'input_file', 'input_audio', 'b64_json'];
+    const MIME = ['mimetype', 'mime_type', 'media_type', 'mediatype'];
+    const MIME_TOPS = ['application/', 'image/', 'text/', 'audio/', 'video/', 'font/', 'model/'];
+    const GEMINI_PATH = '/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate';
+    const fatal = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+    const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
+    // Budgets. `opaque` is what is left of the settings budget (the whole
+    // request, or the one message/block/item under judgement); `authored` is
+    // what is left for the authored JSON value being walked.
+    const opaqueB = { left: MAX_OPAQUE_TOTAL };
+    const authoredB = { left: 0 };
+    const take = (cell, n) => {
+      if (n > cell.left) return false;
+      cell.left -= n;
+      return true;
+    };
+    const spend = (n) => take(opaqueB, n);
+    // Run f with a fresh budget of n in cell, then restore the outer one.
+    const within = (cell, n, f) => {
+      const outer = cell.left;
+      cell.left = n;
+      let ok;
+      try { ok = f(); } finally { cell.left = outer; }
+      return ok;
+    };
+    const item = (f) => within(opaqueB, MAX_ITEM_OPAQUE, f);
+
+    // UTF-8 byte length (Rust's str::len) of a well-formed string.
+    const utf8Len = (s) => {
+      let n = 0;
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c < 0x80) n += 1;
+        else if (c < 0x800) n += 2;
+        else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }
+        else n += 3;
+      }
+      return n;
+    };
+    const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    // What serde_json would accept: depth under its 128 recursion limit, no
+    // lone-surrogate escape, no number that overflows a double.
+    const sane = (v, depth) => {
+      if (typeof v === 'string') return !LONE_SURROGATE.test(v);
+      if (typeof v === 'number') return Number.isFinite(v);
+      if (v === null || typeof v !== 'object') return true;
+      if (depth + 1 >= 128) return false;
+      if (Array.isArray(v)) return v.every((x) => sane(x, depth + 1));
+      return Object.keys(v).every((k) => !LONE_SURROGATE.test(k) && sane(v[k], depth + 1));
+    };
+    // A repeated key in any object of already-valid JSON text. JSON.parse keeps
+    // the last one and cannot see it; the Rust reader refuses it, so must this.
+    const hasDuplicateKey = (text) => {
+      const stack = [];
+      let prev = '';
+      const re = /"(?:[^"\\]|\\[\s\S])*"|[{}[\],]/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        const t = m[0];
+        if (t === '{') stack.push(new Set());
+        else if (t === '[') stack.push(null);
+        else if (t === '}' || t === ']') stack.pop();
+        else if (t[0] === '"') {
+          const top = stack[stack.length - 1];
+          if (top && (prev === '{' || prev === ',')) {
+            const key = JSON.parse(t);
+            if (top.has(key)) return true;
+            top.add(key);
+          }
+        }
+        prev = t[0] === '"' ? '"' : t;
+      }
+      return false;
+    };
+    const parseJson = (text) => {
+      let v;
+      try { v = JSON.parse(text); } catch { return undefined; }
+      if (hasDuplicateKey(text)) return undefined;
+      return sane(v, 0) ? { v } : undefined;
+    };
+
+    const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+    const get = (o, k) => (hasOwn(o, k) ? o[k] : undefined);
+    const isStr = (v) => typeof v === 'string';
+    const strOrAbsent = (v) => v === undefined || v === null || typeof v === 'string';
+    const asStr = (v) => (typeof v === 'string' ? v : undefined);
+    const noneOr = (v, f) => v === undefined || f(v);
+    const lower = (s) => s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+    const isAscii = (s) => /^[\x00-\x7f]*$/.test(s);
+    // Keys on these surfaces are ASCII; one that is not could fold to an
+    // attachment key somewhere this rule does not look, so it counts as one.
+    const denyKey = (key) => {
+      if (!isAscii(key)) return true;
+      const k = lower(key);
+      return DENY.some((d) => k.includes(d));
+    };
+    const empty = (v) => {
+      if (v === null || v === false) return true;
+      if (typeof v === 'string') return v.length === 0;
+      if (Array.isArray(v)) return v.length === 0;
+      if (isObj(v)) return Object.keys(v).length === 0;
+      return false;
+    };
+    const emptyOrAbsent = (v) => v === undefined || empty(v);
+    const onlyKeys = (o, allowed) => Object.keys(o).every((k) => allowed.includes(k));
+
+    // Rust's char::is_whitespace (Unicode White_Space; not JS's, which adds U+FEFF and drops U+0085).
+    const isWs = (c) => (c >= 9 && c <= 13) || c === 32 || c === 0x85 || c === 0xa0 || c === 0x1680 ||
+      (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000;
+    const rtrim = (s) => {
+      let a = 0;
+      let b = s.length;
+      while (a < b && isWs(s.charCodeAt(a))) a++;
+      while (b > a && isWs(s.charCodeAt(b - 1))) b--;
+      return s.slice(a, b);
+    };
+    const trimStart = (s) => {
+      let a = 0;
+      while (a < s.length && isWs(s.charCodeAt(a))) a++;
+      return s.slice(a);
+    };
+
+    // `data:<type>;base64,…`
+    const dataUri = (s) => {
+      const t = trimStart(s);
+      return lower(t.slice(0, 5)) === 'data:' && lower(t).includes(';base64,');
+    };
+    // At least `min` bytes of only the base64 alphabets (standard and URL-safe, padded).
+    const base64Run = (s, min) => s.length >= min && /^[A-Za-z0-9+/\-_=]*$/.test(s);
+    // A settings string: short, not a data URI, not a long bare base64 run.
+    const opaqueStringOk = (s) => utf8Len(s) <= MAX_OPAQUE_STRING && !dataUri(s) && !base64Run(s, MAX_OPAQUE_BASE64);
+
+    // Settings, ids and metadata: short strings, short arrays, no attachment key.
+    const opaque = (v) => {
+      if (typeof v === 'string') return opaqueStringOk(v) && spend(utf8Len(v));
+      if (Array.isArray(v)) return v.length <= MAX_OPAQUE_ARRAY && v.every(opaque);
+      if (isObj(v)) {
+        return Object.keys(v).every((k) => (!denyKey(k) || empty(v[k])) && spend(utf8Len(k)) && opaque(v[k]));
+      }
+      return spend(8);
+    };
+
+    // JSON the model or the client wrote as structure (a tool call's input, a
+    // Gemini function call or response, tool definitions): free keys and text,
+    // but no inline-data container, no {mime type, data} blob, no data URI, no
+    // long bare base64, no non-ASCII key; bounded by MAX_AUTHORED.
+    const authoredWalk = (v) => {
+      if (typeof v === 'string') return !dataUri(v) && !base64Run(v, MAX_OPAQUE_STRING) && take(authoredB, utf8Len(v));
+      if (Array.isArray(v)) return v.every(authoredWalk);
+      if (isObj(v)) {
+        const keys = Object.keys(v);
+        const dataV = get(v, 'data');
+        const blob = keys.some((k) => MIME.includes(lower(k)) && typeof v[k] === 'string') &&
+          typeof dataV === 'string' && dataV !== '';
+        return !blob && keys.every((k) => isAscii(k) &&
+          (!INLINE.includes(lower(k)) || empty(v[k])) && take(authoredB, utf8Len(k)) && authoredWalk(v[k]));
+      }
+      return take(authoredB, 8);
+    };
+    const authored = (v) => within(authoredB, MAX_AUTHORED, () => authoredWalk(v));
+    // A tool's output text (zh#370 round 3): free text, but no data URI and no
+    // bare base64 run of MAX_OPAQUE_STRING or more — authored()'s string checks.
+    // EncodedRun (Rust): one linear scan over every tool output in the
+    // request for the longest base64/hex run anywhere. Whitespace inside a run
+    // (wrapped output) continues it; any other character ends it; a line of
+    // MIN_WRAPPED_LINE or more carries it on; the run carries across outputs.
+    const MIN_WRAPPED_LINE = 16;
+    const MAX_LINE_SHORT = 4;
+    const encRun = { run: 0, open: false, token: 0, lines: 0, longest: 0 };
+    // The line view (Rust `EncodedRun::line`): lines split at a newline or a
+    // literal backslash-n; a leading line number (spaces, digits, then a tab
+    // or an arrow) dropped; quotes, commas, pipes and backslashes are
+    // wrappers. An encoded line adds to the line run, a short line with no
+    // encoded token leaves it, anything else (or PEM armour) ends it.
+    const isWrapper = (c) => c === 32 || c === 9 || c === 13 || c === 34 || c === 39 || c === 44 ||
+      c === 124 || c === 92;
+    const isTrimSpace = (c) => c === 32 || c === 9 || c === 10 || c === 12 || c === 13;
+    const encLine = (s, from, to) => {
+      let i = from;
+      while (i < to && s.charCodeAt(i) === 32) i++;
+      let j = i;
+      while (j < to && s.charCodeAt(j) >= 48 && s.charCodeAt(j) <= 57) j++;
+      if (j > i && j < to && (s.charCodeAt(j) === 9 || s.charCodeAt(j) === 0x2192)) from = j + 1;
+      while (from < to && isTrimSpace(s.charCodeAt(from))) from++;
+      let encoded = 0, short = 0, other = 0, token = 0;
+      const end = () => {
+        if (token >= MIN_WRAPPED_LINE) encoded += token; else short += token;
+        token = 0;
+      };
+      for (let k = from; k < to; k++) {
+        const c = s.charCodeAt(k);
+        if (isB64(c)) { token++; continue; }
+        end();
+        // Rust counts bytes: a non-ASCII character is 2-4 'other' bytes.
+        if (!isWrapper(c)) other += c < 0x80 ? 1 : c < 0x800 || (c >= 0xD800 && c <= 0xDFFF) ? 2 : 3;
+      }
+      end();
+      if (s.startsWith('-----', from) && from + 5 <= to) {
+        encRun.lines = 0;
+      } else if (encoded > 0 && other === 0 && short <= MAX_LINE_SHORT) {
+        encRun.lines += encoded;
+        if (encRun.lines > encRun.longest) encRun.longest = encRun.lines;
+      } else if (encoded > 0 || other + short > MAX_LINE_SHORT) {
+        encRun.lines = 0;
+      }
+    };
+    const encLines = (s) => {
+      let start = 0;
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c === 10) { encLine(s, start, i); start = i + 1; } else if (c === 92 && s.charCodeAt(i + 1) === 110) {
+          encLine(s, start, i); i++; start = i + 1;
+        }
+      }
+      encLine(s, start, s.length);
+    };
+    const endToken = () => {
+      const len = encRun.token;
+      encRun.token = 0;
+      if (len === 0) return;
+      if (!encRun.open) encRun.run = 0;
+      encRun.run += len;
+      encRun.open = len >= MIN_WRAPPED_LINE;
+      if (encRun.run > encRun.longest) encRun.longest = encRun.run;
+    };
+    const isB64 = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ||
+      c === 43 || c === 47 || c === 45 || c === 95 || c === 61;
+    const toolTextOk = (s) => {
+      encLines(s);
+      for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (isB64(c)) {
+          encRun.token++;
+        } else {
+          endToken();
+          if (!(c === 32 || c === 9 || c === 13 || c === 10)) encRun.open = false;
+        }
+      }
+      endToken();
+      return encRun.longest < MAX_OPAQUE_STRING;
+    };
+    const toolText = (v) => typeof v === 'string' && toolTextOk(v);
+    // A provider-minted token (signature, encrypted reasoning): a string, not past MAX_MODEL_TOKEN.
+    const modelToken = (v) => v === undefined || v === null || (typeof v === 'string' && utf8Len(v) <= MAX_MODEL_TOKEN);
+
+    const restOpaque = (o, skip) => Object.keys(o).filter((k) => !skip.includes(k))
+      .every((k) => (!denyKey(k) || empty(o[k])) && spend(utf8Len(k)) && opaque(o[k]));
+
+    // ── Anthropic API ──
+    const textBlock = (b) => item(() => isObj(b) && get(b, 'type') === 'text' && isStr(get(b, 'text')) &&
+      onlyKeys(b, ['type', 'text', 'cache_control', 'citations']) &&
+      noneOr(get(b, 'cache_control'), opaque) && noneOr(get(b, 'citations'), opaque));
+    const toolReference = (b) => isObj(b) && onlyKeys(b, ['type', 'tool_name']) &&
+      get(b, 'type') === 'tool_reference' && isStr(get(b, 'tool_name')) && utf8Len(get(b, 'tool_name')) <= 256;
+    const anthropicBlock = (b) => item(() => {
+      if (!isObj(b)) return false;
+      switch (asStr(get(b, 'type'))) {
+        case 'text': return textBlock(b);
+        case 'thinking':
+          return onlyKeys(b, ['type', 'thinking', 'signature', 'cache_control']) &&
+            isStr(get(b, 'thinking')) && modelToken(get(b, 'signature')) &&
+            noneOr(get(b, 'cache_control'), opaque);
+        case 'redacted_thinking':
+          return onlyKeys(b, ['type', 'data', 'cache_control']) &&
+            isStr(get(b, 'data')) && modelToken(get(b, 'data')) &&
+            noneOr(get(b, 'cache_control'), opaque);
+        case 'tool_use':
+        case 'server_tool_use':
+          return onlyKeys(b, ['type', 'id', 'name', 'input', 'cache_control', 'caller']) &&
+            isStr(get(b, 'name')) && isObj(get(b, 'input')) && authored(get(b, 'input')) &&
+            restOpaque(b, ['name', 'input']);
+        case 'tool_result': {
+          if (!onlyKeys(b, ['type', 'tool_use_id', 'content', 'is_error', 'cache_control'])) return false;
+          const c = get(b, 'content');
+          const contentOk = c === undefined || (typeof c === 'string' && toolTextOk(c)) ||
+            (Array.isArray(c) && c.every((p) => (textBlock(p) && toolText(get(p, 'text'))) || toolReference(p)));
+          return contentOk && restOpaque(b, ['content']);
+        }
+        default: return false;
+      }
+    });
+    const anthropicMessage = (m) => item(() => {
+      if (!isObj(m)) return false;
+      const role = asStr(get(m, 'role'));
+      if (!(role === 'user' || role === 'assistant' || role === 'system')) return false;
+      const c = get(m, 'content');
+      const contentOk = typeof c === 'string' || (Array.isArray(c) && c.every(anthropicBlock));
+      return contentOk && restOpaque(m, ['role', 'content']);
+    });
+    const anthropic = (o) => {
+      if (!isObj(o)) return false;
+      const msgs = get(o, 'messages');
+      if (!Array.isArray(msgs)) return false;
+      const sys = get(o, 'system');
+      const systemOk = sys === undefined || sys === null || typeof sys === 'string' ||
+        (Array.isArray(sys) && sys.every(textBlock));
+      return systemOk && onlyKeys(o, ANTHROPIC_PARAMS) && msgs.every(anthropicMessage) &&
+        noneOr(get(o, 'tools'), authored) && noneOr(get(o, 'tool_choice'), authored) &&
+        restOpaque(o, ['messages', 'system', 'tools', 'tool_choice']);
+    };
+
+    // ── claude.ai ──
+    const claudeAiRoute = (p) => {
+      const pre = '/api/organizations/';
+      if (!p.startsWith(pre)) return null;
+      const seg = p.slice(pre.length).split('/');
+      if (seg.length !== 4) return null;
+      const [org, cc, conv, leaf] = seg;
+      if (org === '' || conv === '' || cc !== 'chat_conversations') return null;
+      if (leaf === 'completion' || leaf === 'retry_completion' || leaf === 'title') return leaf;
+      return null;
+    };
+    const claudeAi = (route, o) => {
+      if (!isObj(o)) return false;
+      if (route === 'title') {
+        return onlyKeys(o, ['message_content', 'recent_titles']) && isStr(get(o, 'message_content')) &&
+          noneOr(get(o, 'recent_titles'), (t) => Array.isArray(t) && t.length <= MAX_OPAQUE_ARRAY && t.every(isStr));
+      }
+      const promptOk = route === 'completion' ? isStr(get(o, 'prompt')) : strOrAbsent(get(o, 'prompt'));
+      return promptOk && emptyOrAbsent(get(o, 'sync_sources')) && noneOr(get(o, 'tools'), authored) &&
+        restOpaque(o, ['prompt', 'tools']);
+    };
+
+    // ── ChatGPT web ──
+    const chatgptMessage = (m) => item(() => {
+      if (!isObj(m)) return false;
+      const c = get(m, 'content');
+      if (!isObj(c)) return false;
+      const contentOk = onlyKeys(c, ['content_type', 'parts']) && get(c, 'content_type') === 'text' &&
+        Array.isArray(get(c, 'parts')) && get(c, 'parts').every(isStr);
+      return contentOk && restOpaque(m, ['content']);
+    });
+    const chatgpt = (o, send) => {
+      if (!isObj(o)) return false;
+      if (!send) return !hasOwn(o, 'messages') && restOpaque(o, []);
+      const msgs = get(o, 'messages');
+      if (!Array.isArray(msgs)) return false;
+      return msgs.length > 0 && msgs.every(chatgptMessage) && restOpaque(o, ['messages']);
+    };
+
+    // ── Gemini web ──
+    // application/x-www-form-urlencoded decoding; undefined on a bad escape or
+    // non-UTF-8 result. Byte-wise, as the Rust is (a "%+f" escape included).
+    const formDecode = (s) => {
+      const b = new TextEncoder().encode(s);
+      const out = [];
+      const hexv = (c) => (c >= 48 && c <= 57 ? c - 48 : c >= 97 && c <= 102 ? c - 87 : c >= 65 && c <= 70 ? c - 55 : -1);
+      for (let i = 0; i < b.length; i++) {
+        if (b[i] === 0x2b) out.push(0x20);
+        else if (b[i] === 0x25) {
+          if (i + 3 > b.length) return undefined;
+          const x = b[i + 1];
+          const y = b[i + 2];
+          let v;
+          // u8::from_str_radix accepts one leading '+'.
+          if (x === 0x2b) { const d = hexv(y); if (d < 0) return undefined; v = d; }
+          else { const h = hexv(x); const l = hexv(y); if (h < 0 || l < 0) return undefined; v = h * 16 + l; }
+          out.push(v);
+          i += 2;
+        } else out.push(b[i]);
+      }
+      try { return fatal.decode(new Uint8Array(out)); } catch { return undefined; }
+    };
+    // An uploaded file's reference: its upload path (`/…`) or its MIME type.
+    const geminiUploadRef = (v) => {
+      if (typeof v === 'string') {
+        return v.startsWith('/') || MIME_TOPS.some((t) => lower(v).startsWith(t));
+      }
+      if (Array.isArray(v)) return v.some(geminiUploadRef);
+      if (isObj(v)) return Object.keys(v).some((k) => geminiUploadRef(v[k]));
+      return false;
+    };
+    // A Gemini web form: `f.req` once and `at` (the page's own token), nothing
+    // else; the `f.req` text, or undefined.
+    const geminiForm = (body) => {
+      let freq;
+      let at = false;
+      // The page ends its form with `&` (2026-11): an empty pair is no field.
+      // Each field at most once: a repeated `at` would be an unbounded channel.
+      for (const pair of body.split('&').filter((x) => x !== '')) {
+        const eq = pair.indexOf('=');
+        const k = formDecode(eq < 0 ? pair : pair.slice(0, eq));
+        const v = formDecode(eq < 0 ? '' : pair.slice(eq + 1));
+        if (k === 'f.req' && v !== undefined && freq === undefined) freq = v;
+        else if (k === 'at' && v !== undefined && !at && utf8Len(v) <= MAX_OPAQUE_STRING) at = true;
+        else return undefined;
+      }
+      return freq;
+    };
+    const geminiWeb = (body) => {
+      const freq = geminiForm(body);
+      if (freq === undefined) return false;
+      const po = parseJson(freq);
+      if (!po || !Array.isArray(po.v) || po.v.length < 2) return false;
+      const [first, inner, ...rest] = po.v;
+      if (first !== null || !rest.every(opaque)) return false;
+      if (typeof inner !== 'string') return false;
+      const pi = parseJson(inner);
+      if (!pi || !Array.isArray(pi.v) || pi.v.length < 1) return false;
+      const [turn, ...others] = pi.v;
+      const turnOk = Array.isArray(turn) && turn.length >= 1 && typeof turn[0] === 'string' &&
+        turn.slice(1).every((x) => x === null || typeof x === 'boolean' || typeof x === 'number');
+      return turnOk && others.every((x) => opaque(x) && !geminiUploadRef(x));
+    };
+
+    // ── duck.ai ──
+    const duck = (o) => {
+      if (!isObj(o)) return false;
+      const msgs = get(o, 'messages');
+      if (!Array.isArray(msgs)) return false;
+      return msgs.every((m) => {
+        if (!isObj(m) || !onlyKeys(m, ['role', 'content'])) return false;
+        const role = asStr(get(m, 'role'));
+        if (!(role === 'user' || role === 'assistant')) return false;
+        const c = get(m, 'content');
+        if (typeof c === 'string') return true;
+        return Array.isArray(c) && c.every((p) => isObj(p) && onlyKeys(p, ['type', 'text']) &&
+          get(p, 'type') === 'text' && isStr(get(p, 'text')));
+      }) && restOpaque(o, ['messages']);
+    };
+
+    // ── OpenAI chat completions ──
+    const toolCallsOk = (v) => Array.isArray(v) && v.every((c) => isObj(c) &&
+      onlyKeys(c, ['id', 'type', 'function', 'custom']) &&
+      ['function', 'custom'].every((k) => noneOr(get(c, k), (f) => isObj(f) &&
+        onlyKeys(f, ['name', 'arguments', 'input']) && Object.keys(f).every((x) => isStr(f[x])))));
+    const chatPart = (p) => {
+      if (!isObj(p)) return false;
+      const t = asStr(get(p, 'type'));
+      if (t === 'text') return onlyKeys(p, ['type', 'text']) && isStr(get(p, 'text'));
+      if (t === 'refusal') return onlyKeys(p, ['type', 'refusal']) && isStr(get(p, 'refusal'));
+      return false;
+    };
+    const chatCompletions = (o) => {
+      if (!isObj(o)) return false;
+      const msgs = get(o, 'messages');
+      if (!Array.isArray(msgs)) return false;
+      return msgs.every((m) => item(() => {
+        if (!isObj(m)) return false;
+        if (!onlyKeys(m, ['role', 'content', 'name', 'tool_calls', 'tool_call_id', 'refusal'])) return false;
+        if (!isStr(get(m, 'role'))) return false;
+        const c = get(m, 'content');
+        const contentOk = c === undefined || c === null || typeof c === 'string' ||
+          (Array.isArray(c) && c.every(chatPart));
+        // A tool-role message is a tool's output.
+        const role = get(m, 'role');
+        const toolOk = !(role === 'tool' || role === 'function') ||
+          (typeof c === 'string' ? toolTextOk(c)
+            : Array.isArray(c) ? c.every((p) => get(p, 'type') !== 'text' || toolText(get(p, 'text')))
+              : true);
+        return contentOk && restOpaque(m, ['content', 'tool_calls']) && noneOr(get(m, 'tool_calls'), toolCallsOk) &&
+          toolOk;
+      })) && onlyKeys(o, CHAT_PARAMS) &&
+        ['tools', 'functions', 'tool_choice'].every((k) => noneOr(get(o, k), authored)) &&
+        restOpaque(o, ['messages', 'tools', 'functions', 'tool_choice']);
+    };
+
+    // ── OpenAI Responses / Codex ──
+    const inputTextParts = (v) => {
+      if (typeof v === 'string') return true;
+      if (!Array.isArray(v)) return false;
+      return v.every((p) => {
+        if (!isObj(p) || !onlyKeys(p, ['type', 'text', 'annotations', 'logprobs'])) return false;
+        const t = asStr(get(p, 'type'));
+        return (t === 'input_text' || t === 'output_text' || t === 'text' || t === 'summary_text') &&
+          isStr(get(p, 'text')) && noneOr(get(p, 'annotations'), opaque) && noneOr(get(p, 'logprobs'), opaque);
+      });
+    };
+    // inputTextParts for a tool's output: each text is toolTextOk.
+    const outputTextParts = (v) => {
+      if (typeof v === 'string') return toolTextOk(v);
+      if (Array.isArray(v)) return inputTextParts(v) && v.every((p) => toolText(get(p, 'text')));
+      return false;
+    };
+    const responseItem = (o) => item(() => {
+      if (!isObj(o)) return false;
+      switch (asStr(get(o, 'type'))) {
+        case 'message':
+        case undefined:
+          return onlyKeys(o, ['type', 'id', 'role', 'content', 'status', 'phase',
+            'internal_chat_message_metadata_passthrough']) && isStr(get(o, 'role')) &&
+            inputTextParts(get(o, 'content')) && restOpaque(o, ['content']);
+        case 'configuration_update':
+          return onlyKeys(o, ['type', 'id', 'reasoning']) && restOpaque(o, []);
+        case 'reasoning':
+          return onlyKeys(o, ['type', 'id', 'summary', 'encrypted_content', 'content', 'status']) &&
+            noneOr(get(o, 'summary'), inputTextParts) &&
+            noneOr(get(o, 'content'), (c) => c === null || inputTextParts(c)) &&
+            modelToken(get(o, 'encrypted_content')) &&
+            restOpaque(o, ['summary', 'content', 'encrypted_content']);
+        case 'function_call':
+        case 'custom_tool_call':
+        case 'local_shell_call':
+          return onlyKeys(o, ['type', 'id', 'call_id', 'name', 'arguments', 'input', 'action', 'status']) &&
+            Object.keys(o).filter((k) => k !== 'action').every((k) => typeof o[k] === 'string' || o[k] === null) &&
+            noneOr(get(o, 'action'), opaque);
+        case 'function_call_output':
+        case 'custom_tool_call_output':
+        case 'local_shell_call_output':
+          return onlyKeys(o, ['type', 'id', 'call_id', 'output', 'status',
+            'internal_chat_message_metadata_passthrough']) &&
+            outputTextParts(get(o, 'output')) && restOpaque(o, ['output']);
+        case 'additional_tools':
+          return onlyKeys(o, ['type', 'id', 'role', 'tools']) && noneOr(get(o, 'tools'), authored) &&
+            restOpaque(o, ['tools']);
+        default: return false;
+      }
+    });
+    const responses = (o, ws) => {
+      if (!isObj(o)) return false;
+      if (ws && get(o, 'type') !== 'response.create') return false;
+      const input = get(o, 'input');
+      const inputOk = typeof input === 'string' || (Array.isArray(input) && input.every(responseItem));
+      return inputOk && onlyKeys(o, RESPONSES_PARAMS) && strOrAbsent(get(o, 'instructions')) &&
+        noneOr(get(o, 'tools'), authored) && noneOr(get(o, 'tool_choice'), authored) &&
+        restOpaque(o, ['input', 'instructions', 'tools', 'tool_choice']);
+    };
+
+    // ── Gemini API ──
+    const geminiApiRoute = (p) => {
+      if (!p.startsWith('/')) return false;
+      const seg = p.slice(1).split('/');
+      if (seg.length !== 3 || seg[1] !== 'models') return false;
+      const model = seg[2];
+      const c = model.indexOf(':');
+      if (!seg[0].startsWith('v') || c < 0) return false;
+      const verb = model.slice(c + 1);
+      return c > 0 && (verb === 'generateContent' || verb === 'streamGenerateContent' || verb === 'countTokens');
+    };
+    // {name, args, id}: the model's call; its args walked as authored JSON.
+    const geminiFunctionCall = (f) => isObj(f) && onlyKeys(f, ['name', 'args', 'id']) &&
+      isStr(get(f, 'name')) && strOrAbsent(get(f, 'id')) &&
+      noneOr(get(f, 'args'), (a) => isObj(a) && authored(a));
+    // {name, response, id, parts, …}: the tool's answer; parts may only be text.
+    const geminiFunctionResponse = (f) => item(() => isObj(f) &&
+      onlyKeys(f, ['name', 'response', 'id', 'parts', 'willContinue', 'scheduling']) &&
+      isStr(get(f, 'name')) &&
+      noneOr(get(f, 'response'), (r) => isObj(r) && authored(r)) &&
+      noneOr(get(f, 'parts'), (parts) => Array.isArray(parts) &&
+        parts.every((p) => isObj(p) && onlyKeys(p, ['text']) && toolText(get(p, 'text')))) &&
+      restOpaque(f, ['name', 'response', 'parts']));
+    const geminiApi = (o) => {
+      if (!isObj(o)) return false;
+      const contents = get(o, 'contents');
+      if (!Array.isArray(contents)) return false;
+      const contentOk = (c) => isObj(c) && onlyKeys(c, ['role', 'parts']) && strOrAbsent(get(c, 'role')) &&
+        Array.isArray(get(c, 'parts')) && get(c, 'parts').every((p) => isObj(p) && Object.keys(p).length > 0 &&
+          onlyKeys(p, ['text', 'thought', 'thoughtSignature', 'functionCall', 'functionResponse']) &&
+          strOrAbsent(get(p, 'text')) && modelToken(get(p, 'thoughtSignature')) &&
+          noneOr(get(p, 'thought'), (t) => typeof t === 'boolean') &&
+          noneOr(get(p, 'functionCall'), geminiFunctionCall) &&
+          noneOr(get(p, 'functionResponse'), geminiFunctionResponse));
+      return contents.every(contentOk) && noneOr(get(o, 'systemInstruction'), contentOk) &&
+        onlyKeys(o, GEMINI_PARAMS) && noneOr(get(o, 'tools'), authored) &&
+        restOpaque(o, ['contents', 'systemInstruction', 'tools']);
+    };
+
+    // ── content-free page calls (round 4) ──
+    // Calls a chat page or client makes around a send that carry no user
+    // content (anti-abuse tokens, ids, settings), read off real traffic. Each
+    // exact: one host and route, a closed key list, every value a setting or a
+    // token of a fixed alphabet and a bounded size. The tokens are opaque, so
+    // each is a bounded side channel, at most its cap per call.
+    const SENTINEL_P = 2048;
+    const SENTINEL_PREPARE_TOKEN = 12 * 1024;
+    const SENTINEL_POW = 2048;
+    const SENTINEL_TURNSTILE = 12 * 1024;
+    const MAX_WORD = 64;
+    const MAX_RPC_ARGS = 2048;
+    const MAX_RPC_CALLS = 16;
+    const MAX_SHORT_LIST = 16;
+    // FQjvN, UQJUK, Ub3MPb, VVSn5c and VxUbXb: by name only, from the hold
+    // lines of a page load (dev.30, 2026-11-23). A listed call still carries
+    // settings only.
+    const GEMINI_RPCS = [
+      'CNgdBe', 'DYBcR', 'ESY5D', 'FQjvN', 'GPRiHf', 'I4z33b', 'K4WWud', 'L5adhe', 'MaZiqc',
+      'PCck7e', 'Te6DCf', 'UQJUK', 'Ub3MPb', 'VVSn5c', 'VxUbXb', 'aPya6c', 'cCSu7', 'cYRIkd',
+      'ku4Jyf', 'maGuAc', 'o30O0e', 'otAQ7b', 'ozz5Z', 'sJBwce', 'whPPme'
+    ];
+    const absentNullOr = (v, f) => v === undefined || v === null || f(v);
+    // An anti-abuse token: base64 (standard or URL-safe), padding, `~`.
+    const tokenOk = (v, max) => typeof v === 'string' && v.length <= max && /^[A-Za-z0-9+/=_~-]+$/.test(v);
+    // A short id or setting word: letters, digits, `-`, `_`, `.` (a timezone
+    // also `/` and `+`); at most MAX_WORD bytes.
+    const wordOk = (v, tz) => typeof v === 'string' && v.length <= MAX_WORD &&
+      (tz ? /^[A-Za-z0-9._/+-]+$/ : /^[A-Za-z0-9._-]+$/).test(v);
+    const word = (v) => wordOk(v, false);
+    // A short opaque token the server minted: a word that may also hold
+    // standard base64's `+`, `/` and `=`.
+    const tokenWordOk = (v) => typeof v === 'string' && v.length <= MAX_WORD && /^[A-Za-z0-9._+/=-]+$/.test(v);
+    const sentinelPrepare = (v) => isObj(v) && onlyKeys(v, ['p']) && tokenOk(get(v, 'p'), SENTINEL_P);
+    const sentinelFinalize = (v) => isObj(v) &&
+      onlyKeys(v, ['prepare_token', 'proofofwork', 'turnstile']) &&
+      tokenOk(get(v, 'prepare_token'), SENTINEL_PREPARE_TOKEN) &&
+      absentNullOr(get(v, 'proofofwork'), (x) => tokenOk(x, SENTINEL_POW)) &&
+      absentNullOr(get(v, 'turnstile'), (x) => tokenOk(x, SENTINEL_TURNSTILE));
+    const chatgptInit = (v) => isObj(v) &&
+      onlyKeys(v, ['conversation_id', 'conversation_origin', 'gizmo_id', 'requested_default_model',
+        'system_hints', 'timezone', 'timezone_offset_min']) &&
+      absentNullOr(get(v, 'conversation_id'), word) &&
+      absentNullOr(get(v, 'conversation_origin'), word) &&
+      absentNullOr(get(v, 'gizmo_id'), word) &&
+      absentNullOr(get(v, 'requested_default_model'), word) &&
+      absentNullOr(get(v, 'system_hints'), (x) => Array.isArray(x) && x.length <= MAX_SHORT_LIST && x.every(word)) &&
+      absentNullOr(get(v, 'timezone'), (x) => wordOk(x, true)) &&
+      absentNullOr(get(v, 'timezone_offset_min'), (x) => typeof x === 'number');
+    // ChatGPT's live-update socket: /ws/user/<id>, or behind one shard segment.
+    const chatgptWsRoute = (p) => {
+      const seg = p.split('/');
+      const tail = seg.length === 5 && word(seg[1]) ? seg.slice(2) : seg.slice(1);
+      return seg[0] === '' && tail.length === 3 && tail[0] === 'ws' && tail[1] === 'user' && word(tail[2]);
+    };
+    const presenceState = (x) => x === 'foreground' || x === 'background';
+    const chatgptWs = (v) => Array.isArray(v) && v.length > 0 && v.length <= MAX_SHORT_LIST && v.every((c) => {
+      if (!isObj(c)) return false;
+      const cmd = get(c, 'command');
+      if (!isObj(cmd)) return false;
+      const type = get(cmd, 'type');
+      return onlyKeys(c, ['command', 'id']) && typeof get(c, 'id') === 'number' &&
+        onlyKeys(cmd, ['type', 'state', 'presence', 'topic_id', 'metadata']) &&
+        (type === 'connect' || type === 'subscribe' || type === 'unsubscribe' || type === 'presence') &&
+        absentNullOr(get(cmd, 'state'), presenceState) &&
+        absentNullOr(get(cmd, 'topic_id'), word) &&
+        absentNullOr(get(cmd, 'presence'), (pr) => isObj(pr) && onlyKeys(pr, ['state', 'type']) &&
+          absentNullOr(get(pr, 'state'), presenceState) && absentNullOr(get(pr, 'type'), (t) => t === 'presence')) &&
+        absentNullOr(get(cmd, 'metadata'), (m) => isObj(m) &&
+          onlyKeys(m, ['codex_usage_push', 'codex_usage_client']) &&
+          absentNullOr(get(m, 'codex_usage_push'), (x) => typeof x === 'boolean') &&
+          absentNullOr(get(m, 'codex_usage_client'), word));
+    });
+    // Nulls, booleans, numbers and short words, in arrays.
+    const settingsTree = (v) => {
+      if (v === null || typeof v === 'boolean' || typeof v === 'number') return true;
+      if (typeof v === 'string') return word(v);
+      if (Array.isArray(v)) return v.every(settingsTree);
+      return false;
+    };
+    // Gemini web's listed settings RPCs: f.req=[[[rpcid, "<args>", null, "generic"], …]].
+    const geminiBatch = (body) => {
+      const freq = geminiForm(body);
+      if (freq === undefined) return false;
+      const po = parseJson(freq);
+      if (po === undefined) return false;
+      const outer = po.v;
+      if (!Array.isArray(outer) || outer.length !== 1 || !Array.isArray(outer[0])) return false;
+      const calls = outer[0];
+      return calls.length > 0 && calls.length <= MAX_RPC_CALLS && calls.every((c) => {
+        if (!Array.isArray(c) || c.length !== 4) return false;
+        const id = c[0];
+        const args = c[1];
+        const tag = c[3];
+        if (!GEMINI_RPCS.includes(id) || typeof args !== 'string' || c[2] !== null || typeof tag !== 'string') return false;
+        if (!(tag === 'generic' || /^[0-9]{1,4}$/.test(tag))) return false;
+        if (utf8Len(args) > MAX_RPC_ARGS) return false;
+        const pa = parseJson(args);
+        return pa !== undefined && settingsTree(pa.v);
+      });
+    };
+    // Gemini web's attestation handshake: ["<client id>"].
+    const waaCreate = (body) => {
+      const r = parseJson(body);
+      return r !== undefined && Array.isArray(r.v) && r.v.length === 1 && tokenOk(r.v[0], MAX_WORD);
+    };
+    // Google's cookie rotation: [<n>, "<digits>"].
+    const rotateCookies = (v) => Array.isArray(v) && v.length === 2 && typeof v[0] === 'number' &&
+      typeof v[1] === 'string' && v[1].length <= 32 && /^[0-9-]+$/.test(v[1]);
+    // Claude Code's bodyless configuration reads (the proxy's; parity only).
+    const claudeCodeConfigRoute = (p) => {
+      if (p === '/api/claude_cli/bootstrap' || p === '/api/claude_code/policy_limits' ||
+        p === '/api/claude_code/settings' || p === '/api/claude_code_penguin_mode') return true;
+      const seg = p.split('/');
+      return seg.length === 6 && seg[0] === '' && seg[1] === 'api' && seg[2] === 'organizations' &&
+        word(seg[3]) && seg[4] === 'model_selector' && seg[5] === 'cc';
+    };
+
+    // ── claude.ai Connect RPC (since 2026-11-11) ──
+    // A protobuf PerformActionRequest, its reply over StreamTimeline. Every
+    // field is one seen on the wire (LibreWolf HAR, 2026-11-22): a message
+    // holds only its listed fields, each once (a repeated one at most
+    // MAX_RPC_REPEATED times), with its kind's wire type and value. A field
+    // nobody listed — sendMessage field 15, the attachment — holds it.
+    const MAX_RPC_REPEATED = 256;
+    const MAX_TOOL_KEY = 160;
+    const MAX_RPC_NONCE = 64;
+    // A canonical varint of at most 5 bytes and 2^32-1.
+    const pbVarint = (b, st) => {
+      let x = 0;
+      for (let k = 0; k < 5; k++) {
+        if (st.i >= b.length) return undefined;
+        const c = b[st.i++];
+        x += (c & 0x7f) * 2 ** (7 * k);
+        if ((c & 0x80) === 0) return (k === 0 || c !== 0) && x <= 0xffffffff ? x : undefined;
+      }
+      return undefined;
+    };
+    // A message's fields; undefined for anything but well-formed varint and
+    // length-delimited fields numbered from 1.
+    const pbFields = (b) => {
+      const out = [];
+      const st = { i: 0 };
+      while (st.i < b.length) {
+        const tag = pbVarint(b, st);
+        if (tag === undefined) return undefined;
+        const field = Math.floor(tag / 8);
+        const wire = tag % 8;
+        if (field === 0) return undefined;
+        if (wire === 0) {
+          const v = pbVarint(b, st);
+          if (v === undefined) return undefined;
+          out.push([field, 'v', v]);
+        } else if (wire === 2) {
+          const n = pbVarint(b, st);
+          if (n === undefined || st.i + n > b.length) return undefined;
+          out.push([field, 'l', b.subarray(st.i, st.i + n)]);
+          st.i += n;
+        } else return undefined;
+      }
+      return out;
+    };
+    const utf8 = (b) => { try { return fatal.decode(b); } catch { return undefined; } };
+    const TOOL_KEY_BYTE = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ||
+      c === 45 || c === 95 || c === 46 || c === 58;
+    const pbKindOk = (kind, w, v) => {
+      if (kind === 'flag') return w === 'v' && v <= 1;
+      if (kind === 'small') return w === 'v' && v <= 1023;
+      if (kind === 'count') return w === 'v';
+      if (w !== 'l') return false;
+      if (kind === 'word') return wordOk(utf8(v), false);
+      if (kind === 'zone') return wordOk(utf8(v), true);
+      if (kind === 'token') return tokenWordOk(utf8(v));
+      if (kind === 'text') return utf8(v) !== undefined;
+      if (kind === 'nonce') return v.length > 0 && v.length <= MAX_RPC_NONCE;
+      if (kind === 'toolKey') return v.length > 0 && v.length <= MAX_TOOL_KEY && v.every(TOOL_KEY_BYTE);
+      if (kind === 'empty') return v.length === 0;
+      if (kind === 'optWord') return v.length === 0 || wordOk(utf8(v), false);
+      if (kind === 'attest') return v.length > 0 && v.length <= MAX_ATTEST && v.every(ATTEST_BYTE);
+      return Array.isArray(kind) && pbMsg(v, kind) !== undefined;
+    };
+    // `b` is a message of `schema`'s fields ([number, kind, repeated]); the
+    // field numbers it holds.
+    const pbMsg = (b, schema) => {
+      const fs = pbFields(b);
+      if (fs === undefined) return undefined;
+      const seen = [];
+      for (const [n, w, v] of fs) {
+        const f = schema.find((x) => x[0] === n);
+        if (!f) return undefined;
+        const times = seen.filter((x) => x === n).length;
+        if (times >= (f[2] ? MAX_RPC_REPEATED : 1)) return undefined;
+        if (!pbKindOk(f[1], w, v)) return undefined;
+        seen.push(n);
+      }
+      return seen;
+    };
+    const { CAI_PERFORM, CAI_TIMELINE, CAI_REPORT_VIEWING, CAI_CREDENTIALS } = FAIL_OPEN_RPC;
+    const CAI_RPC = '/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/';
+    const CAI_CREDENTIALS_ROUTE = '/claudeai-rpc/anthropic.claudeai_b2b.v1.ConsoleService/ListAgentCredentialApprovalRequests';
+    // A Connect streaming request's one message: one envelope, flags 0, its
+    // length exactly the rest.
+    const connectMessage = (b) => {
+      if (b.length < 5) return undefined;
+      const len = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint32(1);
+      return b[0] === 0 && len === b.length - 5 ? b.subarray(5) : undefined;
+    };
+    // A claude.ai Connect RPC request: true/false on one of its routes,
+    // undefined on any other. Only protobuf is read: the browser sends JSON
+    // only as a retry after a protobuf send the server refused.
+    const claudeRpc = (method, host, path, media, bytes) => {
+      if (method !== 'POST' || host !== 'claude.ai') return undefined;
+      const proto = media === 'application/proto';
+      if (path === CAI_CREDENTIALS_ROUTE) {
+        const f = pbMsg(bytes, CAI_CREDENTIALS);
+        return proto && f !== undefined && f.length === 1 && f[0] === 1;
+      }
+      if (!path.startsWith(CAI_RPC)) return undefined;
+      const m = path.slice(CAI_RPC.length);
+      if (m === 'PerformAction') {
+        if (!proto) return false;
+        const f = pbMsg(bytes, CAI_PERFORM);
+        return f !== undefined && f.includes(1) && (f.includes(2) !== f.includes(15));
+      }
+      if (m === 'StreamTimeline') {
+        if (media !== 'application/connect+proto') return false;
+        const msg = connectMessage(bytes);
+        return msg !== undefined && pbMsg(msg, CAI_TIMELINE) !== undefined;
+      }
+      if (m === 'GetNewConversationDefaults') return proto && bytes.length === 0;
+      if (m === 'ReportViewing') return proto && pbMsg(bytes, CAI_REPORT_VIEWING) !== undefined;
+      return false;
+    };
+
+    // ── Gemini web over WebChannel (since 2026-11) ──
+    // A WebChannel form to geminiweb-pa …/v1/processSession whose frames are
+    // base64 protobuf (FAIL_OPEN_RPC.GPS_FRAME): request, prompt echo,
+    // acknowledgement. The prompt is the only free text; an unlisted field —
+    // where a file or image reference would ride — holds it.
+    const GEMINI_PS_HOST = 'geminiweb-pa.clients6.google.com';
+    const GEMINI_PS_ROUTE = '/v1/processSession';
+    const SIGNALER_HOST = 'signaler-pa.clients6.google.com';
+    const MAX_WEBCHANNEL_QUERY = 4096;
+    const MAX_WC_FRAMES = 16;
+    const MAX_ATTEST = 8192;
+    const ATTEST_BYTE = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ||
+      c === 33 || c === 45 || c === 95;
+    // A WebChannel POST form: count, optionally ofs, req<i>___data__ for every
+    // i below count, each read by `frame`; an empty pair is no field.
+    const webchannelForm = (formBody, frame) => {
+      const digits = (x, max) => x.length <= max && /^[0-9]+$/.test(x);
+      let count;
+      let ofs = false;
+      const frames = [];
+      for (const pair of formBody.split('&').filter((x) => x !== '')) {
+        const eq = pair.indexOf('=');
+        const k = formDecode(eq < 0 ? pair : pair.slice(0, eq));
+        const v = formDecode(eq < 0 ? '' : pair.slice(eq + 1));
+        if (k === undefined || v === undefined) return false;
+        if (k === 'count' && count === undefined && digits(v, 2)) { count = Number(v); continue; }
+        if (k === 'ofs' && !ofs && digits(v, 9)) { ofs = true; continue; }
+        const mm = /^req(.*)___data__$/.exec(k);
+        if (!mm || !digits(mm[1], 2)) return false;
+        const i = Number(mm[1]);
+        if (frames.some(([j]) => j === i)) return false;
+        frames.push([i, v]);
+      }
+      return count !== undefined && count <= MAX_WC_FRAMES && frames.length === count &&
+        frames.every(([i, v]) => i < count && frame(v));
+    };
+    const geminiPsFrame = (v) => {
+      const b = FAIL_OPEN_B64(v);
+      if (b === undefined) return false;
+      const f = pbMsg(b, FAIL_OPEN_RPC.GPS_FRAME);
+      return f !== undefined && f.length === 1;
+    };
+    // A push-channel frame or body: settings-only JSON.
+    const signalerFrame = (v) => {
+      if (utf8Len(v) > MAX_RPC_ARGS) return false;
+      const r = parseJson(v);
+      return r !== undefined && settingsTree(r.v);
+    };
+
+    // The query string is settings too: short, each value a setting, no
+    // parameter named for an attachment.
+    const queryOk = (query, max) => {
+      const q = query.split('#')[0];
+      return utf8Len(q) <= max && q.split('&').filter((p) => p !== '').every((pair) => {
+        const eq = pair.indexOf('=');
+        const k = formDecode(eq < 0 ? pair : pair.slice(0, eq));
+        const v = formDecode(eq < 0 ? '' : pair.slice(eq + 1));
+        if (k === undefined || v === undefined) return false;
+        return (!denyKey(k) || v === '') && opaqueStringOk(v);
+      });
+    };
+
+    // ── framing: any doubt is a hold ──
+    const releasable = () => {
+      opaqueB.left = MAX_OPAQUE_TOTAL;
+      if (raw == null || typeof raw.subarray !== 'function' || typeof raw.length !== 'number') return false;
+      let split = -1;
+      for (let i = 0; i + 3 < raw.length; i++) {
+        if (raw[i] === 13 && raw[i + 1] === 10 && raw[i + 2] === 13 && raw[i + 3] === 10) { split = i; break; }
+      }
+      if (split < 0) return false;
+      const head = fatal.decode(raw.subarray(0, split));
+      if (raw.length - (split + 4) > MAX_RELEASABLE_BODY) return false;
+      const bytes = raw.subarray(split + 4);
+      // The body as text; undefined when it is not UTF-8 (only a protobuf
+      // route reads such a body — every other shape holds it).
+      let body;
+      try { body = fatal.decode(bytes); } catch { body = undefined; }
+      const lines = head.split('\r\n');
+      const parts = lines[0].split(' ');
+      if (parts.length !== 3) return false;
+      const [method, target, version] = parts;
+      if (version !== 'HTTP/1.1' || !target.startsWith('/')) return false;
+      const qi = target.indexOf('?');
+      const path = (qi < 0 ? target : target.slice(0, qi)).split('#')[0];
+      let host;
+      let ct;
+      let ce = false;
+      for (const line of lines.slice(1)) {
+        if (line.includes('\n') || line.includes('\r')) return false;
+        const c = line.indexOf(':');
+        if (c < 0) return false;
+        const name = line.slice(0, c);
+        if (!/^[A-Za-z0-9-]+$/.test(name)) return false;
+        const value = lower(rtrim(line.slice(c + 1)));
+        switch (lower(name)) {
+          case 'host': if (host !== undefined) return false; host = value; break;
+          case 'content-type': if (ct !== undefined) return false; ct = value; break;
+          case 'content-encoding': ce = ce || (value !== '' && value !== 'identity'); break;
+          case 'transfer-encoding': return false;
+          default:
+        }
+      }
+      if (ce || host === undefined) return false;
+      if (host.endsWith(':443')) host = host.slice(0, -4);
+      if (host === '' || host.includes(':')) return false;
+      // Gemini's WebChannel handshake carries its auth headers in the query.
+      const maxQuery = `${host}${path}` === GEMINI_PS_HOST + GEMINI_PS_ROUTE ? MAX_WEBCHANNEL_QUERY : MAX_QUERY;
+      if (!queryOk(qi < 0 ? '' : target.slice(qi + 1), maxQuery)) return false;
+      let media;
+      if (ct !== undefined) {
+        const it = ct.split(';');
+        media = rtrim(it[0]);
+        for (const param of it.slice(1).map(rtrim)) {
+          if (param === '' || param === 'charset=utf-8' || param === 'charset="utf-8"') continue;
+          return false;
+        }
+      }
+      // claude.ai's Connect RPC reads bytes; every other route reads text.
+      const rpc = claudeRpc(method, host, path, media, bytes);
+      if (rpc !== undefined) return rpc;
+      if (body === undefined) return false;
+      const json = () => {
+        let declared;
+        if (media !== undefined) declared = media === 'application/json';
+        else declared = method === 'WS-SEND';
+        if (!declared) return undefined;
+        const r = parseJson(body);
+        return r ? r.v : undefined;
+      };
+      const j = (f) => { const v = json(); return v !== undefined && f(v); };
+      const h = host;
+      const p = path;
+      if (method === 'POST' && h === 'api.anthropic.com' && (p === '/v1/messages' || p === '/v1/messages/count_tokens')) {
+        return j(anthropic);
+      }
+      if (method === 'POST' && h === 'claude.ai') {
+        const route = claudeAiRoute(p);
+        return route !== null && j((v) => claudeAi(route, v));
+      }
+      if (method === 'POST' && (h === 'chatgpt.com' || h === 'chat.openai.com')) {
+        if (p === '/backend-api/codex/responses') return j((v) => responses(v, false));
+        // Logged in (/backend-api) and logged out (/backend-anon) send the same calls.
+        let route;
+        if (p.startsWith('/backend-api')) route = p.slice('/backend-api'.length);
+        else if (p.startsWith('/backend-anon')) route = p.slice('/backend-anon'.length);
+        else return false;
+        if (route === '/conversation' || route === '/f/conversation') return j((v) => chatgpt(v, true));
+        if (route === '/conversation/prepare' || route === '/f/conversation/prepare') return j((v) => chatgpt(v, false));
+        if (route === '/conversation/init') return j(chatgptInit);
+        if (route === '/sentinel/chat-requirements/prepare') return j(sentinelPrepare);
+        if (route === '/sentinel/chat-requirements/finalize') return j(sentinelFinalize);
+        return false;
+      }
+      if (method === 'WS-SEND' && h === 'chatgpt.com' && p === '/backend-api/codex/responses') {
+        return j((v) => responses(v, true));
+      }
+      if (method === 'WS-SEND' && h === 'ws.chatgpt.com' && chatgptWsRoute(p)) {
+        return j(chatgptWs);
+      }
+      if (method === 'POST' && h === 'gemini.google.com') {
+        const form = media === 'application/x-www-form-urlencoded';
+        if (p === GEMINI_PATH) return form && geminiWeb(body);
+        if (p === '/_/BardChatUi/data/batchexecute') return form && geminiBatch(body);
+        return false;
+      }
+      if (method === 'POST' && h === GEMINI_PS_HOST && p === GEMINI_PS_ROUTE) {
+        return media === 'application/x-www-form-urlencoded' && webchannelForm(body, geminiPsFrame);
+      }
+      if (method === 'POST' && h === SIGNALER_HOST) {
+        if (p === '/punctual/multi-watch/channel') {
+          return media === 'application/x-www-form-urlencoded' && webchannelForm(body, signalerFrame);
+        }
+        if (p === '/punctual/v1/chooseServer' || p === '/punctual/v1/refreshCreds') {
+          return media === 'application/json+protobuf' && signalerFrame(body);
+        }
+        return false;
+      }
+      if (method === 'POST' && h === 'waa-pa.clients6.google.com' && p === '/$rpc/google.internal.waa.v1.Waa/Create') {
+        return media === 'application/json+protobuf' && waaCreate(body);
+      }
+      if (method === 'POST' && h === 'accounts.google.com' && p === '/RotateCookies') {
+        return j(rotateCookies);
+      }
+      if (method === 'GET' && h === 'api.anthropic.com') {
+        return body === '' && claudeCodeConfigRoute(p);
+      }
+      if (method === 'POST' && (h === 'duck.ai' || h === 'duckduckgo.com') && p === '/duckchat/v1/chat') {
+        return j(duck);
+      }
+      if (method === 'POST' && h === 'api.openai.com') {
+        if (p === '/v1/chat/completions') return j(chatCompletions);
+        if (p === '/v1/responses') return j((v) => responses(v, false));
+        return false;
+      }
+      if (method === 'POST' && h === 'generativelanguage.googleapis.com' && geminiApiRoute(p)) {
+        return j(geminiApi);
+      }
+      return false;
+    };
+    try { return releasable(); } catch { return false; }
+  }
+
+  // The rule's own name for a route it reads — its template, the segments it
+  // matches by wildcard as `:x` — else '-'. Built only from the rule's
+  // literals: nothing of the path (an e-mail address, a file name, an id, a
+  // search term) ever comes out. For a fail-open hold's log line. A port of
+  // Proxy src/fail_open_shape.rs `route_template`.
+  function failOpenRouteTemplate(method, host, path) {
+    const m = String(method || '');
+    let h = String(host || '').trim().toLowerCase();
+    if (h.endsWith(':443')) h = h.slice(0, -4);
+    const p = String(path || '');
+    const seg = p.split('/');
+    const word = (s) => typeof s === 'string' && s.length <= 64 && /^[A-Za-z0-9._-]+$/.test(s);
+    if (m === 'POST' && h === 'api.anthropic.com') {
+      if (p === '/v1/messages') return '/v1/messages';
+      if (p === '/v1/messages/count_tokens') return '/v1/messages/count_tokens';
+      return '-';
+    }
+    if (m === 'GET' && h === 'api.anthropic.com') {
+      for (const r of ['/api/claude_cli/bootstrap', '/api/claude_code/policy_limits', '/api/claude_code/settings',
+        '/api/claude_code_penguin_mode']) {
+        if (p === r) return r;
+      }
+      if (seg.length === 6 && seg[0] === '' && seg[1] === 'api' && seg[2] === 'organizations' && word(seg[3]) &&
+        seg[4] === 'model_selector' && seg[5] === 'cc') return '/api/organizations/:x/model_selector/cc';
+      return '-';
+    }
+    if (m === 'POST' && h === 'claude.ai') {
+      const cred = '/claudeai-rpc/anthropic.claudeai_b2b.v1.ConsoleService/ListAgentCredentialApprovalRequests';
+      if (p === cred) return cred;
+      const rpcBase = '/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/';
+      for (const r of ['PerformAction', 'StreamTimeline', 'GetNewConversationDefaults', 'ReportViewing']) {
+        if (p === rpcBase + r) return rpcBase + r;
+      }
+      if (seg.length === 7 && seg[0] === '' && seg[1] === 'api' && seg[2] === 'organizations' && seg[3] !== '' &&
+        seg[4] === 'chat_conversations' && seg[5] !== '') {
+        for (const leaf of ['completion', 'retry_completion', 'title']) {
+          if (seg[6] === leaf) return `/api/organizations/:x/chat_conversations/:x/${leaf}`;
+        }
+      }
+      return '-';
+    }
+    if (m === 'POST' && (h === 'chatgpt.com' || h === 'chat.openai.com')) {
+      if (p === '/backend-api/codex/responses') return '/backend-api/codex/responses';
+      for (const prefix of ['/backend-api', '/backend-anon']) {
+        for (const r of ['/conversation', '/f/conversation', '/conversation/prepare', '/f/conversation/prepare',
+          '/conversation/init', '/sentinel/chat-requirements/prepare', '/sentinel/chat-requirements/finalize']) {
+          if (p === prefix + r) return prefix + r;
+        }
+      }
+      return '-';
+    }
+    if (m === 'WS-SEND' && h === 'chatgpt.com' && p === '/backend-api/codex/responses') return '/backend-api/codex/responses';
+    if (m === 'WS-SEND' && h === 'ws.chatgpt.com') {
+      const sharded = seg.length === 5 && word(seg[1]);
+      const tail = sharded ? seg.slice(2) : seg.slice(1);
+      if (seg[0] === '' && tail.length === 3 && tail[0] === 'ws' && tail[1] === 'user' && word(tail[2])) {
+        return sharded ? '/:x/ws/user/:x' : '/ws/user/:x';
+      }
+      return '-';
+    }
+    if (m === 'POST' && h === 'gemini.google.com') {
+      for (const r of ['/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate', '/_/BardChatUi/data/batchexecute']) {
+        if (p === r) return r;
+      }
+      return '-';
+    }
+    if (m === 'POST' && h === 'waa-pa.clients6.google.com' && p === '/$rpc/google.internal.waa.v1.Waa/Create') {
+      return '/$rpc/google.internal.waa.v1.Waa/Create';
+    }
+    if (m === 'POST' && h === 'accounts.google.com' && p === '/RotateCookies') return '/RotateCookies';
+    if (m === 'POST' && h === 'geminiweb-pa.clients6.google.com' && p === '/v1/processSession') return '/v1/processSession';
+    if (m === 'POST' && h === 'signaler-pa.clients6.google.com') {
+      for (const r of ['/punctual/multi-watch/channel', '/punctual/v1/chooseServer', '/punctual/v1/refreshCreds']) {
+        if (p === r) return r;
+      }
+      return '-';
+    }
+    if (m === 'POST' && (h === 'duck.ai' || h === 'duckduckgo.com') && p === '/duckchat/v1/chat') return '/duckchat/v1/chat';
+    if (m === 'POST' && h === 'api.openai.com') {
+      if (p === '/v1/chat/completions') return '/v1/chat/completions';
+      if (p === '/v1/responses') return '/v1/responses';
+      return '-';
+    }
+    if (m === 'POST' && h === 'generativelanguage.googleapis.com' && seg.length === 4 && seg[0] === '' &&
+      seg[1].startsWith('v') && seg[2] === 'models') {
+      const i = seg[3].indexOf(':');
+      if (i > 0) {
+        const verb = seg[3].slice(i + 1);
+        for (const v of ['generateContent', 'streamGenerateContent', 'countTokens']) {
+          if (verb === v) return `/:x/models/:x:${v}`;
+        }
+      }
+    }
+    return '-';
+  }
+  // </releasableUnderFailOpen>
 
   // The ONE relay code that lets a request through: `locke-signed-out`. The
   // native host sends it only when its connection to Locke failed AND the
@@ -1762,15 +2999,28 @@
     return true;
   }
 
-  function decide(res, coverage, scope, url) {
+  // `releasable`: may this request go out unscreened (releasableUnderFailOpen on
+  // its raw bytes, never for an upload scope). Under fail-open anything not
+  // releasable is HELD; an unchecked pass from a receipt is judged too. Defaults
+  // to false so a caller that forgets it holds. `bodyless` is the URL-query
+  // path only: no body can ride a query, it sends on our own failure as it
+  // always has, and a redaction there is a rewritten request line.
+  function decide(res, coverage, scope, url, releasable = false, bodyless = false) {
     const waitedMs = res.elapsedMs;
-    if (res.outcome === 'timeout' && failOpenActive()) return failOpenSend('verdict-timeout', waitedMs);
-    if (res.outcome === 'channel-failed' && failOpenActive()) return failOpenSend('verdict-channel-failed', waitedMs);
+    const held = (cause) => ({ action: 'block', reason: FILE_HELD, fields: { waitedMs, cause } });
+    if (bodyless) releasable = true;
+    if (res.outcome === 'timeout' && failOpenActive()) {
+      return releasable ? failOpenSend('verdict-timeout', waitedMs) : held('verdict-timeout');
+    }
+    if (res.outcome === 'channel-failed' && failOpenActive()) {
+      return releasable ? failOpenSend('verdict-channel-failed', waitedMs) : held('verdict-channel-failed');
+    }
     if (res.outcome === 'verdict' && failOpenActive()) {
       const v0 = res.verdict;
-      if (!v0) return failOpenSend('verdict-missing', waitedMs);
+      if (!v0) return releasable ? failOpenSend('verdict-missing', waitedMs) : held('verdict-missing');
       if (v0.ok !== true && !RELAY_CODES_KEEP_BLOCKING.has(v0.code)) {
-        return failOpenSend(`relay-${clip(v0.code) || 'unknown'}`, waitedMs);
+        const cause = `relay-${clip(v0.code) || 'unknown'}`;
+        return releasable ? failOpenSend(cause, waitedMs) : held(cause);
       }
     }
     if (res.outcome === 'timeout') {
@@ -1917,6 +3167,10 @@
       // An allow can never be a withhold, so unscreened items on an allow
       // SHIPPED. Either signal — the flag or the items — means unchecked.
       if (r.unchecked === true || unscreened.length > 0) {
+        // Never trust an unchecked pass (mixed versions): a host that has not
+        // learned the rule may have let an upload through. Judged here, with
+        // or without a fail-open window.
+        if (!releasable) return held('unchecked-pass');
         return {
           action: 'send',
           reason: 'allow-unchecked',
@@ -1938,6 +3192,8 @@
       const unscreened = unscreenedList(r);
       const base = { waitedMs, redactedCount: r.redactedCount ?? null, guardReason: clip(r.reason) };
       if (r.unchecked === true) {
+        // The same, on the request that would go out: the rebuilt bytes.
+        if (!bodyless && !rebuiltReleasable(r.requestB64)) return held('unchecked-pass');
         return {
           action: 'redact',
           reason: 'redact-unchecked',
@@ -1970,6 +3226,7 @@
       // whose reason also matches nothing falls through to the policy
       // wording, which still blocks.
       const fields = { waitedMs, guardReason: clip(r.reason) };
+      if (r.reason === FILE_HELD_REASON) return { action: 'block', reason: FILE_HELD, fields: { waitedMs, cause: 'host-receipt' } };
       return isInfrastructureBlock(r)
         ? { action: 'block', reason: 'screening-unavailable', fields }
         : { action: 'block', reason: 'decision-block', fields };
@@ -2152,6 +3409,11 @@
     // The desktop app answered us, so "start it" would be the wrong advice.
     'screening-timeout': ['unavailable',
       'the on-device screener did not finish in time, so nothing was checked — this is NOT a sensitive-data block. Try again; if it keeps happening, check the Locke desktop app.'],
+
+    // Fail-open lets plain text through when screening is down; a request that
+    // may carry a file is held instead (zh#370). Nothing was sent.
+    'fail-open-file-held': ['unavailable',
+      'Locke couldn’t screen this request. With fail-open on, Locke only sends plain chat messages to AI sites it recognises, so this one was held. Remove any attachment to send now, or wait until screening is back.'],
 
     'verdict-timeout': ['unavailable',
       'the on-device screener did not answer in time, so nothing was checked — this is NOT a sensitive-data block. Check that the Locke desktop app is running, then try again.'],
@@ -2483,7 +3745,7 @@
       const raw = synthesizeRequest(method, url, headers, null, new Uint8Array(0), false);
       const coverage = coverageFor(url, scope);
       const res = await enforce(b64FromBytes(raw), providerFor(url, scope), consentGeneration, coverage);
-      const d = decide(res, coverage, scope, url);
+      const d = decide(res, coverage, scope, url, false, true); // bodyless: no file can ride a query
       if (d.action === 'redact') {
         const target = rebuiltTarget(res.verdict.receipt.requestB64);
         const next = target ? sameEndpoint(url, target) : null;
@@ -2972,6 +4234,11 @@
   function reporter(shape, startedAt) {
     return (level, reason, extra) => {
       const line = { ...shape, ...(extra || {}), ms: Date.now() - startedAt };
+      // A fail-open hold names its route only as the rule's own template, `-`
+      // for one the rule does not read (zh#370) — never the path's own text.
+      if (reason === FILE_HELD) {
+        line.route = shape.path == null ? '-' : failOpenRouteTemplate(shape.method, shape.host, shape.path);
+      }
       if (line.action === 'block') line.kind = blockKind(reason);
       (level === 'warn' ? warn : debug)(reason, line);
       // The MERGED line, not just `extra`: the shape carries `bytes`, and the
@@ -2994,12 +4261,19 @@
   // Both hooks report an uncapturable body identically — the reason travels on
   // the capture result, and the oversize case additionally names the cap it
   // exceeded.
-  function sayUncapturable(say, cap) {
-    say('warn', cap.reason, {
+  function sayUncapturable(say, cap, reason = cap.reason) {
+    say('warn', reason, {
       action: 'block',
       bytes: cap.byteLength ?? null,
-      capBytes: cap.reason === 'uncapturable-oversize' ? MAX_BODY : null
+      capBytes: cap.reason === 'uncapturable-oversize' ? MAX_BODY : null,
+      ...(reason !== cap.reason ? { cause: cap.reason } : {})
     });
+  }
+  // The reason an unreadable body is refused under: while the fail-open window
+  // is open it cannot be proven file-free, so it is HELD (FILE_HELD) rather than
+  // released as it was before zh#370; otherwise its own uncapturable reason.
+  function uncapturableReason(cap) {
+    return failOpenActive() ? FILE_HELD : cap.reason;
   }
 
   // ── raw request synthesis ───────────────────────────────────────────────
@@ -3199,17 +4473,11 @@
             // before it can leave. From here we NEVER send the original
             // unscreened body.
             committed = true;
-            if (cap.bytes == null && failOpenActive()) {
-              // The desktop app's fail-open window: send the original
-              // unscreened (releaseFrozenFetch below) and tally it.
-              action = 'send';
-              noteUncheckedSend(cap.reason);
-              say('warn', 'unchecked-fail-open', { action: 'send', cause: cap.reason, bytes: cap.byteLength ?? null, because: 'user-fail-open-window' });
-            } else if (cap.bytes == null) {
+            if (cap.bytes == null) {
               action = 'block'; // uncapturable body → fail closed, no round-trip
-              blockReason = cap.reason;
-              blockFields = { bytes: cap.byteLength ?? null };
-              sayUncapturable(say, cap);
+              blockReason = uncapturableReason(cap); // fail-open holds it too (zh#370)
+              blockFields = { bytes: cap.byteLength ?? null, ...(blockReason !== cap.reason ? { cause: cap.reason } : {}) };
+              sayUncapturable(say, cap, blockReason);
             } else {
               shape.bytes = cap.bytes.byteLength;
               if (!shape.ct) shape.ct = mediaType(cap.effectiveCt);
@@ -3233,7 +4501,7 @@
                 coverageFor(url, scope));
               const d = decide(!dataSharingAllowed || consentGeneration !== dataConsentGeneration
                 ? { outcome: 'verdict', verdict: { ok: false, code: 'data-consent-required' } } : res,
-              coverageFor(url, scope), scope, url);
+              coverageFor(url, scope), scope, url, scope !== SCOPE.UPLOAD && releasableUnderFailOpen(raw));
               action = d.action;
               let reason = d.reason;
               let extra = d.fields;
@@ -3507,14 +4775,12 @@
       // In scope with a body: hold it. A sync XHR can't be deferred → fail
       // closed before we spend anything on capture.
       const xhr = this;
-      if (!s.async && failOpenActive()) {
-        noteUncheckedSend('uncapturable-sync-xhr');
-        say('warn', 'unchecked-fail-open', { action: 'send', cause: 'uncapturable-sync-xhr', because: 'user-fail-open-window' });
-        return origSend.apply(this, arguments);
-      }
       if (!s.async) {
-        say('warn', 'uncapturable-sync-xhr', { action: 'block' });
-        blockXhr(xhr, 'uncapturable-sync-xhr');
+        // Cannot be held or read, so cannot be proven file-free: refused even
+        // in the fail-open window, under its own reason there (zh#370).
+        const syncReason = failOpenActive() ? FILE_HELD : 'uncapturable-sync-xhr';
+        say('warn', syncReason, { action: 'block', ...(syncReason !== 'uncapturable-sync-xhr' ? { cause: 'uncapturable-sync-xhr' } : {}) });
+        blockXhr(xhr, syncReason);
         return;
       }
 
@@ -3595,16 +4861,10 @@
           origSend.call(xhr, frozen);
           return;
         }
-        if (cap.bytes == null && failOpenActive()) {
-          noteUncheckedSend(cap.reason);
-          say('warn', 'unchecked-fail-open', { action: 'send', cause: cap.reason, bytes: cap.byteLength ?? null, because: 'user-fail-open-window' });
-          releaseXhr(xhr);
-          origSend.call(xhr, frozen);
-          return;
-        }
-        if (cap.bytes == null) { // uncapturable → fail closed
-          sayUncapturable(say, cap);
-          blockXhr(xhr, cap.reason, { bytes: cap.byteLength ?? null });
+        if (cap.bytes == null) { // uncapturable → fail closed (fail-open holds it too, zh#370)
+          const why = uncapturableReason(cap);
+          sayUncapturable(say, cap, why);
+          blockXhr(xhr, why, { bytes: cap.byteLength ?? null });
           return;
         }
         shape.bytes = cap.bytes.byteLength;
@@ -3620,7 +4880,7 @@
         const res = await enforce(b64FromBytes(raw), providerFor(s.url, scope), s.consentGeneration,
           coverageFor(s.url, scope));
         if (abandoned()) return;
-        const d = decide(res, coverageFor(s.url, scope), scope, s.url);
+        const d = decide(res, coverageFor(s.url, scope), scope, s.url, scope !== SCOPE.UPLOAD && releasableUnderFailOpen(raw));
         const veto = (d.action === 'redact' && scope === SCOPE.UPLOAD)
           ? uploadRedactVeto(d.reason, s.headers, unsigned != null) : null;
         if (veto) {
@@ -3724,13 +4984,11 @@
           // have landed yet and this reads as in scope — fail-closed, exactly
           // as before, and the window is the one it always was.
           inScope = isCapturePathUrl(target);
-          if (inScope && failOpenActive()) {
-            noteUncheckedSend('uncapturable-beacon');
-            say('warn', 'unchecked-fail-open', { action: 'send', cause: 'uncapturable-beacon', because: 'user-fail-open-window' });
-            return origSendBeacon.apply(this, arguments);
-          }
           if (inScope) {
-            say('warn', 'uncapturable-beacon', { action: 'block' });
+            // Cannot be held or read, so cannot be proven file-free: refused
+            // even in the fail-open window, under its own reason there (zh#370).
+            const bReason = failOpenActive() ? FILE_HELD : 'uncapturable-beacon';
+            say('warn', bReason, { action: 'block', ...(bReason !== 'uncapturable-beacon' ? { cause: 'uncapturable-beacon' } : {}) });
             return false;
           }
           // A beacon whose data is a user's FILE (a File, or a FormData
@@ -3835,14 +5093,12 @@
           return origFetchLater.apply(this, arguments);
         }
         const say = reporter(shape, Date.now());
-        if (refuse === 'uncapturable-deferred-fetch' && failOpenActive()) {
-          noteUncheckedSend(refuse);
-          say('warn', 'unchecked-fail-open', { action: 'send', cause: refuse, because: 'user-fail-open-window' });
-          return origFetchLater.apply(this, arguments);
-        }
         if (refuse) {
-          say('warn', refuse, { action: 'block' });
-          throw new TypeError(blockMessage(refuse, null));
+          // A deferred fetch cannot be held or read, so it cannot be proven
+          // file-free: refused even in the fail-open window (zh#370).
+          const dReason = refuse === 'uncapturable-deferred-fetch' && failOpenActive() ? FILE_HELD : refuse;
+          say('warn', dReason, { action: 'block', ...(dReason !== refuse ? { cause: refuse } : {}) });
+          throw new TypeError(blockMessage(dReason, null));
         }
         say('debug', 'not-in-scope', { action: 'send' });
         return origFetchLater.apply(this, arguments);
@@ -3998,21 +5254,17 @@
         return { action: 'send', payload: wsOriginal(snap) };
       }
       if (consentGone()) return { action: 'block', reason: 'data-consent-required' };
-      if (cap.bytes == null && failOpenActive()) {
-        noteUncheckedSend(cap.reason);
-        say('warn', 'unchecked-fail-open', { action: 'send', cause: cap.reason, bytes: cap.byteLength ?? null, because: 'user-fail-open-window' });
-        return { action: 'send', payload: wsOriginal(snap) };
-      }
       if (cap.bytes == null) {
-        sayUncapturable(say, cap);
-        return { action: 'block', reason: cap.reason, fields: { bytes: cap.byteLength ?? null } };
+        const why = uncapturableReason(cap); // fail-open holds it too (zh#370)
+        sayUncapturable(say, cap, why);
+        return { action: 'block', reason: why, fields: { bytes: cap.byteLength ?? null } };
       }
       const raw = synthesizeRequest('WS-SEND', url, {}, null, cap.bytes, false);
       const coverage = coverageFor(url, SCOPE.AI);
       const res = await enforce(b64FromBytes(raw), providerFor(url, SCOPE.AI), consentGeneration, coverage);
       const d = decide(consentGone()
         ? { outcome: 'verdict', verdict: { ok: false, code: 'data-consent-required' } } : res,
-      coverage, SCOPE.AI, url);
+      coverage, SCOPE.AI, url, releasableUnderFailOpen(raw));
       let { action, reason } = d;
       let extra = d.fields;
       let payload = wsOriginal(snap);

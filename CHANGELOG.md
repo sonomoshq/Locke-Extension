@@ -8,6 +8,47 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Fixed — fail-open is default deny (zh#370).** With the desktop app's
+fail-open window on, a request that could not be screened (the screener timed
+out, the channel failed, the relay errored, the body could not be read) was
+sent as-is, including requests carrying an attached file. Now only a known,
+prompt-only chat turn fails open: a catalogued host and route whose body
+parses into that surface's chat schema with no attachment anywhere
+(`releasableUnderFailOpen`, the same rule as the Proxy and the Bridge).
+Everything else (an unknown host or route, an upload, multipart, a body that
+does not parse, anything with an attachment-looking field, a WebSocket frame
+that is not a known chat frame, a body over 6 MiB, and every body we cannot
+read, beacons, deferred fetches and synchronous XHR) is held with the reason
+`fail-open-file-held`. The extension also no longer trusts an unchecked
+pass: an `allow` or `redact` receipt marked `unchecked` is re-checked against
+the same rule and held when it is not a known chat turn, with the window on or
+off (the user's pause is not re-judged).
+The rule also refuses a duplicate JSON key anywhere, an attachment-looking or
+base64 query string, non-ASCII keys, inline-data and `{mimeType, data}` blobs
+inside tool inputs, tool definitions and Gemini function calls, and bounds
+each message's settings separately; Codex tool outputs carrying
+`internal_chat_message_metadata_passthrough` are no longer held.
+A plain-text send now goes through end to end under fail-open: the
+content-free calls around the turn are released under exact shapes too
+(ChatGPT's sentinel `prepare` / `finalize`, `conversation/init` and its
+`ws.chatgpt.com` presence frames; Gemini web's settings RPCs, `Waa/Create` and
+`RotateCookies`). Before, ChatGPT showed "Unknown error" because its sentinel
+calls were held. Every `fail-open-file-held` console line now carries the
+request's `route` as the rule names it (its own template, `-` for a route it
+does not read; never the path's text). claude.ai's Connect RPC send (since
+2026-11-11) now goes through under fail-open too: a protobuf `PerformAction`
+carrying only the prompt, its reply stream and the page's content-free calls
+are read field by field and released; one carrying an attachment, any
+unlisted field, or sent as JSON is held. Gemini web's WebChannel send
+(`processSession`, since 2026-11) goes through too: its base64 protobuf
+frames are read field by field (the prompt the only free text; a file or
+image reference holds), its push channel and settings RPCs go out, and the
+trailing `&` Gemini now puts on its forms no longer holds them. A Gemini
+form with more than one `at` token is held (repeated, it could carry any
+amount of text). A Gemini send whose request metadata names an id (a
+short word; the first captures had it empty) goes through as well, and five
+more settings calls the page makes as it loads are listed.
+
 **Added — Google AI Mode from the search bar is screened.** Typing a prompt
 into Google's search box in AI Mode and pressing enter loads
 `/search?…&udm=50&q=<prompt>` as a page navigation, which left unscreened.
