@@ -7458,7 +7458,9 @@ test('fail-open round 4: ChatGPT web\'s real send goes out request by request; w
         if (!release) {
           const line = assertBlocked(w.logs, 'fail-open-file-held', 'unavailable');
           const u = new URL(url);
-          assert.match(line, new RegExp(`\\bhost=${u.hostname.replace(/\./g, '\\.')}\\b`), line);
+          // Every regex metacharacter, backslash included, so the hostname is matched as text.
+          const host = u.hostname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          assert.match(line, new RegExp(`\\bhost=${host}\\b`), line);
           // The rule's template for a route it reads, else `-`.
           assert.ok(/\broute=(\/|-(\s|$))/.test(line), line);
           assert.ok(!/sig=y|123-45-6789|notes\.csv|Ada/.test(line), line);
