@@ -62,3 +62,18 @@ secret in that file at any other commit, still fails the build.
 condition = "AND"
 commits = ["2abbc2e8d09a5c7b59c1ba054abc5b0b7b79106a"]
 paths = ['''^tests/shim\.test\.js$''']
+
+[[allowlists]]
+description = """
+The jwt.io sample token, as a fixture in tests/shim.test.js, commit 2254357.
+
+That commit (on fix/fail-open-files-370, still reachable from that branch, and
+gitleaks scans all history) used the public example JWT from jwt.io
+(HS256, {"sub":"1234567890"}, signed with the documented demo secret) to stand
+for "a JWT in an agent's tool result". It is published documentation and has
+never authenticated anything. Exempted by its exact value, so any other
+JWT-shaped string anywhere still fails the build.
+"""
+regexes = [
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c''',
+]
