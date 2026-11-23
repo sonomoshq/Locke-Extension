@@ -34,9 +34,12 @@
 // so (`unchecked`) and we say so too.
 //
 // THE ONE NARROW EXCEPTION, and it is not a fail-open window: when Locke is
-// DELIBERATELY SIGNED OUT the original request goes out, as
-// `locke-unreachable-unclassified`. The relay code for that is `locke-signed-out`
-// (UNREACHABLE_RELAY_CODES) and nothing else: the native host emits it only
+// DELIBERATELY SIGNED OUT, or has NEVER been set up in this browser, the
+// original request goes out, as `locke-unreachable-unclassified`. The relay
+// codes for that are `locke-signed-out` and `locke-not-set-up`
+// (UNREACHABLE_RELAY_CODES) and nothing else. `locke-not-set-up` comes from the
+// service worker only while this profile has never reached Locke and the
+// install is not managed by IT. `locke-signed-out`: the native host emits it only
 // when it could not connect to Locke AND the desktop app's capture lease says
 // the user signed out AND the machine has no team lock. `no-bridge` and
 // `bridge-unreachable` are NOT it: "unreachable" cannot be told from "Locke
@@ -1524,6 +1527,11 @@
     // Deliberately signed out. Blocks wherever the open-web pass (see
     // `decide()`) does not apply — AI hosts, uploads, local targets.
     'locke-signed-out': 'locke-signed-out',
+    // This browser has never reached the Locke desktop app and IT did not
+    // install the extension (background/service-worker.js noBridgeCode).
+    // Blocks wherever the open-web pass does not apply, with the one fix:
+    // get the app.
+    'locke-not-set-up': 'locke-not-set-up',
     'receipt-too-large': 'receipt-too-large',
     'no-bridge': 'connector-not-started',
     'bridge-empty': 'bridge-unreadable-reply',
@@ -1595,7 +1603,15 @@
   //   guard block. An unknown code blocks. The cost of a wrong entry is an
   //   unscreened AI prompt; the cost of a missing one is a blocked request
   //   with an honest reason.
-  const UNREACHABLE_RELAY_CODES = new Set(['locke-signed-out']);
+  //
+  // `locke-not-set-up` is the second, on the same narrow rule. The worker
+  // sends it in place of `no-bridge` only while this browser profile has
+  // NEVER reached Locke (no connected health check, no receipt, ever) and the
+  // install is not admin- or policy-managed. Nothing can have crashed
+  // mid-screen when nothing was ever screening, and without the pass a fresh
+  // store install with no desktop app blocked every login and checkout on the
+  // web. AI hosts, AI pages, uploads and local targets still block.
+  const UNREACHABLE_RELAY_CODES = new Set(['locke-signed-out', 'locke-not-set-up']);
 
   // Locke being signed out lets a request through only under the whole rule in
   // unreachableMayPass() below (open_web, API list loaded and not an AI API
@@ -1894,7 +1910,12 @@
         return {
           action: 'send',
           reason: 'locke-unreachable-unclassified',
-          fields: { waitedMs, code: clip(v.code), coverage, because: 'locke-signed-out-not-ai' }
+          fields: {
+            waitedMs,
+            code: clip(v.code),
+            coverage,
+            because: v.code === 'locke-not-set-up' ? 'locke-not-set-up-not-ai' : 'locke-signed-out-not-ai'
+          }
         };
       }
       const reason = RELAY_BLOCK_REASON[v.code] ?? 'native-call-failed';
@@ -2246,6 +2267,11 @@
     // model): those stay closed, and the one fix is to sign in.
     'locke-signed-out': ['unavailable',
       'Locke is signed out, so this request could not be screened — this is NOT a sensitive-data block. Sign in to the Locke desktop app, then try again.'],
+    // A fresh install with no desktop app behind it. Only reached for AI
+    // traffic (the open-web pass covers the rest), so the sentence names the
+    // missing piece and where to get it.
+    'locke-not-set-up': ['unavailable',
+      'Locke isn’t set up in this browser yet, so this AI request was held back — this is NOT a sensitive-data block. The Locke Extension needs the free Locke desktop app: get it at sonomos.ai/downloads, sign in, then try again.'],
     // The host and the screener both answered — a redaction was even found —
     // but the rebuilt body was too big for the native-messaging reply cap
     // (1 MB) and the host

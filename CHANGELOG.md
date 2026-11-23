@@ -8,6 +8,18 @@ strict SemVer.
 
 ## [Unreleased]
 
+**Changed — a fresh install without the desktop app no longer breaks the
+web.** Installed from a store with no Locke desktop app behind it, the
+extension used to hold every request with a body on every site, and its
+error told people to open an app they didn't have. Until this browser
+profile has reached Locke once, and when IT did not install it, non-AI
+requests now pass on the same narrow rule used when Locke is signed out; AI
+traffic still blocks, with a message naming the missing app. The popup reads
+"Not set up" with a link to sonomos.ai/downloads, and the data-sharing page
+links there too. Admin-installed and policy-configured extensions, and every
+install updated from an earlier version, keep the full fail-closed posture.
+See `HONEST.md`.
+
 **Added — Google AI Mode from the search bar is screened.** Typing a prompt
 into Google's search box in AI Mode and pressing enter loads
 `/search?…&udm=50&q=<prompt>` as a page navigation, which left unscreened.

@@ -127,6 +127,17 @@ verdict means no send. The residuals we accept and document:
     gate. The `web_screening: "none"` search hosts no longer get their old
     passthrough on their own pages: they are `catalog_host`, classified,
     and blocked in an outage like everything else.
+  - *Before the desktop app has ever been set up, ordinary websites pass.*
+    A fresh install in a browser profile that has never reached Locke (no
+    connected health check and no screening receipt, ever), and that IT did
+    not install or configure by policy, reports `locke-not-set-up` instead
+    of `no-bridge`. On that code the shim applies the same narrow open-web
+    pass as `locke-signed-out`: logins, checkouts and other non-AI requests
+    go out; AI hosts, AI pages, catalog API hosts, uploads and local model
+    servers still block, with a message that names the missing desktop app.
+    Nothing is screened in this state and the popup says so ("Not set up").
+    Once this profile has reached Locke once, and on every install that
+    predates this rule, a missing host is an outage and blocks as above.
   - *Latency on every bodied request.* Each one now makes a native-messaging
     round trip and a classification before it leaves, on every site.
   - *What cannot be held cannot be classified, so off a capture path it is

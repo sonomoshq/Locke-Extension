@@ -14,7 +14,9 @@ import {
   COVERAGE_WORDS,
   DEFAULTS,
   DISABLED_WEB_HOSTS_KEY,
+  EVER_CONNECTED_KEY,
   hostMatches,
+  LOCKE_NOT_SET_UP,
   MANAGED_KEYS,
   MSG,
   NATIVE_CALL_TIMEOUT_MS,
@@ -112,6 +114,46 @@ async function getSettings() {
   const managed = await getManagedSettings();
   // Precedence: DEFAULTS < user-local < managed. Managed always wins.
   return { ...DEFAULTS, ...(got?.[SETTINGS_KEY] ?? {}), ...managed };
+}
+
+// Has this browser profile ever reached the Locke desktop app? Read on the
+// no-bridge path only, so a storage read never sits on a healthy capture.
+// Any failure to read counts as "yes": the cost of a wrong yes is today's
+// fail-closed block, the cost of a wrong no is an unscreened non-AI request.
+async function everConnected() {
+  try {
+    const got = await ext.storage.local.get(EVER_CONNECTED_KEY);
+    return got?.[EVER_CONNECTED_KEY] === true;
+  } catch { return true; }
+}
+
+async function markEverConnected() {
+  try {
+    const got = await ext.storage.local.get(EVER_CONNECTED_KEY);
+    if (got?.[EVER_CONNECTED_KEY] === true) return;
+    await ext.storage.local.set({ [EVER_CONNECTED_KEY]: true });
+  } catch { /* retried on the next connected check */ }
+}
+
+// An administrator-installed or policy-configured extension keeps the full
+// fail-closed posture from the first request: IT pushed it on purpose and may
+// be relying on it before the desktop app lands. `management.getSelf` needs no
+// permission; any failure counts as managed, which keeps blocking.
+async function isManagedInstall() {
+  try {
+    if (Object.keys(await getManagedSettings()).length > 0) return true;
+    const self = await ext.management?.getSelf?.();
+    return self?.installType === 'admin';
+  } catch { return true; }
+}
+
+// The relay code for a browser that could not start the native host. Until
+// this profile has ever reached Locke, and when IT did not install it, that
+// means "the desktop app is not set up here yet", not "Locke went down".
+async function noBridgeCode() {
+  if (await everConnected()) return 'no-bridge';
+  if (await isManagedInstall()) return 'no-bridge';
+  return LOCKE_NOT_SET_UP;
 }
 
 async function getState() {
@@ -600,6 +642,10 @@ async function performCheck(_reason) {
 
     await storeFailOpen(result.failOpen);
 
+    if (result.status === STATUS.CONNECTED || result.status === STATUS.WARMING) {
+      await markEverConnected();
+    }
+
     const next = {
       status: result.status,
       httpStatus: result.httpStatus,
@@ -609,6 +655,10 @@ async function performCheck(_reason) {
       lastChange: statusChanged ? result.timestamp : prev.lastChange,
       error: result.error,
       consecutiveFailures,
+      // A browser that has never reached Locke, on an install IT didn't push:
+      // the popup says the app is missing and links to it, and the shim lets
+      // non-AI traffic through (LOCKE_NOT_SET_UP).
+      notSetUp: result.status === STATUS.NO_BRIDGE && (await noBridgeCode()) === LOCKE_NOT_SET_UP,
       // `result.screening` is the host's own live probe answer for THIS check
       // (shared/health-client.js::screeningFromStatus) — 'unavailable', or
       // null. There is deliberately no positive: the probe establishes
@@ -930,6 +980,7 @@ async function captureViaHost(requestB64, provider, coverage) {
       // Not awaited: the held request is waiting on this reply, and evidence
       // is never worth a millisecond of a user's send.
       noteScreening(evidenceFromReceipt(receipt), tallyFromReceipt(receipt));
+      void markEverConnected();
       return { ok: true, receipt };
     }
     if (response.type === 'error') {
@@ -970,7 +1021,7 @@ async function captureViaHost(requestB64, provider, coverage) {
       // request the health path fires; the internal throttle makes this a
       // no-op when one went out recently.
       void requestHostRegistration();
-      return { ok: false, code: 'no-bridge', message: e.message };
+      return { ok: false, code: await noBridgeCode(), message: e.message };
     }
     relayWarn('native-call-failed', { ms, b64Bytes, detail: clip(detail) });
     noteScreening(evidenceFromRelayFailure('bridge-error'), null);
@@ -1013,7 +1064,11 @@ async function ensureHealthAlarm() {
 }
 ensureHealthAlarm();
 
-ext.runtime.onInstalled.addListener(async () => {
+ext.runtime.onInstalled.addListener(async (details) => {
+  // An update keeps the posture the install already had: every install that
+  // predates EVER_CONNECTED_KEY is treated as paired, so it stays fail-closed.
+  // Only a fresh install starts out "not set up".
+  if (details?.reason === 'update') await markEverConnected();
   await showDataConsentIfNeeded().catch(() => {});
   await setState(initialState());
   await applyBadge(STATUS.UNKNOWN);

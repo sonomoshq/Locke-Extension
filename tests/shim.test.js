@@ -4910,7 +4910,59 @@ test('locke-signed-out: the copy is honest and the code is in the evidence lists
   assert.match(SHIM_SRC, /'locke-signed-out': \['unavailable',\s*'Locke is signed out, so this request could not be screened/);
   assert.ok(RELAY_FAILURES_PROVING_NO_SCREEN.includes('locke-signed-out'));
   assert.ok(RELAY_FAILURES_PROVING_NO_VERDICT.includes('bridge-dropped'));
-  assert.deepEqual(/const UNREACHABLE_RELAY_CODES = new Set\(\[([^\]]*)\]\)/.exec(SHIM_SRC)[1].trim(), "'locke-signed-out'");
+  assert.deepEqual(/const UNREACHABLE_RELAY_CODES = new Set\(\[([^\]]*)\]\)/.exec(SHIM_SRC)[1].trim(), "'locke-signed-out', 'locke-not-set-up'");
+});
+
+// `locke-not-set-up`: the service worker's code for a browser that has never
+// reached the desktop app (a fresh store install). Same narrow pass as
+// signed-out: logins and checkouts work, AI traffic still blocks, and the
+// block names the missing app.
+const NOT_SET_UP = 'locke-not-set-up';
+const NOT_SET_UP_COPY = /Locke isn’t set up in this browser yet.*sonomos\.ai\/downloads/;
+
+test('locke-not-set-up: open_web from a non-AI page sends the original, under its own reason', async () => {
+  const w = makeDebugWorld(down(NOT_SET_UP), realCatalogGlobals(NON_AI_PAGE));
+  for (const url of [OPEN_WEB_URL, GOOGLE_LOGIN_URL]) {
+    await w.sandbox.fetch(url, { method: 'POST', body: 'user=a&pass=b' });
+  }
+  assert.equal(w.netCalls.length, 2, 'both logins went out');
+  const line = assertReason(w.logs, 'locke-unreachable-unclassified', 'debug');
+  assert.match(line, /\bcode=locke-not-set-up\b/);
+  assert.match(line, /\bbecause=locke-not-set-up-not-ai\b/);
+});
+
+test('locke-not-set-up: AI hosts, AI pages and uploads still block, and the copy says where to get the app', async () => {
+  {
+    const w = makeWorld(down(NOT_SET_UP), CHATGPT_PATHS);
+    await assert.rejects(w.sandbox.fetch(CAPTURE_PATH_URL, { method: 'POST', body: '{"prompt":"x"}' }),
+      (e) => blockedError(e) && NOT_SET_UP_COPY.test(e.message));
+    await assert.rejects(w.sandbox.fetch(CATALOG_HOST_URL, { method: 'POST', body: '{}' }), blockedError);
+    assert.equal(w.netCalls.length, 0);
+  }
+  {
+    const { outcome } = await fetchOutcome(NOT_SET_UP, realCatalogGlobals(NON_AI_PAGE), 'https://api.openai.com/v1/chat/completions');
+    assert.equal(outcome, 'BLOCKED', 'a catalog API host never passes');
+  }
+  {
+    const { outcome } = await fetchOutcome(NOT_SET_UP, realCatalogGlobals('https://chatgpt.com/'), OPEN_WEB_URL);
+    assert.equal(outcome, 'BLOCKED', 'an AI page never passes');
+  }
+  {
+    const { outcome } = await fetchOutcome(NOT_SET_UP, realCatalogGlobals(NON_AI_PAGE), 'http://127.0.0.1:11434/api/chat');
+    assert.equal(outcome, 'BLOCKED', 'a local model never passes');
+  }
+  {
+    const form = () => s3PolicyForm(new Blob(['Jane Roe, SSN 078-05-1120'], { type: 'text/plain' }));
+    const w = makeWorld(down(NOT_SET_UP));
+    await assert.rejects(w.sandbox.fetch(S3_POST, { method: 'POST', body: form() }), blockedError);
+    assert.equal(w.netCalls.length, 0);
+  }
+});
+
+test('locke-not-set-up: the code is in the evidence lists and plain no-bridge still blocks open_web', async () => {
+  assert.ok(RELAY_FAILURES_PROVING_NO_SCREEN.includes(NOT_SET_UP));
+  const { outcome } = await fetchOutcome('no-bridge', realCatalogGlobals(NON_AI_PAGE), OPEN_WEB_URL);
+  assert.equal(outcome, 'BLOCKED');
 });
 
 test('catalog API hosts block from a non-AI page, both codes (reviewer finding 1)', async () => {

@@ -124,6 +124,7 @@ import {
 export const RELAY_FAILURES_PROVING_NO_SCREEN = Object.freeze([
   'bridge-unreachable', // the host could not reach the desktop app
   'locke-signed-out',   // ...and the user had signed out of it on purpose
+  'locke-not-set-up',   // this browser has never reached the desktop app
   'screening-timeout'   // the host's own deadline expired with no verdict
 ]);
 
