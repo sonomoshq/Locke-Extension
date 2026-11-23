@@ -245,7 +245,98 @@ test('service-worker: a host that never answers fails the send closed at the nat
   assert.equal((await deliver(captureMsg, TRUSTED)).ok, true, 'next request recovers');
 });
 
+test('service-worker: a missing host on a profile that never reached Locke reads locke-not-set-up', async () => {
+  // A fresh store install with no desktop app: nothing was ever screening, so
+  // the shim may let non-AI traffic through (content/shim.js
+  // UNREACHABLE_RELAY_CODES). Every other case keeps `no-bridge`.
+  const saved = store.local.everConnectedToLocke;
+  const missing = () => { throw new Error('Specified native messaging host not found.'); };
+  try {
+    delete store.local.everConnectedToLocke;
+    nativeHandler = missing;
+    assert.equal((await deliver(captureMsg, TRUSTED)).code, 'locke-not-set-up', 'never connected');
+
+    // A host that started and then exited or disconnected may have crashed
+    // mid-screen: that is not "not set up", so it stays fail-closed.
+    for (const msg of ['Native host has exited.', 'Native host disconnected.', 'Failed to start native messaging host.']) {
+      nativeHandler = () => { throw new Error(msg); };
+      assert.equal((await deliver(captureMsg, TRUSTED)).code, 'no-bridge', msg);
+    }
+    nativeHandler = missing;
+
+    store.local.everConnectedToLocke = true;
+    assert.equal((await deliver(captureMsg, TRUSTED)).code, 'no-bridge', 'paired once: fail closed as before');
+
+    // IT installed it or pushed policy: fail closed from the first request.
+    delete store.local.everConnectedToLocke;
+    const managedGet = chrome.storage.managed.get;
+    chrome.storage.managed.get = async () => ({ debugLogging: false });
+    try {
+      assert.equal((await deliver(captureMsg, TRUSTED)).code, 'no-bridge', 'policy present');
+    } finally { chrome.storage.managed.get = managedGet; }
+    chrome.management = { getSelf: async () => ({ installType: 'admin' }) };
+    try {
+      assert.equal((await deliver(captureMsg, TRUSTED)).code, 'no-bridge', 'admin install');
+    } finally { delete chrome.management; }
+    chrome.management = { getSelf: async () => { throw new Error('unavailable'); } };
+    try {
+      assert.equal((await deliver(captureMsg, TRUSTED)).code, 'no-bridge', 'unknown install type counts as managed');
+    } finally { delete chrome.management; }
+
+    // A live host that failed is never "not set up", paired or not.
+    nativeHandler = () => { throw new Error('Error when communicating with the native messaging host.'); };
+    assert.equal((await deliver(captureMsg, TRUSTED)).code, 'bridge-error');
+  } finally {
+    if (saved === undefined) delete store.local.everConnectedToLocke;
+    else store.local.everConnectedToLocke = saved;
+  }
+});
+
+test('service-worker: a receipt marks this profile as paired', async () => {
+  const saved = store.local.everConnectedToLocke;
+  try {
+    delete store.local.everConnectedToLocke;
+    nativeHandler = () => ({ type: 'receipt', receipt: { decision: 'allow' } });
+    await deliver(captureMsg, TRUSTED);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(store.local.everConnectedToLocke, true);
+  } finally {
+    if (saved === undefined) delete store.local.everConnectedToLocke;
+    else store.local.everConnectedToLocke = saved;
+  }
+});
+
+test('service-worker: an update keeps an existing install fail-closed', async () => {
+  const saved = store.local.everConnectedToLocke;
+  try {
+    delete store.local.everConnectedToLocke;
+    await registered.installed({ reason: 'update' }).catch(() => {});
+    assert.equal(store.local.everConnectedToLocke, true);
+  } finally {
+    if (saved === undefined) delete store.local.everConnectedToLocke;
+    else store.local.everConnectedToLocke = saved;
+  }
+});
+
+test('service-worker: a fresh install that never reached Locke stays "not set up" across updates', async () => {
+  const saved = store.local.everConnectedToLocke;
+  try {
+    delete store.local.everConnectedToLocke;
+    await registered.installed({ reason: 'install' }).catch(() => {});
+    assert.equal(store.local.everConnectedToLocke, false, 'install records never-connected');
+    await registered.installed({ reason: 'update' }).catch(() => {});
+    assert.equal(store.local.everConnectedToLocke, false, 'a later update keeps it');
+    nativeHandler = () => { throw new Error('Specified native messaging host not found.'); };
+    assert.equal((await deliver(captureMsg, TRUSTED)).code, 'locke-not-set-up');
+  } finally {
+    if (saved === undefined) delete store.local.everConnectedToLocke;
+    else store.local.everConnectedToLocke = saved;
+  }
+});
+
 test('service-worker: a missing native host is told apart from a broken one', async () => {
+  // Paired before: a missing host is an outage, not a fresh install.
+  store.local.everConnectedToLocke = true;
   // These get opposite advice from the shim — "start the desktop app" versus
   // "try again" — so the classification is the whole message the user reads.
   const missing = [

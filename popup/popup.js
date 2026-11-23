@@ -8,7 +8,8 @@ const el = {
   statusBadge: document.getElementById('statusBadge'),
   screeningValue: document.getElementById('screeningValue'),
   statusDetail: document.getElementById('statusDetail'),
-  screeningNote: document.getElementById('screeningNote')
+  screeningNote: document.getElementById('screeningNote'),
+  getAppLink: document.getElementById('getAppLink')
 };
 
 // All wording lives in copy.js, which is pure and pinned by test — the popup
@@ -24,6 +25,7 @@ function render(state) {
   el.statusDetail.textContent = copy.detail;
   el.screeningNote.textContent = copy.note ?? '';
   el.screeningNote.hidden = copy.note === null;
+  if (el.getAppLink) el.getAppLink.hidden = copy.getApp !== true;
 }
 
 let pendingCheck = null;

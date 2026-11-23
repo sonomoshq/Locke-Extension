@@ -384,6 +384,17 @@ export function copyFor(state) {
     detail: 'Locke needs your permission to send request data to the local desktop app. Open Data sharing below to choose. Requests Locke normally screens are held back; to browse without Locke, uninstall or disable it and reload affected tabs.',
     note: null
   };
+  // A fresh install with no desktop app behind it. The connector "didn't
+  // start" because there is nothing to start; say what is missing and link to
+  // it (popup.js shows the link when `getApp` is set). Ordinary websites are
+  // not held in this state (content/shim.js UNREACHABLE_RELAY_CODES).
+  if (state?.status === STATUS.NO_BRIDGE && state?.notSetUp === true) return {
+    view: 'setup', badge: 'Not set up', screening: SCREENING.UNAVAILABLE,
+    screeningLabel: SCREENING_LABEL[SCREENING.UNAVAILABLE],
+    detail: 'Locke isn’t protecting this browser yet. The extension needs the free Locke desktop app for Windows or Linux, which does the screening on your computer. Until it’s installed and signed in, requests to AI sites are held back; other websites work normally.',
+    note: null,
+    getApp: true
+  };
   const view = viewFor(state);
   const screening = SCREENING_LABEL[state?.screening] ? state.screening : SCREENING.UNCONFIRMED;
   return {

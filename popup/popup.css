@@ -458,3 +458,12 @@ html.theme-dark .popup-disclaimer { color: #666; }
 html.theme-dark .switch-track {
   background: #555;
 }
+
+/* The one call to action the popup ever shows: only when this browser has
+   never reached the desktop app (copy.js `getApp`). */
+.get-app-link {
+  display: inline-block;
+  margin-top: 8px;
+  font-weight: 600;
+}
+.get-app-link[hidden] { display: none; }

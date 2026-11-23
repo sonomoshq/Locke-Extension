@@ -187,6 +187,18 @@ export const DISABLED_WEB_HOSTS_KEY = 'disabledWebHosts';
 // never asks the user. Active only while `failOpen && Date.now() < untilMs`;
 // absent / never probed / expired all mean CLOSED (block, as always).
 export const FAIL_OPEN_KEY = 'failOpenWindow';
+
+// Set in storage.local the first time this browser profile reaches the Locke
+// desktop app (a health check that answers connected or warming, or a real
+// screening receipt). Never cleared by the extension. Until it is set, a
+// `no-bridge` relay failure is reported as LOCKE_NOT_SET_UP instead: the app
+// has never been installed or paired here, so there is nothing that crashed
+// mid-screen, and the shim may let ordinary non-AI traffic through on the
+// same narrow rule it uses for `locke-signed-out`. AI hosts still block.
+export const EVER_CONNECTED_KEY = 'everConnectedToLocke';
+export const LOCKE_NOT_SET_UP = 'locke-not-set-up';
+// Where someone without the desktop app gets it. Fixed, never derived.
+export const LOCKE_DOWNLOAD_URL = 'https://sonomos.ai/downloads/';
 // Matches the cap the host and the desktop writer both apply.
 export const MAX_DISABLED_WEB_HOSTS = 64;
 

@@ -75,6 +75,19 @@ export function classifyLastErrorDetail(message) {
   return 'other';
 }
 
+// True only when the browser says no host is registered at all: the shape a
+// browser without the Locke desktop app produces. An exit or disconnect means a
+// host started (and may have crashed mid-screen), and "failed to start" could
+// be either, so neither counts: they must stay fail-closed.
+const HOST_MISSING_PATTERNS = [
+  /specified native messaging host not found/i,
+  /no such native application/i
+];
+
+export function isHostMissing(message) {
+  return !!message && HOST_MISSING_PATTERNS.some(p => p.test(message));
+}
+
 export function classifyLastError(message) {
   return classifyLastErrorDetail(message) === 'other' ? 'bridge-error' : 'no-bridge';
 }
@@ -189,6 +202,9 @@ export async function checkHealth({ settings, applied } = {}) {
       // 'not-found' (nothing registered). Diagnostic only — the service
       // worker's registration request fires on either.
       noBridgeKind: noBridge ? classifyLastErrorDetail(err?.message) : null,
+      // Nothing registered at all (not an exit or a refusal): the only
+      // failure that may count as "the desktop app is not set up here".
+      hostMissing: noBridge && isHostMissing(err?.message),
       httpStatus: null,
       body: null,
       // No reply at all ⇒ no live probe evidence either — never guessed.
