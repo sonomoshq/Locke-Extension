@@ -318,6 +318,22 @@ test('service-worker: an update keeps an existing install fail-closed', async ()
   }
 });
 
+test('service-worker: a fresh install that never reached Locke stays "not set up" across updates', async () => {
+  const saved = store.local.everConnectedToLocke;
+  try {
+    delete store.local.everConnectedToLocke;
+    await registered.installed({ reason: 'install' }).catch(() => {});
+    assert.equal(store.local.everConnectedToLocke, false, 'install records never-connected');
+    await registered.installed({ reason: 'update' }).catch(() => {});
+    assert.equal(store.local.everConnectedToLocke, false, 'a later update keeps it');
+    nativeHandler = () => { throw new Error('Specified native messaging host not found.'); };
+    assert.equal((await deliver(captureMsg, TRUSTED)).code, 'locke-not-set-up');
+  } finally {
+    if (saved === undefined) delete store.local.everConnectedToLocke;
+    else store.local.everConnectedToLocke = saved;
+  }
+});
+
 test('service-worker: a missing native host is told apart from a broken one', async () => {
   // Paired before: a missing host is an outage, not a fresh install.
   store.local.everConnectedToLocke = true;

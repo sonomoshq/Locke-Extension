@@ -1067,11 +1067,22 @@ async function ensureHealthAlarm() {
 }
 ensureHealthAlarm();
 
+// A fresh install records "never connected" (false); an update finding no
+// record at all is an install from before EVER_CONNECTED_KEY existed, and is
+// treated as paired so it stays fail-closed. An update that finds a record
+// keeps it, so an install that has never reached Locke stays "not set up"
+// across later updates.
+async function settlePairingOnInstall(reason) {
+  try {
+    const got = await ext.storage.local.get(EVER_CONNECTED_KEY);
+    if (got?.[EVER_CONNECTED_KEY] !== undefined) return;
+    if (reason === 'install') await ext.storage.local.set({ [EVER_CONNECTED_KEY]: false });
+    else if (reason === 'update') await ext.storage.local.set({ [EVER_CONNECTED_KEY]: true });
+  } catch { /* everConnected() treats an unreadable store as paired */ }
+}
+
 ext.runtime.onInstalled.addListener(async (details) => {
-  // An update keeps the posture the install already had: every install that
-  // predates EVER_CONNECTED_KEY is treated as paired, so it stays fail-closed.
-  // Only a fresh install starts out "not set up".
-  if (details?.reason === 'update') await markEverConnected();
+  await settlePairingOnInstall(details?.reason);
   await showDataConsentIfNeeded().catch(() => {});
   await setState(initialState());
   await applyBadge(STATUS.UNKNOWN);
