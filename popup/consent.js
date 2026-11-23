@@ -18,7 +18,7 @@ function lock(value) {
   if (current?.unavailable) allow.disabled = true;
 }
 
-const PAUSED = 'Data sharing is paused. Requests Locke normally screens are held back. To browse without Locke, uninstall or disable it in your browser’s extension settings, then reload affected tabs.';
+const PAUSED = 'Data sharing is paused. If this browser has connected to the Locke desktop app before, requests Locke normally screens are held back; if it never has, nothing is held. To browse without Locke, uninstall or disable it in your browser’s extension settings, then reload affected tabs.';
 async function refresh() {
   const sequence = ++refreshSequence;
   let consent;

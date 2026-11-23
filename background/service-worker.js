@@ -153,7 +153,34 @@ async function storeNotSetUp(value) {
 async function recordNotSetUp(value) {
   await storeNotSetUp(value);
   await setActionTitle(value);
+  await maybeShowNotConnectedTab(value === true);
   return value === true;
+}
+
+// The one-time "Locke isn't connected yet" tab (popup/welcome.html). Armed by
+// onInstalled on a FRESH install, on browsers with no data-sharing page
+// (Firefox and Edge open that page instead, and it carries the same link).
+// The first answer about set-up decides it and disarms it, whichever way it
+// goes: not set up → the tab opens; Locke already there, or an IT-managed
+// install → nothing opens. So it can only ever appear once per install. The
+// in-memory promise stops a capture and a health check racing to open two.
+// WELCOME_DONE_KEY is permanent: once the decision is made it is never armed
+// again, even if the browser fires `install` again (Chromium does, on every
+// launch, for an extension loaded with --load-extension).
+const WELCOME_PENDING_KEY = 'notConnectedTabPending';
+const WELCOME_DONE_KEY = 'notConnectedTabDecided';
+let welcomeDecision = null;
+function maybeShowNotConnectedTab(notSetUp) {
+  welcomeDecision ??= (async () => {
+    try {
+      const got = await ext.storage.local.get(WELCOME_PENDING_KEY);
+      if (got?.[WELCOME_PENDING_KEY] !== true) return;
+      await ext.storage.local.remove(WELCOME_PENDING_KEY);
+      await ext.storage.local.set({ [WELCOME_DONE_KEY]: true });
+      if (notSetUp) await ext.tabs.create({ url: ext.runtime.getURL('popup/welcome.html'), active: true });
+    } catch { /* cosmetic: the popup and toolbar still say it */ }
+  })();
+  return welcomeDecision;
 }
 
 // The toolbar tooltip. While Locke is not set up it says so in words, so the
@@ -1131,6 +1158,15 @@ async function settlePairingOnInstall(reason) {
 
 ext.runtime.onInstalled.addListener(async (details) => {
   await settlePairingOnInstall(details?.reason);
+  if (details?.reason === 'install' && !requiresDataConsent()) {
+    try {
+      const done = (await ext.storage.local.get(WELCOME_DONE_KEY))?.[WELCOME_DONE_KEY] === true;
+      if (!done) {
+        await ext.storage.local.set({ [WELCOME_PENDING_KEY]: true });
+        welcomeDecision = null;
+      }
+    } catch { /* no tab, no harm */ }
+  }
   await showDataConsentIfNeeded().catch(() => {});
   await setState(initialState());
   await applyBadge(STATUS.UNKNOWN);

@@ -327,6 +327,77 @@ test('service-worker: lockeNotSetUp is raised while never paired, and cleared th
   }
 });
 
+test('service-worker: a fresh install with no app opens the "not connected" tab exactly once', async () => {
+  const keys = ['everConnectedToLocke', 'lockeNotSetUp', 'notConnectedTabPending', 'notConnectedTabDecided'];
+  const saved = Object.fromEntries(keys.map((k) => [k, store.local[k]]));
+  const savedTabs = chrome.tabs;
+  const opened = [];
+  chrome.tabs = { create: async ({ url }) => { opened.push(url); return {}; } };
+  const savedGetURL = chrome.runtime.getURL;
+  chrome.runtime.getURL = (path) => `chrome-extension://locke-extension-id/${path}`;
+  const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r)); };
+  try {
+    for (const k of keys) delete store.local[k];
+    nativeHandler = () => { throw new Error('Specified native messaging host not found.'); };
+    await registered.installed({ reason: 'install' }).catch(() => {});
+    await settle();
+    await deliver(captureMsg, TRUSTED);
+    await deliver(captureMsg, TRUSTED);
+    await deliver({ type: 'requestCheck' }, TRUSTED);
+    await settle();
+    assert.equal(opened.length, 1, 'one tab, however many checks and captures');
+    assert.match(opened[0], /popup\/welcome\.html$/);
+    assert.equal(store.local.notConnectedTabPending, undefined, 'disarmed');
+
+    // A repeated `install` event (Chromium fires one per launch for an
+    // unpacked extension) never re-opens it.
+    await registered.installed({ reason: 'install' }).catch(() => {});
+    await settle();
+    await deliver(captureMsg, TRUSTED);
+    await settle();
+    assert.equal(opened.length, 1, 'no second tab on a repeated install event');
+
+    // An update never opens it.
+    await registered.installed({ reason: 'update' }).catch(() => {});
+    await settle();
+    await deliver(captureMsg, TRUSTED);
+    await settle();
+    assert.equal(opened.length, 1, 'no tab on update');
+
+    // Fresh install where the app is already there: disarmed, nothing opens.
+    for (const k of keys) delete store.local[k];
+    nativeHandler = () => ({ type: 'receipt', receipt: { decision: 'allow' } });
+    await registered.installed({ reason: 'install' }).catch(() => {});
+    await settle();
+    await deliver(captureMsg, TRUSTED);
+    await settle();
+    nativeHandler = () => { throw new Error('Specified native messaging host not found.'); };
+    await deliver(captureMsg, TRUSTED);
+    await settle();
+    assert.equal(opened.length, 1, 'app present at install: no tab, even after it later goes missing');
+
+    // IT-managed install with no app: nothing opens.
+    for (const k of keys) delete store.local[k];
+    const managedGet = chrome.storage.managed.get;
+    chrome.storage.managed.get = async () => ({ debugLogging: false });
+    try {
+      await registered.installed({ reason: 'install' }).catch(() => {});
+      await settle();
+      await deliver(captureMsg, TRUSTED);
+      await settle();
+    } finally { chrome.storage.managed.get = managedGet; }
+    assert.equal(opened.length, 1, 'no tab on a managed install');
+  } finally {
+    chrome.tabs = savedTabs;
+    if (savedGetURL === undefined) delete chrome.runtime.getURL;
+    else chrome.runtime.getURL = savedGetURL;
+    for (const k of keys) {
+      if (saved[k] === undefined) delete store.local[k];
+      else store.local[k] = saved[k];
+    }
+  }
+});
+
 test('service-worker: a receipt marks this profile as paired', async () => {
   const saved = store.local.everConnectedToLocke;
   try {

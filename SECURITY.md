@@ -25,6 +25,15 @@ Locke desktop app for screening, and applies the verdict it gets back.
 Detection and redaction happen in the desktop app, never in the extension.
 `docs/architecture/DATA-FLOW.md` draws the whole path.
 
+**Not set up means not screening (2.1.0).** Everything below describes an
+extension that has reached the desktop app at least once. Before that, on an
+install IT did not push, the extension holds and screens **nothing**, AI
+traffic included, and says so in the popup, the toolbar and a one-time page
+(`HONEST.md`, "Before the desktop app has ever been seen"). This is a product
+decision, recorded as `RISK-REGISTER.md` R-21. Admin- and policy-managed
+installs, and installs updated from 2.0.4 or earlier, are never in that
+state.
+
 **Corrected 2026-08-21.** A1, A2, A3, A4 and A6 below previously described
 a retired architecture — a loopback HTTP daemon reached over an
 authenticated handshake. None of that exists. Worse, the port those
