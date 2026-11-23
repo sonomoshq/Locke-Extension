@@ -281,13 +281,32 @@ for (const dialect of ['chromium', 'firefox']) {
     assert.ok(pushed.length >= 1, 'the shim is pushed its config at document_start');
     assert.deepEqual(
       Object.keys(pushed[0].data.config).sort(),
-      ['allowedProviders', ...(dialect === 'firefox' ? ['dataSharingAllowed'] : []), 'debugLogging', 'enforceTimeoutMs', 'failOpenActive', 'failOpenUntilMs'],
-      'only shim settings and the consent boolean cross; private preferences stay isolated'
+      ['allowedProviders', ...(dialect === 'firefox' ? ['dataSharingAllowed'] : []), 'debugLogging', 'enforceTimeoutMs', 'failOpenActive', 'failOpenUntilMs', 'lockeNotSetUp'],
+      'only shim settings, the consent boolean and the not-set-up boolean cross; private preferences stay isolated'
     );
+    assert.equal(pushed[0].data.config.lockeNotSetUp, false, 'absent flag reads false: screen as usual');
     assert.equal(pushed[0].data.config.enforceTimeoutMs, 9000);
     // The policy is one of the three now, and it crosses with the value an
     // admin (or the user) actually set, not a placeholder.
     assert.deepEqual(pushed[0].data.config.allowedProviders, ['openai']);
+  });
+
+  test(`content-script (${dialect}): the worker's not-set-up flag reaches the shim, and only a real true counts`, async () => {
+    for (const [stored, expected] of [[true, true], [false, false], ['true', false], [1, false]]) {
+      const world = makeWorld({ dialect, local: { lockeNotSetUp: stored } });
+      await settle();
+      const pushed = world.configs();
+      assert.equal(pushed.at(-1).data.config.lockeNotSetUp, expected, `stored ${JSON.stringify(stored)}`);
+    }
+  });
+
+  test(`content-script (${dialect}): any IT policy turns the not-set-up pass-through off (Codex P2)`, async () => {
+    const world = makeWorld({ dialect, local: { lockeNotSetUp: true }, managed: { enforceTimeoutMs: 20000 } });
+    await settle();
+    assert.equal(world.configs().at(-1).data.config.lockeNotSetUp, false);
+    const unmanaged = makeWorld({ dialect, local: { lockeNotSetUp: true }, managed: null });
+    await settle();
+    assert.equal(unmanaged.configs().at(-1).data.config.lockeNotSetUp, true, 'no policy: the worker flag stands');
   });
 
   test(`content-script (${dialect}): an admin policy beats the local value`, async () => {

@@ -15,8 +15,10 @@ input[type="checkbox"] { flex-shrink: 0; width: 20px; height: 20px; margin-top: 
 .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 24px; }
 button { font: inherit; font-weight: 600; padding: 10px 14px; border: 1px solid #486454; border-radius: 6px; background: #fff; color: #204b35; cursor: pointer; }
 button:first-child { background: #176243; color: white; }
+a.button { display: inline-block; font-weight: 600; padding: 10px 14px; border-radius: 6px; background: #176243; color: white; text-decoration: none; }
+ol { padding-left: 1.4em; } li { margin: 6px 0; }
 button:disabled { opacity: .55; cursor: default; }
 :focus-visible { outline: 3px solid #2573c8; outline-offset: 3px; }
 #consentStatus { min-height: 2em; font-weight: 600; }
 @media (max-width: 600px) { main { margin: 0; padding: 24px; border-radius: 0; } h1 { font-size: 26px; } .actions { flex-direction: column; } }
-@media (prefers-color-scheme: dark) { :root { color: #e4eae6; background: #121b16; } main, button { background: #1c2921; color: #e4eae6; } .impact { background: #23392a; } a, .eyebrow { color: #9ed6b2; } button:first-child { background: #276b48; } }
+@media (prefers-color-scheme: dark) { :root { color: #e4eae6; background: #121b16; } main, button { background: #1c2921; color: #e4eae6; } .impact { background: #23392a; } a, .eyebrow { color: #9ed6b2; } button:first-child, a.button { background: #276b48; color: #fff; } }

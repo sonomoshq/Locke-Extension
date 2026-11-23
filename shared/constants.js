@@ -197,6 +197,14 @@ export const FAIL_OPEN_KEY = 'failOpenWindow';
 // same narrow rule it uses for `locke-signed-out`. AI hosts still block.
 export const EVER_CONNECTED_KEY = 'everConnectedToLocke';
 export const LOCKE_NOT_SET_UP = 'locke-not-set-up';
+// Written to storage.local by the service worker: true while this profile has
+// never reached the desktop app, is not IT-managed, and either no native host
+// is registered or (Firefox/Edge) data sharing has not been allowed yet. While
+// it is true the extension screens nothing — every request, AI traffic
+// included, goes out untouched — and the popup says Locke is not connected.
+// Cleared the first time the app is reached. content/content-script.js reads
+// it under the same literal and hands it to the shim as `lockeNotSetUp`.
+export const LOCKE_NOT_SET_UP_KEY = 'lockeNotSetUp';
 // Where someone without the desktop app gets it. Fixed, never derived.
 export const LOCKE_DOWNLOAD_URL = 'https://sonomos.ai/downloads/';
 // Matches the cap the host and the desktop writer both apply.

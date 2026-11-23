@@ -33,13 +33,20 @@
 // never a decision the extension makes; when it is exercised, the verdict says
 // so (`unchecked`) and we say so too.
 //
+// NOT SET UP IS NOT SCREENING AT ALL. While this browser profile has never
+// reached the Locke desktop app and IT did not install the extension, the
+// extension screens nothing: with the worker's `lockeNotSetUp` flag every hook
+// hands the request to the browser untouched, and a `locke-not-set-up` relay
+// answer (a request made before the flag arrived) is sent as
+// `locke-not-set-up-pass` — AI hosts included. The popup says Locke is not
+// connected and links to the app. Once Locke has been reached, this never
+// applies again in this profile; everything below is the posture from then on.
+//
 // THE ONE NARROW EXCEPTION, and it is not a fail-open window: when Locke is
-// DELIBERATELY SIGNED OUT, or has NEVER been set up in this browser, the
-// original request goes out, as `locke-unreachable-unclassified`. The relay
-// codes for that are `locke-signed-out` and `locke-not-set-up`
-// (UNREACHABLE_RELAY_CODES) and nothing else. `locke-not-set-up` comes from the
-// service worker only while this profile has never reached Locke and the
-// install is not managed by IT. `locke-signed-out`: the native host emits it only
+// DELIBERATELY SIGNED OUT, the original request goes out, as
+// `locke-unreachable-unclassified`. The relay code for that is
+// `locke-signed-out` (UNREACHABLE_RELAY_CODES) and nothing else.
+// `locke-signed-out`: the native host emits it only
 // when it could not connect to Locke AND the desktop app's capture lease says
 // the user signed out AND the machine has no team lock. `no-bridge` and
 // `bridge-unreachable` are NOT it: "unreachable" cannot be told from "Locke
@@ -1104,6 +1111,17 @@
     } catch { /* page gone — the send itself is unaffected */ }
   }
   let dataSharingAllowed = !/(?:Firefox|Edg)\//.test(globalThis.navigator?.userAgent || '');
+  // LOCKE NOT SET UP: this browser has never reached the Locke desktop app
+  // (and IT did not install the extension). Until it does, the extension
+  // screens NOTHING — every hook below hands the request to the browser
+  // untouched, AI traffic included — and the popup says Locke is not
+  // connected, with a link to the app. Set only by the worker's
+  // `lockeNotSetUp` flag via the content script; defaults to false, so a
+  // missing or unreadable flag screens as usual. A page can forge this
+  // message, which gains it nothing: it can always reach a pristine fetch
+  // (HONEST.md, "The page↔shim channel is window.postMessage and is
+  // forgeable").
+  let lockeNotSetUp = false;
   let dataConsentGeneration = 0;
 
   // `SONOMOS_DEBUG = true` in this page's devtools console turns the debug
@@ -1306,6 +1324,7 @@
         for (const resolve of pending.values()) resolve({ ok: false, code: 'data-consent-required' });
       }
     }
+    if (typeof config.lockeNotSetUp === 'boolean') lockeNotSetUp = config.lockeNotSetUp;
     if (typeof config.failOpenActive === 'boolean') {
       failOpenFlag = config.failOpenActive;
       failOpenUntilMs = typeof config.failOpenUntilMs === 'number' ? config.failOpenUntilMs : 0;
@@ -2841,14 +2860,10 @@
   //   unscreened AI prompt; the cost of a missing one is a blocked request
   //   with an honest reason.
   //
-  // `locke-not-set-up` is the second, on the same narrow rule. The worker
-  // sends it in place of `no-bridge` only while this browser profile has
-  // NEVER reached Locke (no connected health check, no receipt, ever) and the
-  // install is not admin- or policy-managed. Nothing can have crashed
-  // mid-screen when nothing was ever screening, and without the pass a fresh
-  // store install with no desktop app blocked every login and checkout on the
-  // web. AI hosts, AI pages, uploads and local targets still block.
-  const UNREACHABLE_RELAY_CODES = new Set(['locke-signed-out', 'locke-not-set-up']);
+  // `locke-not-set-up` is NOT on this list: it never reaches this rule.
+  // decide() sends it, whatever the target, before anything else runs — see
+  // "NOT SET UP IS NOT SCREENING AT ALL" at the top of this file.
+  const UNREACHABLE_RELAY_CODES = new Set(['locke-signed-out']);
 
   // Locke being signed out lets a request through only under the whole rule in
   // unreachableMayPass() below (open_web, API list loaded and not an AI API
@@ -3024,6 +3039,18 @@
   function decide(res, coverage, scope, url, releasable = false, bodyless = false) {
     const waitedMs = res.elapsedMs;
     const held = (cause) => ({ action: 'block', reason: FILE_HELD, fields: { waitedMs, cause } });
+    // Locke has never been set up in this browser: nothing screens yet, so
+    // nothing is held — AI hosts, uploads and local targets included. This
+    // covers requests made before the `lockeNotSetUp` flag reached this page;
+    // once it has, the hooks pass requests through without asking at all.
+    if (res.outcome === 'verdict' && res.verdict && res.verdict.ok !== true &&
+        res.verdict.code === 'locke-not-set-up') {
+      return {
+        action: 'send',
+        reason: 'locke-not-set-up-pass',
+        fields: { waitedMs, code: 'locke-not-set-up', because: 'desktop-app-not-installed' }
+      };
+    }
     if (bodyless) releasable = true;
     if (res.outcome === 'timeout' && failOpenActive()) {
       return releasable ? failOpenSend('verdict-timeout', waitedMs) : held('verdict-timeout');
@@ -3164,7 +3191,7 @@
             waitedMs,
             code: clip(v.code),
             coverage,
-            because: v.code === 'locke-not-set-up' ? 'locke-not-set-up-not-ai' : 'locke-signed-out-not-ai'
+            because: 'locke-signed-out-not-ai'
           }
         };
       }
@@ -4372,6 +4399,7 @@
   const origFetch = window.fetch;
   if (typeof origFetch === 'function') {
     window.fetch = async function (input, init) {
+      if (lockeNotSetUp) return origFetch.apply(this, arguments);
       if (!dataSharingAllowed) {
         // Route using metadata only. Do not freeze/clone/serialize the body,
         // and do not inspect out-of-scope content while consent is absent.
@@ -4737,6 +4765,7 @@
       // second screening round trip against the same object, after which
       // whichever verdict landed last would answer for a request it never saw.
       if (s && s.held === true) throw invalidState('send');
+      if (lockeNotSetUp) return origSend.apply(this, arguments);
       // Same two-step scope as the fetch hook, in the same order: the
       // cross-origin object-write test first, ordinary capture for everything
       // it declines. `body` is not consulted here — the bodyless case is
@@ -4979,6 +5008,7 @@
     const origSendBeacon = beaconOwner.sendBeacon;
     try {
       beaconOwner.sendBeacon = function (url, data) {
+        if (lockeNotSetUp) return origSendBeacon.apply(this, arguments);
         const shape = newShape('beacon');
         shape.method = 'POST'; // sendBeacon is always a POST
         let target = null;
@@ -5081,6 +5111,7 @@
   if (origFetchLater) {
     try {
       window.fetchLater = function (input, init) {
+        if (lockeNotSetUp) return origFetchLater.apply(this, arguments);
         const shape = newShape('fetch-later');
         let refuse = null;
         try {
@@ -5361,7 +5392,10 @@
         let url = null;
         try { url = wsHttpUrl(this); } catch { url = null; }
         snap = wsSnapshot(data);
-        if (!dataSharingAllowed) {
+        if (lockeNotSetUp) {
+          // Not set up: nothing to screen. `decision` stays null, so the frame
+          // goes out directly, or behind any frames already queued, in order.
+        } else if (!dataSharingAllowed) {
           // Same as fetch without consent: refuse only where the catalog
           // already says a prompt travels; everything else passes untouched.
           if (snap.size > 0 && (!url ? pageIsAiSurface() : isCapturePathUrl(url))) {

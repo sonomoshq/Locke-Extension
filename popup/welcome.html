@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<!-- Copyright © 2026 Sonomos, Inc. All rights reserved. -->
+<!--
+  Opened once, on a fresh install, when the first health check finds no Locke
+  desktop app and the install is not IT-managed (background/service-worker.js
+  maybeShowNotConnectedTab). Static: no script, no data, nothing sent. Firefox
+  and Edge do not get this tab — their data-sharing page opens on install
+  instead and carries the same link.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Locke Extension · Not connected yet</title>
+  <link rel="stylesheet" href="consent.css">
+</head>
+<body>
+  <main>
+    <p class="eyebrow">LOCKE EXTENSION</p>
+    <h1>Locke isn’t connected yet</h1>
+    <p>Thanks for installing the Locke Extension. It works together with the free <strong>Locke desktop app</strong>, which does the screening on your own computer — nothing is sent to Sonomos.</p>
+    <p class="impact"><strong>Right now, nothing in this browser is being screened.</strong> Until the desktop app is installed, every website — AI sites included — works exactly as it did before, without Locke’s protection.</p>
+
+    <section aria-labelledby="stepsHeading">
+      <h2 id="stepsHeading">Turn Locke on</h2>
+      <ol>
+        <li><a href="https://sonomos.ai/downloads/" target="_blank" rel="noopener noreferrer">Download the Locke desktop app (free, Windows or Linux)</a>.</li>
+        <li>Install it and sign in.</li>
+        <li>That’s it — the extension connects on its own, and screening starts.</li>
+      </ol>
+      <p class="hint">You can check the connection any time from the Locke icon in your browser toolbar. While it shows <strong>!</strong> and the popup says <strong>Not connected</strong>, Locke isn’t screening.</p>
+    </section>
+
+    <div class="actions">
+      <a class="button" href="https://sonomos.ai/downloads/" target="_blank" rel="noopener noreferrer">Get the Locke desktop app</a>
+    </div>
+  </main>
+</body>
+</html>

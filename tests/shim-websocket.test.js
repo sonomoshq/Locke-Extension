@@ -382,3 +382,20 @@ test('an ordinary site\'s socket keeps working: its frames are classified by the
   assert.match(splitCapture(captures[0]).head[0], /^WS-SEND \/\?token=abc HTTP\/1\.1$/);
   assert.equal(ws.closes.length, 0);
 });
+
+test('lockeNotSetUp: a prompt frame goes straight out, unscreened, with nothing relayed', async () => {
+  const pii = GROK.frames[0].frame.replace('the sky is blue', 'my SSN is 123-45-6789');
+  const { WebSocket, captures } = makeWorld(() => block, { config: { lockeNotSetUp: true } });
+  const ws = new WebSocket(GROK_URL);
+  ws.send(pii);
+  assert.deepEqual(ws.wire, [pii], 'sent synchronously, as written');
+  assert.equal(captures.length, 0, 'nothing went to the guard');
+});
+
+test('locke-not-set-up relay answer: a frame sent before the flag arrived is released, in order', async () => {
+  const { WebSocket } = makeWorld(() => ({ ok: false, code: 'locke-not-set-up', message: 'down' }));
+  const ws = new WebSocket(GROK_URL);
+  for (const f of GROK.frames.slice(0, 2)) ws.send(f.frame);
+  await waitFor(() => ws.wire.length === 2);
+  assert.deepEqual(ws.wire, GROK.frames.slice(0, 2).map((f) => f.frame));
+});

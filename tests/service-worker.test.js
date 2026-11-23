@@ -292,6 +292,170 @@ test('service-worker: a missing host on a profile that never reached Locke reads
   }
 });
 
+test('service-worker: lockeNotSetUp is raised while never paired, and cleared the moment Locke is reached', async () => {
+  const saved = store.local.everConnectedToLocke;
+  const savedFlag = store.local.lockeNotSetUp;
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  try {
+    delete store.local.everConnectedToLocke;
+    delete store.local.lockeNotSetUp;
+    nativeHandler = () => { throw new Error('Specified native messaging host not found.'); };
+    assert.equal((await deliver(captureMsg, TRUSTED)).code, 'locke-not-set-up');
+    await settle();
+    assert.equal(store.local.lockeNotSetUp, true, 'pages are told to pass everything through');
+
+    // A paired profile whose host is missing is an outage, not "not set up".
+    store.local.everConnectedToLocke = true;
+    delete store.local.lockeNotSetUp;
+    assert.equal((await deliver(captureMsg, TRUSTED)).code, 'no-bridge');
+    await settle();
+    assert.notEqual(store.local.lockeNotSetUp, true, 'never raised once paired');
+
+    // The app is installed and answers: screening starts on every page.
+    delete store.local.everConnectedToLocke;
+    store.local.lockeNotSetUp = true;
+    nativeHandler = () => ({ type: 'receipt', receipt: { decision: 'allow' } });
+    await deliver(captureMsg, TRUSTED);
+    await settle(); await settle();
+    assert.equal(store.local.lockeNotSetUp, false, 'cleared');
+    assert.equal(store.local.everConnectedToLocke, true);
+  } finally {
+    if (saved === undefined) delete store.local.everConnectedToLocke;
+    else store.local.everConnectedToLocke = saved;
+    if (savedFlag === undefined) delete store.local.lockeNotSetUp;
+    else store.local.lockeNotSetUp = savedFlag;
+  }
+});
+
+test('service-worker: a fresh install with no app opens the "not connected" tab exactly once', async () => {
+  const keys = ['everConnectedToLocke', 'lockeNotSetUp', 'notConnectedTabPending', 'notConnectedTabDecided'];
+  const saved = Object.fromEntries(keys.map((k) => [k, store.local[k]]));
+  const savedTabs = chrome.tabs;
+  const opened = [];
+  chrome.tabs = { create: async ({ url }) => { opened.push(url); return {}; } };
+  const savedGetURL = chrome.runtime.getURL;
+  chrome.runtime.getURL = (path) => `chrome-extension://locke-extension-id/${path}`;
+  const settle = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r)); };
+  try {
+    for (const k of keys) delete store.local[k];
+    nativeHandler = () => { throw new Error('Specified native messaging host not found.'); };
+    await registered.installed({ reason: 'install' }).catch(() => {});
+    await settle();
+    await deliver(captureMsg, TRUSTED);
+    await deliver(captureMsg, TRUSTED);
+    await deliver({ type: 'requestCheck' }, TRUSTED);
+    await settle();
+    assert.equal(opened.length, 1, 'one tab, however many checks and captures');
+    assert.match(opened[0], /popup\/welcome\.html$/);
+    assert.equal(store.local.notConnectedTabPending, undefined, 'disarmed');
+
+    // A repeated `install` event (Chromium fires one per launch for an
+    // unpacked extension) never re-opens it.
+    await registered.installed({ reason: 'install' }).catch(() => {});
+    await settle();
+    await deliver(captureMsg, TRUSTED);
+    await settle();
+    assert.equal(opened.length, 1, 'no second tab on a repeated install event');
+
+    // An update never opens it.
+    await registered.installed({ reason: 'update' }).catch(() => {});
+    await settle();
+    await deliver(captureMsg, TRUSTED);
+    await settle();
+    assert.equal(opened.length, 1, 'no tab on update');
+
+    // Fresh install where the app is already there: disarmed, nothing opens.
+    for (const k of keys) delete store.local[k];
+    nativeHandler = () => ({ type: 'receipt', receipt: { decision: 'allow' } });
+    await registered.installed({ reason: 'install' }).catch(() => {});
+    await settle();
+    await deliver(captureMsg, TRUSTED);
+    await settle();
+    nativeHandler = () => { throw new Error('Specified native messaging host not found.'); };
+    await deliver(captureMsg, TRUSTED);
+    await settle();
+    assert.equal(opened.length, 1, 'app present at install: no tab, even after it later goes missing');
+
+    // IT-managed install with no app: nothing opens.
+    for (const k of keys) delete store.local[k];
+    const managedGet = chrome.storage.managed.get;
+    chrome.storage.managed.get = async () => ({ debugLogging: false });
+    try {
+      await registered.installed({ reason: 'install' }).catch(() => {});
+      await settle();
+      await deliver(captureMsg, TRUSTED);
+      await settle();
+    } finally { chrome.storage.managed.get = managedGet; }
+    assert.equal(opened.length, 1, 'no tab on a managed install');
+  } finally {
+    chrome.tabs = savedTabs;
+    if (savedGetURL === undefined) delete chrome.runtime.getURL;
+    else chrome.runtime.getURL = savedGetURL;
+    for (const k of keys) {
+      if (saved[k] === undefined) delete store.local[k];
+      else store.local[k] = saved[k];
+    }
+  }
+});
+
+test('service-worker: a stale missing-host result cannot re-enable pass-through after Locke is reached (Codex P2)', async () => {
+  const saved = store.local.everConnectedToLocke;
+  const savedFlag = store.local.lockeNotSetUp;
+  const managedGet = chrome.storage.managed.get;
+  const settle = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r)); };
+  try {
+    delete store.local.everConnectedToLocke;
+    store.local.lockeNotSetUp = true;
+    // Hold the managed-install lookup so the missing-host capture stalls
+    // inside noBridgeCode() after it has read "never connected".
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    chrome.storage.managed.get = async () => { await gate; throw new Error('no policy'); };
+    nativeHandler = () => { throw new Error('Specified native messaging host not found.'); };
+    const stale = deliver(captureMsg, TRUSTED);
+    await settle();
+    // Locke comes up and answers a second request while the first is stalled.
+    chrome.storage.managed.get = managedGet;
+    nativeHandler = () => ({ type: 'receipt', receipt: { decision: 'allow' } });
+    await deliver(captureMsg, TRUSTED);
+    await settle();
+    release();
+    await stale;
+    await settle();
+    assert.equal(store.local.everConnectedToLocke, true);
+    assert.notEqual(store.local.lockeNotSetUp, true, 'screening must stay on once Locke has been reached');
+  } finally {
+    chrome.storage.managed.get = managedGet;
+    if (saved === undefined) delete store.local.everConnectedToLocke;
+    else store.local.everConnectedToLocke = saved;
+    if (savedFlag === undefined) delete store.local.lockeNotSetUp;
+    else store.local.lockeNotSetUp = savedFlag;
+  }
+});
+
+test('service-worker: an IT policy arriving clears pass-through at once (Codex P2)', async () => {
+  const savedFlag = store.local.lockeNotSetUp;
+  const managedGet = chrome.storage.managed.get;
+  const settle = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r)); };
+  try {
+    store.local.lockeNotSetUp = true;
+    // A change that is not a policy leaves it alone.
+    registered.storageChanged({ settings: {} }, 'local');
+    await settle();
+    assert.equal(store.local.lockeNotSetUp, true);
+    // Policy pushed: managed from now on, so screening starts without
+    // waiting for the health alarm.
+    chrome.storage.managed.get = async () => ({ debugLogging: false });
+    registered.storageChanged({ debugLogging: { newValue: false } }, 'managed');
+    await settle();
+    assert.equal(store.local.lockeNotSetUp, false);
+  } finally {
+    chrome.storage.managed.get = managedGet;
+    if (savedFlag === undefined) delete store.local.lockeNotSetUp;
+    else store.local.lockeNotSetUp = savedFlag;
+  }
+});
+
 test('service-worker: a receipt marks this profile as paired', async () => {
   const saved = store.local.everConnectedToLocke;
   try {

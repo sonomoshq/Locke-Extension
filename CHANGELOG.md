@@ -8,17 +8,52 @@ strict SemVer.
 
 ## [Unreleased]
 
-**Changed — a fresh install without the desktop app no longer breaks the
-web.** Installed from a store with no Locke desktop app behind it, the
-extension used to hold every request with a body on every site, and its
-error told people to open an app they didn't have. Until this browser
-profile has reached Locke once, and when IT did not install it, non-AI
-requests now pass on the same narrow rule used when Locke is signed out; AI
-traffic still blocks, with a message naming the missing app. The popup reads
-"Not set up" with a link to sonomos.ai/downloads, and the data-sharing page
-links there too. Admin-installed and policy-configured extensions, and every
-install updated from an earlier version, keep the full fail-closed posture.
-See `HONEST.md`.
+## [2.1.0] — 2026-11-23
+
+**Summary.** 2.1.0 makes the extension usable before the Locke desktop app
+is installed, and screens more of what is sent to AI services once it is.
+
+- **Before the desktop app is installed, the extension blocks nothing.**
+  It tells the user it is not connected (toolbar mark, popup, and a
+  one-time page on first install) and links to the free desktop app.
+  Screening turns on once the app is installed.
+- **Google AI Mode is screened.** A prompt typed into Google's search bar in
+  AI Mode is checked on-device before it is sent.
+- **Stricter handling when screening is unavailable.** If the desktop app's
+  user has opened a temporary "fail-open" window, only plain chat messages
+  are let through unchecked; attachments and anything unrecognised are held.
+- **New permissions, both for Google AI Mode only:**
+  `declarativeNetRequestWithHostAccess` and the host permission
+  `https://www.google.com/*` are used solely to redirect the AI Mode search
+  navigation (`/search?…udm=50…`) to the extension's own screening page.
+  Ordinary Google search is untouched. The extension makes no network
+  requests to Google or anywhere else: its pages' content security policy
+  still allows connections only to the local desktop app on 127.0.0.1, and
+  request content goes only to that app, over native messaging.
+
+<!-- store-notes-end -->
+
+**Changed — until the desktop app is installed, the extension stays out of
+the way and says it isn't connected.** Installed from a store with no Locke
+desktop app behind it, the extension used to hold every request with a body
+on every site. Now, until this browser profile has reached Locke once (and
+when IT did not install it), the extension screens nothing: every request,
+AI sites included, goes out untouched, and nothing is sent anywhere. On
+Firefox and Edge this also holds before data sharing has been allowed. The
+popup reads "Not connected" with Screening "Off", says plainly that nothing
+is being screened, and links to sonomos.ai/downloads; the toolbar shows `!`
+and its tooltip says Locke is not connected. As soon as the desktop app is
+reached, screening turns on for good in that profile. Admin-installed and
+policy-configured extensions, and every install updated from an earlier
+version, keep the full fail-closed posture. See `HONEST.md`.
+
+**Added — a one-time "Locke isn't connected yet" page.** On a fresh install,
+when the first check finds no desktop app (and IT did not install the
+extension), a tab opens once explaining that nothing is screened yet and
+linking to the download. It never opens on an update, a managed install, or
+when the app is already there. Firefox and Edge open their data-sharing page
+on install instead, which carries the same link; its text no longer says
+prompts are held back in a browser that has never reached the app.
 
 **Fixed — fail-open is default deny (zh#370).** With the desktop app's
 fail-open window on, a request that could not be screened (the screener timed

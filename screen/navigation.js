@@ -1,5 +1,4 @@
-// Copyright © 2026 Sonomos, Inc.
-// All rights reserved.
+// Copyright © 2026 Sonomos, Inc. All rights reserved.
 
 // The landing page of a screened navigation (background/navigation-screen.js).
 // The original URL rides in the fragment, which never leaves the browser. The

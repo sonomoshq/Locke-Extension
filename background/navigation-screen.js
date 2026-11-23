@@ -1,5 +1,4 @@
-// Copyright © 2026 Sonomos, Inc.
-// All rights reserved.
+// Copyright © 2026 Sonomos, Inc. All rights reserved.
 
 // ── prompts carried by a top-level navigation ─────────────────────────────
 //

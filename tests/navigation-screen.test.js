@@ -1,5 +1,4 @@
-// Copyright © 2026 Sonomos, Inc.
-// All rights reserved.
+// Copyright © 2026 Sonomos, Inc. All rights reserved.
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';

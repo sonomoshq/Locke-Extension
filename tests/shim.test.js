@@ -5488,52 +5488,103 @@ test('locke-signed-out: the copy is honest and the code is in the evidence lists
   assert.match(SHIM_SRC, /'locke-signed-out': \['unavailable',\s*'Locke is signed out, so this request could not be screened/);
   assert.ok(RELAY_FAILURES_PROVING_NO_SCREEN.includes('locke-signed-out'));
   assert.ok(RELAY_FAILURES_PROVING_NO_VERDICT.includes('bridge-dropped'));
-  assert.deepEqual(/const UNREACHABLE_RELAY_CODES = new Set\(\[([^\]]*)\]\)/.exec(SHIM_SRC)[1].trim(), "'locke-signed-out', 'locke-not-set-up'");
+  assert.deepEqual(/const UNREACHABLE_RELAY_CODES = new Set\(\[([^\]]*)\]\)/.exec(SHIM_SRC)[1].trim(), "'locke-signed-out'");
 });
 
 // `locke-not-set-up`: the service worker's code for a browser that has never
-// reached the desktop app (a fresh store install). Same narrow pass as
-// signed-out: logins and checkouts work, AI traffic still blocks, and the
-// block names the missing app.
+// reached the desktop app (a fresh store install, not IT-managed). Nothing is
+// screening yet, so NOTHING is held — AI traffic included. The popup is where
+// the user is told Locke is not connected.
 const NOT_SET_UP = 'locke-not-set-up';
-const NOT_SET_UP_COPY = /Locke isn’t set up in this browser yet.*sonomos\.ai\/downloads/;
 
-test('locke-not-set-up: open_web from a non-AI page sends the original, under its own reason', async () => {
-  const w = makeDebugWorld(down(NOT_SET_UP), realCatalogGlobals(NON_AI_PAGE));
-  for (const url of [OPEN_WEB_URL, GOOGLE_LOGIN_URL]) {
-    await w.sandbox.fetch(url, { method: 'POST', body: 'user=a&pass=b' });
-  }
-  assert.equal(w.netCalls.length, 2, 'both logins went out');
-  const line = assertReason(w.logs, 'locke-unreachable-unclassified', 'debug');
-  assert.match(line, /\bcode=locke-not-set-up\b/);
-  assert.match(line, /\bbecause=locke-not-set-up-not-ai\b/);
-});
-
-test('locke-not-set-up: AI hosts, AI pages and uploads still block, and the copy says where to get the app', async () => {
-  {
-    const w = makeWorld(down(NOT_SET_UP), CHATGPT_PATHS);
-    await assert.rejects(w.sandbox.fetch(CAPTURE_PATH_URL, { method: 'POST', body: '{"prompt":"x"}' }),
-      (e) => blockedError(e) && NOT_SET_UP_COPY.test(e.message));
-    await assert.rejects(w.sandbox.fetch(CATALOG_HOST_URL, { method: 'POST', body: '{}' }), blockedError);
-    assert.equal(w.netCalls.length, 0);
-  }
-  {
-    const { outcome } = await fetchOutcome(NOT_SET_UP, realCatalogGlobals(NON_AI_PAGE), 'https://api.openai.com/v1/chat/completions');
-    assert.equal(outcome, 'BLOCKED', 'a catalog API host never passes');
-  }
-  {
-    const { outcome } = await fetchOutcome(NOT_SET_UP, realCatalogGlobals('https://chatgpt.com/'), OPEN_WEB_URL);
-    assert.equal(outcome, 'BLOCKED', 'an AI page never passes');
-  }
-  {
-    const { outcome } = await fetchOutcome(NOT_SET_UP, realCatalogGlobals(NON_AI_PAGE), 'http://127.0.0.1:11434/api/chat');
-    assert.equal(outcome, 'BLOCKED', 'a local model never passes');
+test('locke-not-set-up: the relay answer sends the original everywhere, AI traffic included', async () => {
+  const cases = [
+    ['open_web from a non-AI page', realCatalogGlobals(NON_AI_PAGE), OPEN_WEB_URL],
+    ['a catalog capture path', realCatalogGlobals('https://chatgpt.com/'), CAPTURE_PATH_URL],
+    ['a catalog API host', realCatalogGlobals(NON_AI_PAGE), 'https://api.openai.com/v1/chat/completions'],
+    ['open_web from an AI page', realCatalogGlobals('https://chatgpt.com/'), OPEN_WEB_URL],
+    ['a local model', realCatalogGlobals(NON_AI_PAGE), 'http://127.0.0.1:11434/api/chat']
+  ];
+  for (const [name, globals, url] of cases) {
+    const { outcome, w } = await fetchOutcome(NOT_SET_UP, globals, url);
+    assert.equal(outcome, 'SENT', name);
+    const line = assertReason(w.logs, 'locke-not-set-up-pass', 'debug');
+    assert.match(line, /\bcode=locke-not-set-up\b/, name);
+    assert.match(line, /\bbecause=desktop-app-not-installed\b/, name);
   }
   {
     const form = () => s3PolicyForm(new Blob(['Jane Roe, SSN 078-05-1120'], { type: 'text/plain' }));
     const w = makeWorld(down(NOT_SET_UP));
-    await assert.rejects(w.sandbox.fetch(S3_POST, { method: 'POST', body: form() }), blockedError);
-    assert.equal(w.netCalls.length, 0);
+    await w.sandbox.fetch(S3_POST, { method: 'POST', body: form() });
+    assert.equal(w.netCalls.length, 1, 'an upload goes out too');
+  }
+});
+
+test('locke-not-set-up: it is not a fail-open send — nothing is tallied as unchecked', async () => {
+  const w = makeWorld(down(NOT_SET_UP), CHATGPT_PATHS);
+  await w.sandbox.fetch(CAPTURE_PATH_URL, { method: 'POST', body: '{"prompt":"x"}' });
+  assert.equal(w.netCalls.length, 1);
+  assert.deepEqual(w.unchecked, []);
+});
+
+test('lockeNotSetUp flag: fetch passes untouched without asking the relay; clearing it resumes screening', async () => {
+  let asked = 0;
+  const w = makeWorld(() => { asked++; return { ok: false, code: 'no-bridge' }; }, CHATGPT_PATHS);
+  w.deliver({ type: 'SONOMOS_CONFIG', config: { lockeNotSetUp: true } });
+  await w.sandbox.fetch(CAPTURE_PATH_URL, { method: 'POST', body: '{"prompt":"my ssn is 078-05-1120"}' });
+  assert.equal(w.netCalls.length, 1, 'sent');
+  assert.equal(asked, 0, 'nothing was relayed for screening');
+
+  // The desktop app is reached: the worker clears the flag and screening is
+  // back on, fail-closed as before.
+  w.deliver({ type: 'SONOMOS_CONFIG', config: { lockeNotSetUp: false } });
+  await assert.rejects(w.sandbox.fetch(CAPTURE_PATH_URL, { method: 'POST', body: '{"prompt":"x"}' }), blockedError);
+  assert.equal(w.netCalls.length, 1);
+  assert.equal(asked, 1);
+});
+
+test('lockeNotSetUp flag: only a real boolean changes it', async () => {
+  const w = makeWorld(down('no-bridge'), CHATGPT_PATHS);
+  for (const v of ['true', 1, null, {}]) {
+    w.deliver({ type: 'SONOMOS_CONFIG', config: { lockeNotSetUp: v } });
+    await assert.rejects(w.sandbox.fetch(CAPTURE_PATH_URL, { method: 'POST', body: '{}' }), blockedError, String(v));
+  }
+  assert.equal(w.netCalls.length, 0);
+});
+
+test('lockeNotSetUp flag: passes even before Firefox/Edge data-sharing consent', async () => {
+  const w = makeWorld(down('no-bridge'), CHATGPT_PATHS);
+  w.deliver({ type: 'SONOMOS_CONFIG', config: { dataSharingAllowed: false } });
+  await assert.rejects(w.sandbox.fetch(CAPTURE_PATH_URL, { method: 'POST', body: '{}' }), blockedError, 'held without consent');
+  w.deliver({ type: 'SONOMOS_CONFIG', config: { dataSharingAllowed: false, lockeNotSetUp: true } });
+  await w.sandbox.fetch(CAPTURE_PATH_URL, { method: 'POST', body: '{}' });
+  assert.equal(w.netCalls.length, 1);
+});
+
+test('lockeNotSetUp flag: XHR (sync too), beacons and fetchLater pass untouched', async () => {
+  {
+    const w = makeXhrWorld(down('no-bridge'));
+    w.deliver({ type: 'SONOMOS_CONFIG', config: { lockeNotSetUp: true } });
+    for (const async of [true, false]) {
+      const xhr = new w.sandbox.XMLHttpRequest();
+      xhr.open('POST', AI_URL, async);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.send('{"prompt":"x"}');
+      assert.deepEqual(xhr.sent, ['{"prompt":"x"}'], `async=${async}`);
+      assert.deepEqual(xhr.setHeaders, [['Content-Type', 'application/json']], `headers kept, async=${async}`);
+    }
+  }
+  {
+    const w = makeBeaconWorld();
+    w.deliver({ type: 'SONOMOS_CONFIG', config: { lockeNotSetUp: true } });
+    assert.equal(w.sandbox.navigator.sendBeacon('https://chat.openai.com/ces/v1/t', '{"prompt":"secret"}'), true);
+    assert.equal(w.beacons.length, 1);
+  }
+  {
+    const w = makeFetchLaterWorld();
+    w.deliver({ type: 'SONOMOS_CONFIG', config: { lockeNotSetUp: true } });
+    w.sandbox.fetchLater(AI_URL, { method: 'POST', body: '{"prompt":"x"}' });
+    assert.equal(w.laterCalls.length, 1);
   }
 });
 
