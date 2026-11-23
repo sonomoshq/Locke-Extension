@@ -8,7 +8,7 @@ import { strict as assert } from 'node:assert';
 // the global, but the module-level import does.
 globalThis.chrome = { runtime: {} };
 
-const { failOpenFromStatus, classify, classifyLastError, classifyLastErrorDetail, disabledWebHostsFromStatus, sanitizeBody, screeningFromStatus } = await import('../shared/health-client.js');
+const { failOpenFromStatus, classify, classifyLastError, classifyLastErrorDetail, isHostMissing, disabledWebHostsFromStatus, sanitizeBody, screeningFromStatus } = await import('../shared/health-client.js');
 const { SCREENING, STATUS } = await import('../shared/constants.js');
 
 // ── classifyLastError ──────────────────────────────────────────────
@@ -286,4 +286,13 @@ test('failOpenFromStatus: only a status frame speaks; absent fields mean closed'
   assert.deepEqual(failOpenFromStatus({ type: 'status' }), { failOpen: false, untilMs: null });
   assert.deepEqual(failOpenFromStatus({ type: 'status', fail_open: true, fail_open_until_ms: 5 }), { failOpen: true, untilMs: 5 });
   assert.deepEqual(failOpenFromStatus({ type: 'status', fail_open: 'yes' }), { failOpen: false, untilMs: null });
+});
+
+test('isHostMissing: only a missing registration, never an exit, disconnect or refusal', () => {
+  assert.equal(isHostMissing('Specified native messaging host not found.'), true);
+  assert.equal(isHostMissing('No such native application com.sonomos.locke'), true);
+  for (const m of ['Native host has exited.', 'Native host disconnected.', 'Failed to start native messaging host.',
+    'Access to the specified native messaging host is forbidden.', '', undefined]) {
+    assert.equal(isHostMissing(m), false, String(m));
+  }
 });

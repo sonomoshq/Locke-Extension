@@ -256,6 +256,14 @@ test('service-worker: a missing host on a profile that never reached Locke reads
     nativeHandler = missing;
     assert.equal((await deliver(captureMsg, TRUSTED)).code, 'locke-not-set-up', 'never connected');
 
+    // A host that started and then exited or disconnected may have crashed
+    // mid-screen: that is not "not set up", so it stays fail-closed.
+    for (const msg of ['Native host has exited.', 'Native host disconnected.', 'Failed to start native messaging host.']) {
+      nativeHandler = () => { throw new Error(msg); };
+      assert.equal((await deliver(captureMsg, TRUSTED)).code, 'no-bridge', msg);
+    }
+    nativeHandler = missing;
+
     store.local.everConnectedToLocke = true;
     assert.equal((await deliver(captureMsg, TRUSTED)).code, 'no-bridge', 'paired once: fail closed as before');
 

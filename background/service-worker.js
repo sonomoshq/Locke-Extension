@@ -3,7 +3,7 @@ import { ext } from '../shared/browser.js';
 import { nativeRequest } from '../shared/native-client.js';
 import { consentIsCurrent, DATA_CONSENT_REQUIRED, isFirefox, requiresDataConsent, onDataConsentChanged, readDataConsent, showDataConsentIfNeeded } from '../shared/data-consent.js';
 import { detectBrowser } from '../shared/browser-info.js';
-import { checkHealth, classifyLastError } from '../shared/health-client.js';
+import { checkHealth, classifyLastError, isHostMissing } from '../shared/health-client.js';
 import { WEB_HOSTS } from '../shared/web-surfaces.generated.js';
 import { installNavigationRules, screenNavigation } from './navigation-screen.js';
 import {
@@ -147,10 +147,13 @@ async function isManagedInstall() {
   } catch { return true; }
 }
 
-// The relay code for a browser that could not start the native host. Until
-// this profile has ever reached Locke, and when IT did not install it, that
-// means "the desktop app is not set up here yet", not "Locke went down".
-async function noBridgeCode() {
+// The relay code for a browser that could not start the native host. Only when
+// the browser says no host is registered at all, this profile has never
+// reached Locke, and IT did not install it, does that mean "the desktop app is
+// not set up here yet". A host that exited or disconnected may have crashed
+// mid-screen, so it stays 'no-bridge' (fail-closed).
+async function noBridgeCode(hostMissing) {
+  if (!hostMissing) return 'no-bridge';
   if (await everConnected()) return 'no-bridge';
   if (await isManagedInstall()) return 'no-bridge';
   return LOCKE_NOT_SET_UP;
@@ -658,7 +661,7 @@ async function performCheck(_reason) {
       // A browser that has never reached Locke, on an install IT didn't push:
       // the popup says the app is missing and links to it, and the shim lets
       // non-AI traffic through (LOCKE_NOT_SET_UP).
-      notSetUp: result.status === STATUS.NO_BRIDGE && (await noBridgeCode()) === LOCKE_NOT_SET_UP,
+      notSetUp: result.status === STATUS.NO_BRIDGE && (await noBridgeCode(result.hostMissing === true)) === LOCKE_NOT_SET_UP,
       // `result.screening` is the host's own live probe answer for THIS check
       // (shared/health-client.js::screeningFromStatus) — 'unavailable', or
       // null. There is deliberately no positive: the probe establishes
@@ -1021,7 +1024,7 @@ async function captureViaHost(requestB64, provider, coverage) {
       // request the health path fires; the internal throttle makes this a
       // no-op when one went out recently.
       void requestHostRegistration();
-      return { ok: false, code: await noBridgeCode(), message: e.message };
+      return { ok: false, code: await noBridgeCode(isHostMissing(detail)), message: e.message };
     }
     relayWarn('native-call-failed', { ms, b64Bytes, detail: clip(detail) });
     noteScreening(evidenceFromRelayFailure('bridge-error'), null);
